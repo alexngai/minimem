@@ -20,7 +20,7 @@
     "dev": "tsup --watch",
     "test": "vitest",
     "test:unit": "vitest run",
-    "test:integration": "node --experimental-strip-types --test src/__tests__/minimem.integration.test.ts",
+    "test:integration": "npx tsx --test --test-force-exit src/__tests__/minimem.integration.test.ts",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
