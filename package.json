@@ -16,11 +16,14 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && npm run postbuild",
+    "postbuild": "sed -i '' 's/from \"sqlite\"/from \"node:sqlite\"/g' dist/cli/index.js",
     "dev": "tsup --watch",
     "test": "vitest",
     "test:unit": "vitest run",
     "test:integration": "npx tsx --test --test-force-exit src/__tests__/minimem.integration.test.ts",
+    "test:cli": "npx tsx --test --test-force-exit src/cli/__tests__/commands.test.ts",
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:cli",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -37,8 +40,12 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "bin": {
+    "minimem": "./dist/cli/index.js"
+  },
   "dependencies": {
     "chokidar": "^4.0.0",
+    "commander": "^12.0.0",
     "sqlite-vec": "^0.1.6"
   },
   "optionalDependencies": {

@@ -11,6 +11,9 @@ export default defineConfig({
       // Integration tests use Node.js native test runner (node:test)
       // Run with: npm run test:integration
       "**/*.integration.test.ts",
+      // CLI tests use Node.js native test runner (node:sqlite not supported in vitest)
+      // Run with: npm run test:cli
+      "**/cli/__tests__/**",
     ],
   },
 });
