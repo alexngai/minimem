@@ -15,16 +15,6 @@ const createMockMinimem = () => {
         snippet: "Test content",
       },
     ]),
-    readLines: vi.fn().mockResolvedValue({
-      content: "Line 1\nLine 2\nLine 3",
-      startLine: 1,
-      endLine: 3,
-    }),
-    readFile: vi.fn().mockResolvedValue("Full file content"),
-    writeFile: vi.fn().mockResolvedValue(undefined),
-    appendFile: vi.fn().mockResolvedValue(undefined),
-    appendToday: vi.fn().mockResolvedValue("memory/2024-01-27.md"),
-    listFiles: vi.fn().mockResolvedValue(["MEMORY.md", "memory/2024-01-27.md"]),
   } as unknown as Minimem;
 };
 
@@ -61,7 +51,7 @@ describe("McpServer", () => {
   });
 
   describe("tools/list", () => {
-    it("returns all memory tools", async () => {
+    it("returns memory_search tool", async () => {
       const response = await server.handleRequest({
         jsonrpc: "2.0",
         id: 2,
@@ -70,15 +60,8 @@ describe("McpServer", () => {
 
       expect(response.error).toBeUndefined();
       const result = response.result as { tools: Array<{ name: string }> };
-      expect(result.tools).toHaveLength(6);
-      expect(result.tools.map((t) => t.name)).toEqual([
-        "memory_search",
-        "memory_get",
-        "memory_write",
-        "memory_append",
-        "memory_log",
-        "memory_list",
-      ]);
+      expect(result.tools).toHaveLength(1);
+      expect(result.tools.map((t) => t.name)).toEqual(["memory_search"]);
     });
 
     it("tools have valid schemas", async () => {
@@ -127,100 +110,10 @@ describe("McpServer", () => {
       expect(result.content[0].text).toContain("memory/test.md");
     });
 
-    it("calls memory_get tool", async () => {
-      const response = await server.handleRequest({
-        jsonrpc: "2.0",
-        id: 5,
-        method: "tools/call",
-        params: {
-          name: "memory_get",
-          arguments: { path: "memory/test.md", from: 1, lines: 3 },
-        },
-      });
-
-      expect(response.error).toBeUndefined();
-      expect(mockMinimem.readLines).toHaveBeenCalledWith("memory/test.md", {
-        from: 1,
-        lines: 3,
-      });
-
-      const result = response.result as { content: Array<{ type: string; text: string }> };
-      expect(result.content[0].text).toContain("Line 1");
-    });
-
-    it("calls memory_write tool", async () => {
-      const response = await server.handleRequest({
-        jsonrpc: "2.0",
-        id: 6,
-        method: "tools/call",
-        params: {
-          name: "memory_write",
-          arguments: { path: "memory/new.md", content: "New content" },
-        },
-      });
-
-      expect(response.error).toBeUndefined();
-      expect(mockMinimem.writeFile).toHaveBeenCalledWith("memory/new.md", "New content");
-
-      const result = response.result as { content: Array<{ type: string; text: string }> };
-      expect(result.content[0].text).toContain("Written to");
-    });
-
-    it("calls memory_append tool", async () => {
-      const response = await server.handleRequest({
-        jsonrpc: "2.0",
-        id: 7,
-        method: "tools/call",
-        params: {
-          name: "memory_append",
-          arguments: { path: "memory/log.md", content: "Appended content" },
-        },
-      });
-
-      expect(response.error).toBeUndefined();
-      expect(mockMinimem.appendFile).toHaveBeenCalledWith("memory/log.md", "Appended content");
-    });
-
-    it("calls memory_log tool", async () => {
-      const response = await server.handleRequest({
-        jsonrpc: "2.0",
-        id: 8,
-        method: "tools/call",
-        params: {
-          name: "memory_log",
-          arguments: { content: "Daily note" },
-        },
-      });
-
-      expect(response.error).toBeUndefined();
-      expect(mockMinimem.appendToday).toHaveBeenCalledWith("Daily note");
-
-      const result = response.result as { content: Array<{ type: string; text: string }> };
-      expect(result.content[0].text).toContain("Logged to");
-    });
-
-    it("calls memory_list tool", async () => {
-      const response = await server.handleRequest({
-        jsonrpc: "2.0",
-        id: 9,
-        method: "tools/call",
-        params: {
-          name: "memory_list",
-          arguments: {},
-        },
-      });
-
-      expect(response.error).toBeUndefined();
-      expect(mockMinimem.listFiles).toHaveBeenCalled();
-
-      const result = response.result as { content: Array<{ type: string; text: string }> };
-      expect(result.content[0].text).toContain("MEMORY.md");
-    });
-
     it("returns error for unknown tool", async () => {
       const response = await server.handleRequest({
         jsonrpc: "2.0",
-        id: 10,
+        id: 5,
         method: "tools/call",
         params: {
           name: "unknown_tool",
@@ -237,7 +130,7 @@ describe("McpServer", () => {
     it("returns error when tool name missing", async () => {
       const response = await server.handleRequest({
         jsonrpc: "2.0",
-        id: 11,
+        id: 6,
         method: "tools/call",
         params: { arguments: {} },
       });
@@ -251,7 +144,7 @@ describe("McpServer", () => {
     it("returns method not found for unknown methods", async () => {
       const response = await server.handleRequest({
         jsonrpc: "2.0",
-        id: 12,
+        id: 7,
         method: "unknown/method",
       });
 
@@ -263,7 +156,7 @@ describe("McpServer", () => {
     it("handles ping method", async () => {
       const response = await server.handleRequest({
         jsonrpc: "2.0",
-        id: 13,
+        id: 8,
         method: "ping",
       });
 

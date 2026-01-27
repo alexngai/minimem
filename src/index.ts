@@ -40,20 +40,10 @@ export {
   MemoryToolExecutor,
   MEMORY_TOOLS,
   MEMORY_SEARCH_TOOL,
-  MEMORY_GET_TOOL,
-  MEMORY_WRITE_TOOL,
-  MEMORY_APPEND_TOOL,
-  MEMORY_LOG_TOOL,
-  MEMORY_LIST_TOOL,
   type ToolDefinition,
   type ToolInputSchema,
   type ToolResult,
   type MemorySearchParams,
-  type MemoryGetParams,
-  type MemoryWriteParams,
-  type MemoryAppendParams,
-  type MemoryLogParams,
-  type MemoryListParams,
 } from "./tools.js";
 
 // MCP Server

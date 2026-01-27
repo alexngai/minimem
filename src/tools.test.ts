@@ -4,25 +4,13 @@ import {
   getToolDefinitions,
   MEMORY_TOOLS,
   MEMORY_SEARCH_TOOL,
-  MEMORY_GET_TOOL,
-  MEMORY_WRITE_TOOL,
-  MEMORY_APPEND_TOOL,
-  MEMORY_LOG_TOOL,
-  MEMORY_LIST_TOOL,
   type ToolDefinition,
 } from "./tools.js";
 
 describe("Tool definitions", () => {
-  it("exports all memory tools", () => {
-    expect(MEMORY_TOOLS).toHaveLength(6);
-    expect(MEMORY_TOOLS.map((t) => t.name)).toEqual([
-      "memory_search",
-      "memory_get",
-      "memory_write",
-      "memory_append",
-      "memory_log",
-      "memory_list",
-    ]);
+  it("exports memory_search tool", () => {
+    expect(MEMORY_TOOLS).toHaveLength(1);
+    expect(MEMORY_TOOLS.map((t) => t.name)).toEqual(["memory_search"]);
   });
 
   it("getToolDefinitions returns all tools", () => {
@@ -44,59 +32,6 @@ describe("memory_search tool", () => {
   it("has description", () => {
     expect(MEMORY_SEARCH_TOOL.description).toBeTruthy();
     expect(MEMORY_SEARCH_TOOL.description.length).toBeGreaterThan(20);
-  });
-});
-
-describe("memory_get tool", () => {
-  it("has correct schema", () => {
-    expect(MEMORY_GET_TOOL.name).toBe("memory_get");
-    expect(MEMORY_GET_TOOL.inputSchema.type).toBe("object");
-    expect(MEMORY_GET_TOOL.inputSchema.required).toContain("path");
-    expect(MEMORY_GET_TOOL.inputSchema.properties.path.type).toBe("string");
-    expect(MEMORY_GET_TOOL.inputSchema.properties.from.type).toBe("number");
-    expect(MEMORY_GET_TOOL.inputSchema.properties.lines.type).toBe("number");
-  });
-});
-
-describe("memory_write tool", () => {
-  it("has correct schema", () => {
-    expect(MEMORY_WRITE_TOOL.name).toBe("memory_write");
-    expect(MEMORY_WRITE_TOOL.inputSchema.type).toBe("object");
-    expect(MEMORY_WRITE_TOOL.inputSchema.required).toContain("path");
-    expect(MEMORY_WRITE_TOOL.inputSchema.required).toContain("content");
-    expect(MEMORY_WRITE_TOOL.inputSchema.properties.path.type).toBe("string");
-    expect(MEMORY_WRITE_TOOL.inputSchema.properties.content.type).toBe("string");
-  });
-});
-
-describe("memory_append tool", () => {
-  it("has correct schema", () => {
-    expect(MEMORY_APPEND_TOOL.name).toBe("memory_append");
-    expect(MEMORY_APPEND_TOOL.inputSchema.type).toBe("object");
-    expect(MEMORY_APPEND_TOOL.inputSchema.required).toContain("path");
-    expect(MEMORY_APPEND_TOOL.inputSchema.required).toContain("content");
-  });
-});
-
-describe("memory_log tool", () => {
-  it("has correct schema", () => {
-    expect(MEMORY_LOG_TOOL.name).toBe("memory_log");
-    expect(MEMORY_LOG_TOOL.inputSchema.type).toBe("object");
-    expect(MEMORY_LOG_TOOL.inputSchema.required).toContain("content");
-    expect(MEMORY_LOG_TOOL.inputSchema.properties.content.type).toBe("string");
-  });
-
-  it("does not require path (auto-generates)", () => {
-    expect(MEMORY_LOG_TOOL.inputSchema.properties.path).toBeUndefined();
-  });
-});
-
-describe("memory_list tool", () => {
-  it("has correct schema", () => {
-    expect(MEMORY_LIST_TOOL.name).toBe("memory_list");
-    expect(MEMORY_LIST_TOOL.inputSchema.type).toBe("object");
-    expect(MEMORY_LIST_TOOL.inputSchema.required).toEqual([]);
-    expect(Object.keys(MEMORY_LIST_TOOL.inputSchema.properties)).toHaveLength(0);
   });
 });
 
