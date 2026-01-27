@@ -10,7 +10,7 @@
  * Agents can use filesystem tools directly for read/write operations.
  */
 
-import type { Minimem } from "./minimem.js";
+import type { Minimem } from "../minimem.js";
 
 /**
  * JSON Schema for tool parameters (MCP/OpenAI/Anthropic compatible)

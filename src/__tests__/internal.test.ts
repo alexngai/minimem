@@ -12,7 +12,7 @@ import {
   isMemoryPath,
   normalizeRelPath,
   truncateUtf16Safe,
-} from "./internal.js";
+} from "../internal.js";
 
 describe("chunkMarkdown", () => {
   it("splits overly long lines into max-sized chunks", () => {

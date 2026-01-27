@@ -1,6 +1,6 @@
 {
   "name": "minimem",
-  "version": "0.1.0",
+  "version": "0.0.2",
   "description": "A lightweight file-based memory system with vector search for AI agents",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,7 @@
     "dev": "tsup --watch",
     "test": "vitest",
     "test:unit": "vitest run",
-    "test:integration": "node --experimental-strip-types --test src/minimem.integration.test.ts",
+    "test:integration": "node --experimental-strip-types --test src/__tests__/minimem.integration.test.ts",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

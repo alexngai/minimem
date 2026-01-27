@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-import { McpServer, createMcpServer, generateMcpConfig } from "./mcp.js";
-import type { Minimem } from "./minimem.js";
+import { McpServer, createMcpServer, generateMcpConfig } from "../mcp.js";
+import type { Minimem } from "../../minimem.js";
 
 // Mock Minimem instance
 const createMockMinimem = () => {

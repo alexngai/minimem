@@ -5,7 +5,7 @@ import {
   MEMORY_TOOLS,
   MEMORY_SEARCH_TOOL,
   type ToolDefinition,
-} from "./tools.js";
+} from "../tools.js";
 
 describe("Tool definitions", () => {
   it("exports memory_search tool", () => {

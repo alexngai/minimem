@@ -14,19 +14,19 @@ import {
   type MemoryFileEntry,
   parseEmbedding,
 } from "./internal.js";
-import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./hybrid.js";
-import { searchKeyword, searchVector } from "./search.js";
-import { ensureMemoryIndexSchema } from "./schema.js";
-import { loadSqliteVecExtension } from "./sqlite-vec.js";
+import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./search/hybrid.js";
+import { searchKeyword, searchVector } from "./search/search.js";
+import { ensureMemoryIndexSchema } from "./db/schema.js";
+import { loadSqliteVecExtension } from "./db/sqlite-vec.js";
 import {
   createEmbeddingProvider,
   type EmbeddingProvider,
   type EmbeddingProviderOptions,
   type OpenAiEmbeddingClient,
   type GeminiEmbeddingClient,
-} from "./embeddings.js";
-import { runOpenAiEmbeddingBatches, type OpenAiBatchRequest, OPENAI_BATCH_ENDPOINT } from "./batch-openai.js";
-import { runGeminiEmbeddingBatches, type GeminiBatchRequest } from "./batch-gemini.js";
+} from "./embeddings/embeddings.js";
+import { runOpenAiEmbeddingBatches, type OpenAiBatchRequest, OPENAI_BATCH_ENDPOINT } from "./embeddings/batch-openai.js";
+import { runGeminiEmbeddingBatches, type GeminiBatchRequest } from "./embeddings/batch-gemini.js";
 
 const META_KEY = "memory_index_meta_v1";
 const SNIPPET_MAX_CHARS = 700;

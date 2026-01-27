@@ -1,5 +1,5 @@
 import type { GeminiEmbeddingClient } from "./embeddings.js";
-import { hashText } from "./internal.js";
+import { hashText } from "../internal.js";
 
 export type GeminiBatchRequest = {
   custom_id: string;

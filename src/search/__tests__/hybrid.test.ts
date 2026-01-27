@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./hybrid.js";
+import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "../hybrid.js";
 
 describe("buildFtsQuery", () => {
   it("tokenizes and AND-joins", () => {

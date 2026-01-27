@@ -11,7 +11,7 @@ export {
   type EmbeddingProviderResult,
   type OpenAiEmbeddingClient,
   type GeminiEmbeddingClient,
-} from "./embeddings.js";
+} from "./embeddings/embeddings.js";
 
 // Utilities
 export {
@@ -27,11 +27,11 @@ export {
 } from "./internal.js";
 
 // Search utilities
-export { buildFtsQuery, bm25RankToScore, mergeHybridResults } from "./hybrid.js";
+export { buildFtsQuery, bm25RankToScore, mergeHybridResults } from "./search/hybrid.js";
 
 // Batch embedding
-export { runOpenAiEmbeddingBatches, type OpenAiBatchRequest } from "./batch-openai.js";
-export { runGeminiEmbeddingBatches, type GeminiBatchRequest } from "./batch-gemini.js";
+export { runOpenAiEmbeddingBatches, type OpenAiBatchRequest } from "./embeddings/batch-openai.js";
+export { runGeminiEmbeddingBatches, type GeminiBatchRequest } from "./embeddings/batch-gemini.js";
 
 // Tools (for LLM integrations)
 export {
@@ -44,7 +44,7 @@ export {
   type ToolInputSchema,
   type ToolResult,
   type MemorySearchParams,
-} from "./tools.js";
+} from "./server/tools.js";
 
 // MCP Server
 export {
@@ -53,4 +53,4 @@ export {
   runMcpServer,
   generateMcpConfig,
   type McpServerConfig,
-} from "./mcp.js";
+} from "./server/mcp.js";

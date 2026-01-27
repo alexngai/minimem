@@ -14,7 +14,7 @@
  */
 
 import * as readline from "node:readline";
-import type { Minimem } from "./minimem.js";
+import type { Minimem } from "../minimem.js";
 import {
   MEMORY_TOOLS,
   type ToolDefinition,

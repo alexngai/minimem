@@ -20,7 +20,7 @@ describe("OpenAI embedding provider", () => {
     const fetchMock = createFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createOpenAiEmbeddingProvider } = await import("./embeddings.js");
+    const { createOpenAiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createOpenAiEmbeddingProvider({
       provider: "openai",
@@ -44,7 +44,7 @@ describe("OpenAI embedding provider", () => {
     const fetchMock = createFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createOpenAiEmbeddingProvider } = await import("./embeddings.js");
+    const { createOpenAiEmbeddingProvider } = await import("../embeddings.js");
 
     await createOpenAiEmbeddingProvider({
       provider: "openai",
@@ -54,7 +54,7 @@ describe("OpenAI embedding provider", () => {
       },
     });
 
-    const result = await import("./embeddings.js").then((m) =>
+    const result = await import("../embeddings.js").then((m) =>
       m.createOpenAiEmbeddingProvider({
         provider: "openai",
         openai: {
@@ -76,7 +76,7 @@ describe("OpenAI embedding provider", () => {
     const fetchMock = createFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createOpenAiEmbeddingProvider } = await import("./embeddings.js");
+    const { createOpenAiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createOpenAiEmbeddingProvider({
       provider: "openai",
@@ -89,7 +89,7 @@ describe("OpenAI embedding provider", () => {
   });
 
   it("throws when no API key available", async () => {
-    const { createOpenAiEmbeddingProvider } = await import("./embeddings.js");
+    const { createOpenAiEmbeddingProvider } = await import("../embeddings.js");
 
     await expect(
       createOpenAiEmbeddingProvider({
@@ -108,7 +108,7 @@ describe("OpenAI embedding provider", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createOpenAiEmbeddingProvider } = await import("./embeddings.js");
+    const { createOpenAiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createOpenAiEmbeddingProvider({
       provider: "openai",
@@ -126,7 +126,7 @@ describe("OpenAI embedding provider", () => {
     const fetchMock = createFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createOpenAiEmbeddingProvider } = await import("./embeddings.js");
+    const { createOpenAiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createOpenAiEmbeddingProvider({
       provider: "openai",
@@ -160,7 +160,7 @@ describe("Gemini embedding provider", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createGeminiEmbeddingProvider } = await import("./embeddings.js");
+    const { createGeminiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createGeminiEmbeddingProvider({
       provider: "gemini",
@@ -188,7 +188,7 @@ describe("Gemini embedding provider", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createGeminiEmbeddingProvider } = await import("./embeddings.js");
+    const { createGeminiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createGeminiEmbeddingProvider({
       provider: "gemini",
@@ -210,7 +210,7 @@ describe("Gemini embedding provider", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createGeminiEmbeddingProvider } = await import("./embeddings.js");
+    const { createGeminiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createGeminiEmbeddingProvider({
       provider: "gemini",
@@ -232,7 +232,7 @@ describe("Gemini embedding provider", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createGeminiEmbeddingProvider } = await import("./embeddings.js");
+    const { createGeminiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createGeminiEmbeddingProvider({
       provider: "gemini",
@@ -254,7 +254,7 @@ describe("Gemini embedding provider", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createGeminiEmbeddingProvider } = await import("./embeddings.js");
+    const { createGeminiEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createGeminiEmbeddingProvider({
       provider: "gemini",
@@ -285,7 +285,7 @@ describe("createEmbeddingProvider auto selection", () => {
     const fetchMock = createFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const { createEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createEmbeddingProvider({
       provider: "auto",
@@ -305,7 +305,7 @@ describe("createEmbeddingProvider auto selection", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const { createEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createEmbeddingProvider({
       provider: "auto",
@@ -316,7 +316,7 @@ describe("createEmbeddingProvider auto selection", () => {
   });
 
   it("throws when no providers available", async () => {
-    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const { createEmbeddingProvider } = await import("../embeddings.js");
 
     await expect(
       createEmbeddingProvider({
@@ -345,7 +345,7 @@ describe("createEmbeddingProvider with fallback", () => {
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const { createEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createEmbeddingProvider({
       provider: "openai",
@@ -358,7 +358,7 @@ describe("createEmbeddingProvider with fallback", () => {
   });
 
   it("throws when fallback is none", async () => {
-    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const { createEmbeddingProvider } = await import("../embeddings.js");
 
     await expect(
       createEmbeddingProvider({
@@ -384,7 +384,7 @@ describe("local embedding provider", () => {
       });
     });
 
-    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const { createEmbeddingProvider } = await import("../embeddings.js");
 
     await expect(
       createEmbeddingProvider({
@@ -406,7 +406,7 @@ describe("local embedding provider", () => {
     const fetchMock = createFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const { createEmbeddingProvider } = await import("../embeddings.js");
 
     const result = await createEmbeddingProvider({
       provider: "local",

@@ -1,5 +1,5 @@
 import type { OpenAiEmbeddingClient } from "./embeddings.js";
-import { hashText } from "./internal.js";
+import { hashText } from "../internal.js";
 
 export type OpenAiBatchRequest = {
   custom_id: string;
