@@ -19,6 +19,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest",
+    "test:unit": "vitest run",
+    "test:integration": "node --experimental-strip-types --test src/minimem.integration.test.ts",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
