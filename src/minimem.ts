@@ -849,6 +849,112 @@ export class Minimem {
     }
   }
 
+  /**
+   * Read specific lines from a memory file
+   */
+  async readLines(
+    relativePath: string,
+    opts?: { from?: number; lines?: number },
+  ): Promise<{ content: string; startLine: number; endLine: number } | null> {
+    const content = await this.readFile(relativePath);
+    if (content === null) return null;
+
+    const allLines = content.split("\n");
+    const from = Math.max(1, opts?.from ?? 1);
+    const lines = opts?.lines ?? allLines.length;
+
+    const startIdx = from - 1;
+    const endIdx = Math.min(startIdx + lines, allLines.length);
+    const selectedLines = allLines.slice(startIdx, endIdx);
+
+    return {
+      content: selectedLines.join("\n"),
+      startLine: from,
+      endLine: startIdx + selectedLines.length,
+    };
+  }
+
+  /**
+   * Write content to a memory file (creates or overwrites)
+   */
+  async writeFile(relativePath: string, content: string): Promise<void> {
+    this.validateMemoryPath(relativePath);
+    const absPath = path.join(this.memoryDir, relativePath);
+    const dir = path.dirname(absPath);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(absPath, content, "utf-8");
+    this.dirty = true;
+    this.debug?.(`memory write: ${relativePath}`);
+  }
+
+  /**
+   * Append content to a memory file (creates if doesn't exist)
+   */
+  async appendFile(relativePath: string, content: string): Promise<void> {
+    this.validateMemoryPath(relativePath);
+    const absPath = path.join(this.memoryDir, relativePath);
+    const dir = path.dirname(absPath);
+    await fs.mkdir(dir, { recursive: true });
+
+    // Ensure newline separation
+    let toAppend = content;
+    try {
+      const existing = await fs.readFile(absPath, "utf-8");
+      if (existing.length > 0 && !existing.endsWith("\n")) {
+        toAppend = "\n" + content;
+      }
+    } catch {
+      // File doesn't exist, will be created
+    }
+
+    await fs.appendFile(absPath, toAppend, "utf-8");
+    this.dirty = true;
+    this.debug?.(`memory append: ${relativePath}`);
+  }
+
+  /**
+   * Append content to today's daily log (memory/YYYY-MM-DD.md)
+   */
+  async appendToday(content: string): Promise<string> {
+    const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+    const relativePath = `memory/${today}.md`;
+    await this.appendFile(relativePath, content);
+    return relativePath;
+  }
+
+  /**
+   * List all memory files
+   */
+  async listFiles(): Promise<string[]> {
+    const files = await listMemoryFiles(this.memoryDir);
+    return files.map((f) => path.relative(this.memoryDir, f).replace(/\\/g, "/"));
+  }
+
+  /**
+   * Validate that a path is within allowed memory locations
+   */
+  private validateMemoryPath(relativePath: string): void {
+    const normalized = relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
+
+    // Allow MEMORY.md at root
+    if (normalized === "MEMORY.md" || normalized === "memory.md") {
+      return;
+    }
+
+    // Allow anything under memory/
+    if (normalized.startsWith("memory/") && normalized.endsWith(".md")) {
+      // Prevent path traversal
+      if (normalized.includes("..")) {
+        throw new Error(`Invalid memory path: ${relativePath} (path traversal not allowed)`);
+      }
+      return;
+    }
+
+    throw new Error(
+      `Invalid memory path: ${relativePath}. Must be MEMORY.md or memory/*.md`,
+    );
+  }
+
   async status(): Promise<{
     memoryDir: string;
     dbPath: string;
