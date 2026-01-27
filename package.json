@@ -1,9 +1,10 @@
 {
   "name": "minimem",
-  "version": "0.0.1",
-  "description": "A lightweight memory management library",
+  "version": "0.0.2",
+  "description": "A lightweight file-based memory system with vector search for AI agents",
+  "type": "module",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
@@ -15,19 +16,43 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && npm run postbuild",
+    "postbuild": "sed -i '' 's/from \"sqlite\"/from \"node:sqlite\"/g' dist/cli/index.js",
     "dev": "tsup --watch",
     "test": "vitest",
+    "test:unit": "vitest run",
+    "test:integration": "npx tsx --test --test-force-exit src/__tests__/minimem.integration.test.ts",
+    "test:cli": "npx tsx --test --test-force-exit src/cli/__tests__/commands.test.ts",
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:cli",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
     "memory",
-    "cache",
-    "storage"
+    "vector-search",
+    "embeddings",
+    "sqlite",
+    "ai-agent",
+    "rag",
+    "semantic-search"
   ],
   "author": "Alex Ngai",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "minimem": "./dist/cli/index.js"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.0",
+    "commander": "^12.0.0",
+    "sqlite-vec": "^0.1.6"
+  },
+  "optionalDependencies": {
+    "node-llama-cpp": "^3.0.0"
+  },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"

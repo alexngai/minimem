@@ -1,0 +1,7 @@
+{
+  "minimem": {
+    "command": "npx",
+    "args": ["minimem", "mcp", "--dir", ".", "--global"],
+    "env": {}
+  }
+}
