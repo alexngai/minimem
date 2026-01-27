@@ -2,8 +2,10 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: ["src/index.ts"],
-  format: ["cjs", "esm"],
+  format: ["esm"],
   dts: true,
   clean: true,
   sourcemap: true,
+  target: "node22",
+  external: ["node-llama-cpp"],
 });

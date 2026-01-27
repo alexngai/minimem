@@ -1,9 +1,10 @@
 {
   "name": "minimem",
-  "version": "0.0.1",
-  "description": "A lightweight memory management library",
+  "version": "0.1.0",
+  "description": "A lightweight file-based memory system with vector search for AI agents",
+  "type": "module",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
@@ -22,12 +23,27 @@
   },
   "keywords": [
     "memory",
-    "cache",
-    "storage"
+    "vector-search",
+    "embeddings",
+    "sqlite",
+    "ai-agent",
+    "rag",
+    "semantic-search"
   ],
   "author": "Alex Ngai",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.0",
+    "sqlite-vec": "^0.1.6"
+  },
+  "optionalDependencies": {
+    "node-llama-cpp": "^3.0.0"
+  },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
