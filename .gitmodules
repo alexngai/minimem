@@ -1,0 +1,3 @@
+[submodule "claudeception-ref"]
+	path = claudeception-ref
+	url = https://github.com/blader/Claudeception.git

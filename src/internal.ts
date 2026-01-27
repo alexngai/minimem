@@ -208,3 +208,38 @@ export function truncateUtf16Safe(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return text.slice(0, maxChars);
 }
+
+/**
+ * Check if a path is a skill path (skills/<name>/SKILL.md)
+ */
+export function isSkillPath(relPath: string): boolean {
+  const normalized = normalizeRelPath(relPath);
+  if (!normalized) return false;
+  return normalized.startsWith("skills/") && normalized.endsWith(".md");
+}
+
+/**
+ * List all skill files in a directory
+ */
+export async function listSkillFiles(baseDir: string): Promise<string[]> {
+  const skillsDir = path.join(baseDir, "skills");
+  const result: string[] = [];
+
+  try {
+    const entries = await fs.readdir(skillsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const skillFile = path.join(skillsDir, entry.name, "SKILL.md");
+      try {
+        await fs.access(skillFile);
+        result.push(skillFile);
+      } catch {
+        // No SKILL.md in this directory
+      }
+    }
+  } catch {
+    // Skills directory doesn't exist
+  }
+
+  return result;
+}

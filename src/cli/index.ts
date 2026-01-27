@@ -13,6 +13,7 @@ import { status } from "./commands/status.js";
 import { append } from "./commands/append.js";
 import { upsert } from "./commands/upsert.js";
 import { mcp } from "./commands/mcp.js";
+import { skillSearch, skillList, skillShow, skillExtract } from "./commands/skill.js";
 
 // Read version from package.json at runtime would require fs
 // For simplicity, hardcode it (update during releases)
@@ -91,6 +92,54 @@ program
   .option("-g, --global", "Include ~/.minimem")
   .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
   .action(mcp);
+
+// minimem skill - Parent command for skill management
+const skill = program
+  .command("skill")
+  .description("Manage skills (Claudeception-style knowledge extraction)");
+
+// minimem skill search <query>
+skill
+  .command("search <query>")
+  .description("Semantic search for relevant skills")
+  .option("-d, --dir <path>", "Memory directory")
+  .option("-g, --global", "Use ~/.minimem")
+  .option("-n, --max <number>", "Maximum results (default: 5)")
+  .option("-s, --min-score <number>", "Minimum score threshold 0-1 (default: 0.4)")
+  .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
+  .option("--json", "Output results as JSON")
+  .action(skillSearch);
+
+// minimem skill list
+skill
+  .command("list")
+  .description("List all skills")
+  .option("-d, --dir <path>", "Memory directory")
+  .option("-g, --global", "Use ~/.minimem")
+  .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
+  .option("--json", "Output as JSON")
+  .action(skillList);
+
+// minimem skill show <name>
+skill
+  .command("show <name>")
+  .description("Show a specific skill")
+  .option("-d, --dir <path>", "Memory directory")
+  .option("-g, --global", "Use ~/.minimem")
+  .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
+  .option("--raw", "Output raw markdown content")
+  .action(skillShow);
+
+// minimem skill extract <name>
+skill
+  .command("extract <name>")
+  .description("Extract a new skill from stdin (pipe YAML/JSON with problem, triggerConditions, solution)")
+  .option("-d, --dir <path>", "Memory directory")
+  .option("-g, --global", "Use ~/.minimem")
+  .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
+  .option("-a, --author <name>", "Author name")
+  .option("-t, --tags <tags>", "Comma-separated tags")
+  .action(skillExtract);
 
 // Parse and run
 program.parse();

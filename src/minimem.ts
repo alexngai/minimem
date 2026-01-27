@@ -10,10 +10,20 @@ import {
   ensureDir,
   hashText,
   listMemoryFiles,
+  listSkillFiles,
   type MemoryChunk,
   type MemoryFileEntry,
   parseEmbedding,
+  cosineSimilarity,
 } from "./internal.js";
+import {
+  parseSkill,
+  generateSkillContent,
+  validateSkillName,
+  type Skill,
+  type SkillExtractionOptions,
+  type SkillSearchResult,
+} from "./skills.js";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./search/hybrid.js";
 import { searchKeyword, searchVector } from "./search/search.js";
 import { ensureMemoryIndexSchema } from "./db/schema.js";
@@ -983,6 +993,241 @@ export class Minimem {
       chunkCount: chunkRow.count,
       cacheCount: cacheRow.count,
     };
+  }
+
+  // ==================== Skill Methods ====================
+
+  /**
+   * Search for skills using semantic matching.
+   * Uses embedding similarity to find relevant skills based on their descriptions.
+   */
+  async searchSkills(
+    query: string,
+    opts?: { maxResults?: number; minScore?: number },
+  ): Promise<SkillSearchResult[]> {
+    const cleaned = query.trim();
+    if (!cleaned) return [];
+
+    const maxResults = opts?.maxResults ?? 5;
+    const minScore = opts?.minScore ?? 0.4;
+
+    // Load all skills
+    const skills = await this.listSkills();
+    if (skills.length === 0) return [];
+
+    // Get query embedding
+    const queryVec = await this.embedQueryWithTimeout(cleaned);
+    if (queryVec.every((v) => v === 0)) {
+      // Fallback to keyword matching if embedding fails
+      return this.searchSkillsByKeyword(skills, cleaned, maxResults, minScore);
+    }
+
+    // Get embeddings for skill descriptions
+    const results: SkillSearchResult[] = [];
+
+    for (const skill of skills) {
+      // Combine description + trigger conditions for better matching
+      const searchText = [
+        skill.description,
+        skill.sections.problem ?? "",
+        skill.sections.triggerConditions ?? "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      if (!searchText.trim()) continue;
+
+      // Get cached embedding or compute new one
+      const hash = hashText(searchText);
+      const cached = this.loadEmbeddingCache([hash]);
+      let embedding: number[];
+
+      if (cached.has(hash)) {
+        embedding = cached.get(hash)!;
+      } else {
+        try {
+          const [emb] = await this.provider.embedBatch([searchText]);
+          embedding = emb ?? [];
+          if (embedding.length > 0) {
+            this.upsertEmbeddingCache(hash, embedding);
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      if (embedding.length === 0) continue;
+
+      const score = cosineSimilarity(queryVec, embedding);
+      if (score >= minScore) {
+        results.push({
+          skill,
+          score,
+          snippet: this.extractSkillSnippet(skill, cleaned),
+        });
+      }
+    }
+
+    // Sort by score descending
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, maxResults);
+  }
+
+  /**
+   * Fallback keyword search for skills
+   */
+  private searchSkillsByKeyword(
+    skills: Skill[],
+    query: string,
+    maxResults: number,
+    minScore: number,
+  ): SkillSearchResult[] {
+    const queryLower = query.toLowerCase();
+    const queryTerms = queryLower.split(/\s+/).filter((t) => t.length > 2);
+
+    const results: SkillSearchResult[] = [];
+
+    for (const skill of skills) {
+      const searchText = [
+        skill.name,
+        skill.description,
+        skill.sections.problem ?? "",
+        skill.sections.triggerConditions ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      // Count matching terms
+      let matches = 0;
+      for (const term of queryTerms) {
+        if (searchText.includes(term)) matches++;
+      }
+
+      const score = queryTerms.length > 0 ? matches / queryTerms.length : 0;
+      if (score >= minScore) {
+        results.push({
+          skill,
+          score,
+          snippet: this.extractSkillSnippet(skill, query),
+        });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, maxResults);
+  }
+
+  /**
+   * Extract a relevant snippet from a skill
+   */
+  private extractSkillSnippet(skill: Skill, query: string): string {
+    // Try to find query terms in trigger conditions first
+    const triggers = skill.sections.triggerConditions ?? "";
+    const problem = skill.sections.problem ?? "";
+    const description = skill.description;
+
+    const queryLower = query.toLowerCase();
+
+    for (const text of [triggers, problem, description]) {
+      if (text.toLowerCase().includes(queryLower.slice(0, 20))) {
+        return text.slice(0, 200).trim() + (text.length > 200 ? "..." : "");
+      }
+    }
+
+    // Default to problem or description
+    const defaultText = problem || description;
+    return defaultText.slice(0, 200).trim() + (defaultText.length > 200 ? "..." : "");
+  }
+
+  /**
+   * List all skills with their metadata
+   */
+  async listSkills(): Promise<Skill[]> {
+    const skillFiles = await listSkillFiles(this.memoryDir);
+    const skills: Skill[] = [];
+
+    for (const absPath of skillFiles) {
+      try {
+        const content = await fs.readFile(absPath, "utf-8");
+        const relativePath = path.relative(this.memoryDir, absPath).replace(/\\/g, "/");
+        const skill = parseSkill(content, relativePath);
+        skills.push(skill);
+      } catch {
+        // Skip invalid skill files
+      }
+    }
+
+    return skills;
+  }
+
+  /**
+   * Get a skill by name
+   */
+  async getSkill(name: string): Promise<Skill | null> {
+    const skillPath = path.join(this.memoryDir, "skills", name, "SKILL.md");
+    try {
+      const content = await fs.readFile(skillPath, "utf-8");
+      const relativePath = `skills/${name}/SKILL.md`;
+      return parseSkill(content, relativePath);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Write a new skill or update an existing one
+   */
+  async writeSkill(options: SkillExtractionOptions): Promise<Skill> {
+    if (!validateSkillName(options.name)) {
+      throw new Error(
+        `Invalid skill name: ${options.name}. Must be kebab-case (e.g., "my-skill-name")`,
+      );
+    }
+
+    const skillDir = path.join(this.memoryDir, "skills", options.name);
+    const skillPath = path.join(skillDir, "SKILL.md");
+
+    // Create directory
+    await fs.mkdir(skillDir, { recursive: true });
+
+    // Generate content
+    const content = generateSkillContent(options);
+
+    // Write file
+    await fs.writeFile(skillPath, content, "utf-8");
+
+    this.debug?.(`skill written: ${options.name}`);
+
+    // Parse and return the skill
+    const relativePath = `skills/${options.name}/SKILL.md`;
+    return parseSkill(content, relativePath);
+  }
+
+  /**
+   * Delete a skill by name
+   */
+  async deleteSkill(name: string): Promise<boolean> {
+    const skillDir = path.join(this.memoryDir, "skills", name);
+    try {
+      await fs.rm(skillDir, { recursive: true, force: true });
+      this.debug?.(`skill deleted: ${name}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if a skill exists
+   */
+  async hasSkill(name: string): Promise<boolean> {
+    const skillPath = path.join(this.memoryDir, "skills", name, "SKILL.md");
+    try {
+      await fs.access(skillPath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   close(): void {

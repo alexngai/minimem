@@ -58,6 +58,16 @@ export type MemorySearchParams = {
 };
 
 /**
+ * Skill search tool parameters
+ */
+export type SkillSearchParams = {
+  query: string;
+  maxResults?: number;
+  minScore?: number;
+  directories?: string[];
+};
+
+/**
  * Search result with source directory
  */
 type SearchResultWithSource = MinimemSearchResult & {
@@ -98,10 +108,45 @@ export const MEMORY_SEARCH_TOOL: ToolDefinition = {
   },
 };
 
+export const SKILL_SEARCH_TOOL: ToolDefinition = {
+  name: "skill_search",
+  description:
+    "Semantically search through extracted skills (Claudeception-style knowledge). " +
+    "Skills are reusable solutions to non-obvious problems, debugging techniques, and workarounds. " +
+    "Use this when facing errors, debugging issues, or needing project-specific knowledge. " +
+    "Returns skills ranked by relevance with their trigger conditions and solutions.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description:
+          "Search query - can be an error message, problem description, or keywords",
+      },
+      maxResults: {
+        type: "number",
+        description: "Maximum number of skills to return (default: 5)",
+      },
+      minScore: {
+        type: "number",
+        description: "Minimum relevance score threshold 0-1 (default: 0.4)",
+      },
+      directories: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Optional: filter to specific memory directories by name/path. " +
+          "If omitted, searches all configured directories.",
+      },
+    },
+    required: ["query"],
+  },
+};
+
 /**
  * All available memory tools
  */
-export const MEMORY_TOOLS: ToolDefinition[] = [MEMORY_SEARCH_TOOL];
+export const MEMORY_TOOLS: ToolDefinition[] = [MEMORY_SEARCH_TOOL, SKILL_SEARCH_TOOL];
 
 /**
  * Get tool definitions for use with LLM APIs
@@ -155,6 +200,8 @@ export class MemoryToolExecutor {
       switch (toolName) {
         case "memory_search":
           return await this.memorySearch(params as MemorySearchParams);
+        case "skill_search":
+          return await this.skillSearch(params as SkillSearchParams);
         default:
           return {
             content: [{ type: "text", text: `Unknown tool: ${toolName}` }],
@@ -240,6 +287,131 @@ export class MemoryToolExecutor {
         const score = (r.score * 100).toFixed(1);
         const source = showSource ? ` [${r.memoryDir}]` : "";
         return `[${i + 1}] ${location}${source} (${score}% match)\n${r.snippet}`;
+      })
+      .join("\n\n");
+
+    const dirSummary =
+      instancesToSearch.length > 1
+        ? `\n\n(Searched ${instancesToSearch.length} directories)`
+        : "";
+
+    return {
+      content: [{ type: "text", text: formatted + dirSummary }],
+    };
+  }
+
+  private async skillSearch(params: SkillSearchParams): Promise<ToolResult> {
+    const maxResults = params.maxResults ?? 5;
+    const minScore = params.minScore;
+
+    // Filter instances by directories param if provided
+    let instancesToSearch = this.instances;
+    if (params.directories && params.directories.length > 0) {
+      const dirFilter = new Set(params.directories.map((d) => d.toLowerCase()));
+      instancesToSearch = this.instances.filter((i) => {
+        const name = (i.name ?? i.memoryDir).toLowerCase();
+        const dir = i.memoryDir.toLowerCase();
+        return (
+          dirFilter.has(name) ||
+          dirFilter.has(dir) ||
+          [...dirFilter].some((f) => dir.includes(f) || name.includes(f))
+        );
+      });
+
+      if (instancesToSearch.length === 0) {
+        const available = this.getDirectories().join(", ");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No matching directories found. Available: ${available}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    // Search skills across all matching instances
+    type SkillResultWithSource = {
+      name: string;
+      description: string;
+      version?: string;
+      path: string;
+      score: number;
+      snippet: string;
+      problem?: string;
+      solution?: string;
+      memoryDir: string;
+    };
+
+    const allResults: SkillResultWithSource[] = [];
+
+    for (const instance of instancesToSearch) {
+      const results = await instance.minimem.searchSkills(params.query, {
+        maxResults: Math.ceil(maxResults * 1.5),
+        minScore,
+      });
+
+      for (const result of results) {
+        allResults.push({
+          name: result.skill.name,
+          description: result.skill.description,
+          version: result.skill.version,
+          path: result.skill.path,
+          score: result.score,
+          snippet: result.snippet,
+          problem: result.skill.sections.problem,
+          solution: result.skill.sections.solution,
+          memoryDir: instance.name ?? instance.memoryDir,
+        });
+      }
+    }
+
+    // Sort by score and limit
+    allResults.sort((a, b) => b.score - a.score);
+    const topResults = allResults.slice(0, maxResults);
+
+    if (topResults.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No matching skills found. Skills are extracted knowledge about debugging techniques, workarounds, and solutions.",
+          },
+        ],
+      };
+    }
+
+    // Format results with more skill-specific information
+    const showSource = instancesToSearch.length > 1;
+    const formatted = topResults
+      .map((r, i) => {
+        const score = (r.score * 100).toFixed(1);
+        const source = showSource ? ` [${r.memoryDir}]` : "";
+        const version = r.version ? ` v${r.version}` : "";
+
+        let output = `[${i + 1}] ${r.name}${version}${source} (${score}% match)`;
+        output += `\n    Path: ${r.path}`;
+
+        if (r.problem) {
+          const problemPreview =
+            r.problem.length > 150
+              ? r.problem.slice(0, 147) + "..."
+              : r.problem;
+          output += `\n    Problem: ${problemPreview.split("\n")[0]}`;
+        }
+
+        if (r.solution) {
+          const solutionPreview =
+            r.solution.length > 200
+              ? r.solution.slice(0, 197) + "..."
+              : r.solution;
+          const firstLine = solutionPreview.split("\n")[0] ?? "";
+          output += `\n    Solution: ${firstLine}`;
+        }
+
+        return output;
       })
       .join("\n\n");
 

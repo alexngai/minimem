@@ -1,6 +1,24 @@
 // Main export
 export { Minimem, type MinimemConfig, type MinimemSearchResult } from "./minimem.js";
 
+// Skills
+export {
+  parseSkill,
+  parseFrontmatter,
+  parseSections,
+  generateSkillContent,
+  validateSkillName,
+  toSkillName,
+  isSkillPath,
+  getSkillsDir,
+  getSkillPath,
+  listSkillFiles,
+  type Skill,
+  type SkillMetadata,
+  type SkillSearchResult,
+  type SkillExtractionOptions,
+} from "./skills.js";
+
 // Embedding providers
 export {
   createEmbeddingProvider,

@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsup && npm run postbuild",
-    "postbuild": "sed -i '' 's/from \"sqlite\"/from \"node:sqlite\"/g' dist/cli/index.js",
+    "postbuild": "node -e \"const f='dist/cli/index.js';require('fs').writeFileSync(f,require('fs').readFileSync(f,'utf8').replace(/from \\\"sqlite\\\"/g,'from \\\"node:sqlite\\\"'))\"",
     "dev": "tsup --watch",
     "test": "vitest",
     "test:unit": "vitest run",

@@ -6,7 +6,7 @@
 
 import * as path from "node:path";
 import * as os from "node:os";
-import { Minimem, type SearchResult } from "../../minimem.js";
+import { Minimem, type MinimemSearchResult } from "../../minimem.js";
 import {
   loadConfig,
   buildMinimemConfig,
@@ -23,7 +23,7 @@ export type SearchOptions = {
   json?: boolean;
 };
 
-type SearchResultWithSource = SearchResult & {
+type SearchResultWithSource = MinimemSearchResult & {
   memoryDir: string;
 };
 
