@@ -87,8 +87,8 @@ program
 program
   .command("mcp")
   .description("Run as MCP server over stdio (for Claude Desktop, Cursor, etc.)")
-  .option("-d, --dir <path>", "Memory directory")
-  .option("-g, --global", "Use ~/.minimem")
+  .option("-d, --dir <path...>", "Memory directories (can specify multiple)")
+  .option("-g, --global", "Include ~/.minimem")
   .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
   .action(mcp);
 

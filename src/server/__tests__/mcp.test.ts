@@ -100,8 +100,9 @@ describe("McpServer", () => {
       });
 
       expect(response.error).toBeUndefined();
+      // Multi-directory search fetches ceil(maxResults * 1.5) per directory
       expect(mockMinimem.search).toHaveBeenCalledWith("test query", {
-        maxResults: undefined,
+        maxResults: 15, // ceil(10 * 1.5)
         minScore: undefined,
       });
 

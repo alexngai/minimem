@@ -19,6 +19,7 @@ import {
   MEMORY_TOOLS,
   type ToolDefinition,
   type ToolResult,
+  type MemoryInstance,
   MemoryToolExecutor,
 } from "./tools.js";
 
@@ -105,8 +106,8 @@ export class McpServer {
   private executor: MemoryToolExecutor;
   private initialized = false;
 
-  constructor(private minimem: Minimem) {
-    this.executor = new MemoryToolExecutor(minimem);
+  constructor(instances: Minimem | MemoryInstance | MemoryInstance[]) {
+    this.executor = new MemoryToolExecutor(instances);
   }
 
   /**
@@ -220,10 +221,12 @@ class McpError extends Error {
 }
 
 /**
- * Create an MCP server for the given Minimem instance
+ * Create an MCP server for the given Minimem instance(s)
  */
-export function createMcpServer(minimem: Minimem): McpServer {
-  return new McpServer(minimem);
+export function createMcpServer(
+  instances: Minimem | MemoryInstance | MemoryInstance[],
+): McpServer {
+  return new McpServer(instances);
 }
 
 /**

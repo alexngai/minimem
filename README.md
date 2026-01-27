@@ -222,6 +222,30 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
+### Multiple Memory Directories
+
+The MCP server supports searching across multiple memory directories:
+
+```json
+{
+  "mcpServers": {
+    "minimem": {
+      "command": "minimem",
+      "args": ["mcp", "--dir", "/path/to/work", "--dir", "/path/to/personal", "--global"],
+      "env": {
+        "OPENAI_API_KEY": "your-key"
+      }
+    }
+  }
+}
+```
+
+When multiple directories are configured:
+- The `memory_search` tool searches all directories by default
+- Results are merged and ranked by score
+- Each result shows which directory it came from
+- Use the optional `directories` parameter to filter to specific directories
+
 ### Cursor
 
 Add to Cursor's MCP settings:
@@ -253,7 +277,12 @@ The MCP server exposes a `memory_search` tool:
     properties: {
       query: { type: "string", description: "Search query" },
       maxResults: { type: "number", description: "Max results (default: 10)" },
-      minScore: { type: "number", description: "Min score 0-1 (default: 0.3)" }
+      minScore: { type: "number", description: "Min score 0-1 (default: 0.3)" },
+      directories: {
+        type: "array",
+        items: { type: "string" },
+        description: "Filter to specific directories (searches all if omitted)"
+      }
     },
     required: ["query"]
   }

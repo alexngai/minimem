@@ -44,6 +44,7 @@ export {
   type ToolInputSchema,
   type ToolResult,
   type MemorySearchParams,
+  type MemoryInstance,
 } from "./server/tools.js";
 
 // MCP Server
