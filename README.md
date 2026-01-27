@@ -505,6 +505,33 @@ This means:
 - Moving/copying chunks doesn't require re-embedding
 - Switching files with same content is instant
 
+## Claude Code Plugin
+
+A ready-to-use Claude Code plugin is included in the `claude-plugin/` directory.
+
+### Quick Install
+
+```bash
+# Install minimem globally
+npm install -g minimem
+
+# Initialize global memory
+minimem init --global
+
+# Test the plugin
+claude --plugin-dir /path/to/minimem/claude-plugin
+```
+
+### Plugin Features
+
+- **MCP Server**: `memory_search` tool for semantic search
+- **Memory Skill**: Auto-invoked for storing/recalling context
+- **Commands**:
+  - `/minimem:remember <text>` - Store information
+  - `/minimem:recall <query>` - Search memories
+
+See `claude-plugin/README.md` for detailed documentation.
+
 ## Development
 
 ```bash

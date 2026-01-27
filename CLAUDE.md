@@ -175,6 +175,34 @@ Config location for Claude Desktop:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
+## Claude Code Plugin
+
+The `claude-plugin/` directory contains a ready-to-use Claude Code plugin:
+
+```
+claude-plugin/
+├── .claude-plugin/
+│   └── plugin.json      # Plugin manifest
+├── .mcp.json            # MCP server definition (uses npx minimem mcp)
+├── skills/
+│   └── memory/
+│       └── SKILL.md     # Auto-invoked memory skill
+└── commands/
+    ├── remember.md      # /minimem:remember command
+    └── recall.md        # /minimem:recall command
+```
+
+### Testing the Plugin
+
+```bash
+claude --plugin-dir ./claude-plugin
+```
+
+### Plugin Commands
+
+- `/minimem:remember <text>` - Store information in memory
+- `/minimem:recall <query>` - Search for stored memories
+
 ## Code Style
 
 - TypeScript with strict mode
