@@ -2,8 +2,10 @@
  * minimem mcp - Run as MCP server (stdio)
  *
  * Supports multiple memory directories for cross-directory search.
+ * Auto-initializes global ~/.minimem directory as a fallback.
  */
 
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Minimem } from "../../minimem.js";
@@ -14,6 +16,8 @@ import {
   buildMinimemConfig,
   isInitialized,
   formatPath,
+  getDefaultConfig,
+  saveConfig,
 } from "../config.js";
 
 export type McpOptions = {
@@ -25,6 +29,7 @@ export type McpOptions = {
 export async function mcp(options: McpOptions): Promise<void> {
   // Collect all directories
   const directories = resolveDirectories(options);
+  const globalDir = path.join(os.homedir(), ".minimem");
 
   if (directories.length === 0) {
     console.error("Error: No memory directories specified.");
@@ -32,14 +37,32 @@ export async function mcp(options: McpOptions): Promise<void> {
     process.exit(1);
   }
 
+  // Auto-initialize global directory if it will be used
+  const includesGlobal = directories.includes(globalDir);
+  if (includesGlobal && !(await isInitialized(globalDir))) {
+    await ensureGlobalInitialized(globalDir);
+  }
+
   // Validate and create instances for each directory
   const instances: MemoryInstance[] = [];
   const minimemInstances: Minimem[] = [];
 
   for (const memoryDir of directories) {
+    const isGlobal = memoryDir === globalDir;
+
     if (!(await isInitialized(memoryDir))) {
       // Write to stderr so it doesn't interfere with MCP JSON-RPC
       console.error(`Warning: ${formatPath(memoryDir)} is not initialized, skipping.`);
+
+      // If current directory isn't initialized and global isn't already included,
+      // add global as a fallback
+      if (!isGlobal && !includesGlobal) {
+        console.error(`  Using global (~/.minimem) as fallback.`);
+        if (!(await isInitialized(globalDir))) {
+          await ensureGlobalInitialized(globalDir);
+        }
+        directories.push(globalDir);
+      }
       continue;
     }
 
@@ -102,7 +125,7 @@ export async function mcp(options: McpOptions): Promise<void> {
 /**
  * Resolve all directories from options
  */
-function resolveDirectories(options: McpOptions): string[] {
+export function resolveDirectories(options: McpOptions): string[] {
   const dirs: string[] = [];
 
   // Add explicit directories
@@ -131,7 +154,7 @@ function resolveDirectories(options: McpOptions): string[] {
 /**
  * Get a friendly name for a directory
  */
-function getDirName(memoryDir: string): string {
+export function getDirName(memoryDir: string): string {
   const home = os.homedir();
 
   // Check if it's the global directory
@@ -149,4 +172,43 @@ function getDirName(memoryDir: string): string {
   }
 
   return name;
+}
+
+/**
+ * Auto-initialize the global memory directory silently
+ */
+export async function ensureGlobalInitialized(globalDir: string): Promise<void> {
+  console.error(`Auto-initializing global memory directory (~/.minimem)...`);
+
+  // Create directories
+  await fs.mkdir(globalDir, { recursive: true });
+  await fs.mkdir(path.join(globalDir, "memory"), { recursive: true });
+  await fs.mkdir(path.join(globalDir, ".minimem"), { recursive: true });
+
+  // Create MEMORY.md
+  const memoryFilePath = path.join(globalDir, "MEMORY.md");
+  try {
+    await fs.access(memoryFilePath);
+  } catch {
+    const template = `# Global Memory
+
+This is your global memory file. Add notes, decisions, and context here.
+
+Notes stored here are available across all projects.
+
+## Notes
+
+`;
+    await fs.writeFile(memoryFilePath, template, "utf-8");
+  }
+
+  // Create config
+  const config = getDefaultConfig();
+  await saveConfig(globalDir, config);
+
+  // Create .gitignore
+  const gitignorePath = path.join(globalDir, ".minimem", ".gitignore");
+  await fs.writeFile(gitignorePath, "index.db\nindex.db-*\n", "utf-8");
+
+  console.error(`  Created ~/.minimem with default configuration.`);
 }

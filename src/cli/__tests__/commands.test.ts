@@ -19,6 +19,8 @@ import { sync } from "../commands/sync.js";
 import { status } from "../commands/status.js";
 import { append } from "../commands/append.js";
 import { upsert } from "../commands/upsert.js";
+import { resolveDirectories, ensureGlobalInitialized, getDirName } from "../commands/mcp.js";
+import { isInitialized } from "../config.js";
 
 // Deterministic embedding function
 function createDeterministicEmbedding(text: string): number[] {
@@ -517,6 +519,115 @@ This is an urgent bug fix needed.
         capture.errors.some(l => l.includes("not initialized") || l.includes("skipping")),
         "Should warn about uninitialized directory"
       );
+    });
+  });
+
+  describe("mcp command helpers", () => {
+    describe("resolveDirectories", () => {
+      it("should use current directory by default", () => {
+        const dirs = resolveDirectories({});
+        assert.strictEqual(dirs.length, 1);
+        assert.strictEqual(dirs[0], process.cwd());
+      });
+
+      it("should use specified directories", () => {
+        const dirs = resolveDirectories({ dir: ["/path/one", "/path/two"] });
+        assert.strictEqual(dirs.length, 2);
+        assert.ok(dirs[0].endsWith("one"));
+        assert.ok(dirs[1].endsWith("two"));
+      });
+
+      it("should add global directory with --global flag", () => {
+        const dirs = resolveDirectories({ global: true });
+        assert.strictEqual(dirs.length, 1);
+        assert.ok(dirs[0].endsWith(".minimem"), "Should include global directory");
+      });
+
+      it("should combine --dir and --global", () => {
+        const dirs = resolveDirectories({ dir: ["/path/project"], global: true });
+        assert.strictEqual(dirs.length, 2);
+        assert.ok(dirs[0].endsWith("project"));
+        assert.ok(dirs[1].endsWith(".minimem"));
+      });
+
+      it("should not duplicate global directory", () => {
+        const globalPath = path.join(os.homedir(), ".minimem");
+        const dirs = resolveDirectories({ dir: [globalPath], global: true });
+        assert.strictEqual(dirs.length, 1);
+        assert.strictEqual(dirs[0], globalPath);
+      });
+    });
+
+    describe("getDirName", () => {
+      it("should return 'global' for ~/.minimem", () => {
+        const globalDir = path.join(os.homedir(), ".minimem");
+        assert.strictEqual(getDirName(globalDir), "global");
+      });
+
+      it("should return directory name for regular paths", () => {
+        assert.strictEqual(getDirName("/path/to/my-project"), "my-project");
+      });
+
+      it("should include parent for hidden directories", () => {
+        const name = getDirName("/path/to/project/.hidden");
+        assert.ok(name.includes("project"));
+        assert.ok(name.includes(".hidden"));
+      });
+    });
+
+    describe("ensureGlobalInitialized", () => {
+      it("should create global directory structure", async () => {
+        const fakeGlobalDir = path.join(tempDir, ".fake-minimem");
+
+        const capture = captureConsole();
+        try {
+          await ensureGlobalInitialized(fakeGlobalDir);
+        } finally {
+          capture.restore();
+        }
+
+        // Check directory was created
+        assert.ok(await isInitialized(fakeGlobalDir), "Should be initialized");
+
+        // Check MEMORY.md exists with global template
+        const memoryMd = await fs.readFile(path.join(fakeGlobalDir, "MEMORY.md"), "utf-8");
+        assert.ok(memoryMd.includes("Global Memory"), "Should have global template");
+
+        // Check config exists
+        const configPath = path.join(fakeGlobalDir, ".minimem", "config.json");
+        const config = JSON.parse(await fs.readFile(configPath, "utf-8"));
+        assert.strictEqual(config.embedding.provider, "auto");
+
+        // Check .gitignore exists
+        const gitignore = await fs.readFile(
+          path.join(fakeGlobalDir, ".minimem", ".gitignore"),
+          "utf-8"
+        );
+        assert.ok(gitignore.includes("index.db"));
+
+        // Check output messages
+        assert.ok(capture.errors.some(l => l.includes("Auto-initializing")));
+        assert.ok(capture.errors.some(l => l.includes("Created")));
+      });
+
+      it("should not overwrite existing MEMORY.md", async () => {
+        const fakeGlobalDir = path.join(tempDir, ".fake-minimem2");
+
+        // Pre-create with custom content
+        await fs.mkdir(fakeGlobalDir, { recursive: true });
+        await fs.writeFile(path.join(fakeGlobalDir, "MEMORY.md"), "My custom content");
+
+        const capture = captureConsole();
+        try {
+          await ensureGlobalInitialized(fakeGlobalDir);
+        } finally {
+          capture.restore();
+        }
+
+        // Check MEMORY.md was preserved
+        const memoryMd = await fs.readFile(path.join(fakeGlobalDir, "MEMORY.md"), "utf-8");
+        assert.strictEqual(memoryMd, "My custom content", "Should preserve existing MEMORY.md");
+      });
     });
   });
 });
