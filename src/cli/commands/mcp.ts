@@ -16,7 +16,7 @@ import {
   buildMinimemConfig,
   isInitialized,
   formatPath,
-  getDefaultConfig,
+  getInitConfig,
   saveConfig,
 } from "../config.js";
 
@@ -75,6 +75,14 @@ export async function mcp(options: McpOptions): Promise<void> {
 
       const minimem = await Minimem.create(config);
       minimemInstances.push(minimem);
+
+      // Check if running in BM25-only mode
+      const status = await minimem.status();
+      if (status.bm25Only && instances.length === 0) {
+        // Only warn once
+        console.error(`Note: Running in BM25-only mode (no embedding API configured).`);
+        console.error(`      Search results will be based on keyword matching only.`);
+      }
 
       // Create a friendly name for the directory
       const name = getDirName(memoryDir);
@@ -203,7 +211,7 @@ Notes stored here are available across all projects.
   }
 
   // Create config
-  const config = getDefaultConfig();
+  const config = getInitConfig();
   await saveConfig(globalDir, config);
 
   // Create .gitignore

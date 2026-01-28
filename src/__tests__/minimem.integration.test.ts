@@ -415,3 +415,254 @@ describe("Minimem File Operations", () => {
     );
   });
 });
+
+describe("Minimem BM25-Only Mode", () => {
+  let tempDir: string;
+  let minimem: Minimem;
+
+  before(async () => {
+    // Create temp directory
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-bm25-"));
+    await fs.mkdir(path.join(tempDir, "memory"));
+
+    // Create test memory files with distinct keywords
+    await fs.writeFile(
+      path.join(tempDir, "MEMORY.md"),
+      `# Memory
+
+## Database Decisions
+We chose PostgreSQL for the main database.
+SQLite is used for local development.
+Redis handles caching requirements.
+
+## API Architecture
+REST endpoints for external clients.
+GraphQL for internal microservices.
+WebSocket connections for real-time features.
+`
+    );
+
+    await fs.writeFile(
+      path.join(tempDir, "memory", "meetings.md"),
+      `# Meeting Notes
+
+## Sprint Planning
+Discussed authentication requirements.
+JWT tokens will be used for API authentication.
+OAuth integration for third-party login.
+
+## Design Review
+Reviewed the dashboard wireframes.
+Mobile-first approach approved.
+Accessibility requirements confirmed.
+`
+    );
+
+    await fs.writeFile(
+      path.join(tempDir, "memory", "bugs.md"),
+      `# Bug Tracker
+
+## Critical Issues
+Memory leak in connection pooling.
+Fixed by properly closing database handles.
+
+## Performance
+Slow queries on user search.
+Added index on email column.
+Response time improved by 80%.
+`
+    );
+
+    // Ensure no API keys are set for this test
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+
+    // Create Minimem instance with explicit "none" provider (BM25-only)
+    minimem = await Minimem.create({
+      memoryDir: tempDir,
+      embedding: {
+        provider: "none",
+      },
+      watch: { enabled: false },
+      hybrid: { enabled: true },
+      query: { minScore: 0.0 },
+    });
+  });
+
+  after(async () => {
+    minimem?.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("creates instance in BM25-only mode", async () => {
+    const status = await minimem.status();
+
+    assert.equal(status.provider, "none");
+    assert.equal(status.model, "bm25-only");
+    assert.equal(status.bm25Only, true);
+    assert.equal(status.ftsAvailable, true);
+  });
+
+  it("indexes files without embeddings", async () => {
+    await minimem.sync();
+
+    const status = await minimem.status();
+
+    assert.ok(status.fileCount >= 3, `Expected at least 3 files, got ${status.fileCount}`);
+    assert.ok(status.chunkCount > 0, `Expected chunks, got ${status.chunkCount}`);
+  });
+
+  it("finds results for 'PostgreSQL database'", async () => {
+    const results = await minimem.search("PostgreSQL database");
+
+    assert.ok(results.length > 0, "Expected search results for 'PostgreSQL database'");
+
+    // Should find the database decisions section
+    const hasPostgres = results.some(r =>
+      r.snippet.toLowerCase().includes("postgresql")
+    );
+    assert.ok(hasPostgres, "Expected to find PostgreSQL in results");
+  });
+
+  it("finds results for 'authentication JWT'", async () => {
+    const results = await minimem.search("authentication JWT tokens");
+
+    assert.ok(results.length > 0, "Expected search results for 'authentication JWT'");
+
+    // Should find the meeting notes about authentication
+    const hasAuth = results.some(r =>
+      r.snippet.toLowerCase().includes("jwt") ||
+      r.snippet.toLowerCase().includes("authentication")
+    );
+    assert.ok(hasAuth, "Expected to find JWT/authentication in results");
+  });
+
+  it("finds results for 'connection pooling'", async () => {
+    const results = await minimem.search("connection pooling");
+
+    assert.ok(results.length > 0, "Expected search results for 'connection pooling'");
+
+    // Should find the bug tracker content
+    const hasBug = results.some(r =>
+      r.snippet.toLowerCase().includes("connection") ||
+      r.snippet.toLowerCase().includes("pooling")
+    );
+    assert.ok(hasBug, "Expected to find connection/pooling in results");
+  });
+
+  it("returns no results for non-existent terms", async () => {
+    const results = await minimem.search("xyzzy quantum blockchain cryptocurrency");
+
+    // Should have no or very low scoring results
+    const highScoreResults = results.filter(r => r.score > 0.3);
+    assert.equal(highScoreResults.length, 0, "Expected no high-scoring results for nonsense query");
+  });
+
+  it("respects maxResults parameter", async () => {
+    const results = await minimem.search("database API", { maxResults: 2 });
+
+    assert.ok(results.length <= 2, `Expected at most 2 results, got ${results.length}`);
+  });
+
+  it("syncs new files correctly", async () => {
+    // Add a new file
+    await fs.writeFile(
+      path.join(tempDir, "memory", "deployment.md"),
+      `# Deployment Guide
+
+## Production Setup
+Kubernetes cluster configuration.
+Docker images pushed to ECR registry.
+Terraform manages infrastructure.
+`
+    );
+
+    await minimem.sync({ force: true });
+
+    // Search for new content
+    const results = await minimem.search("Kubernetes Docker deployment");
+
+    assert.ok(results.length > 0, "Expected to find newly synced content");
+    const hasDeployment = results.some(r =>
+      r.snippet.toLowerCase().includes("kubernetes") ||
+      r.snippet.toLowerCase().includes("docker")
+    );
+    assert.ok(hasDeployment, "Expected to find Kubernetes/Docker content");
+  });
+
+  it("removes deleted files from index", async () => {
+    // Delete the deployment file
+    await fs.rm(path.join(tempDir, "memory", "deployment.md"));
+
+    await minimem.sync({ force: true });
+
+    // Search for deleted content
+    const results = await minimem.search("Kubernetes Docker Terraform");
+
+    // Should not find the deleted content
+    const hasKubernetes = results.some(r =>
+      r.snippet.toLowerCase().includes("kubernetes")
+    );
+    assert.ok(!hasKubernetes, "Deleted file content should not appear in results");
+  });
+});
+
+describe("Minimem Auto-Fallback to BM25", () => {
+  let tempDir: string;
+  let minimem: Minimem;
+
+  before(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-autobm25-"));
+    await fs.mkdir(path.join(tempDir, "memory"));
+
+    await fs.writeFile(
+      path.join(tempDir, "MEMORY.md"),
+      `# Test Memory
+Important notes about the project.
+Database uses PostgreSQL.
+`
+    );
+
+    // Ensure no API keys
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+
+    // Use "auto" provider - should fall back to BM25-only
+    minimem = await Minimem.create({
+      memoryDir: tempDir,
+      embedding: {
+        provider: "auto",
+      },
+      watch: { enabled: false },
+      hybrid: { enabled: true },
+    });
+  });
+
+  after(async () => {
+    minimem?.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("auto-falls back to BM25-only when no API keys available", async () => {
+    const status = await minimem.status();
+
+    assert.equal(status.provider, "none");
+    assert.equal(status.bm25Only, true);
+    assert.ok(status.fallbackReason?.includes("BM25"), "Should have fallback reason");
+  });
+
+  it("search still works in auto-fallback mode", async () => {
+    await minimem.sync();
+
+    const results = await minimem.search("PostgreSQL database");
+
+    assert.ok(results.length > 0, "Expected search results");
+    const hasDb = results.some(r =>
+      r.snippet.toLowerCase().includes("postgresql") ||
+      r.snippet.toLowerCase().includes("database")
+    );
+    assert.ok(hasDb, "Expected to find PostgreSQL/database in results");
+  });
+});

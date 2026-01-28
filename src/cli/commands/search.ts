@@ -62,6 +62,8 @@ export async function search(
   const allResults: SearchResultWithSource[] = [];
   const instances: Minimem[] = [];
 
+  let warnedBm25 = false;
+
   try {
     for (const memoryDir of validDirs) {
       const cliConfig = await loadConfig(memoryDir);
@@ -72,6 +74,16 @@ export async function search(
 
       const minimem = await Minimem.create(config);
       instances.push(minimem);
+
+      // Warn once if running in BM25-only mode
+      if (!warnedBm25) {
+        const status = await minimem.status();
+        if (status.bm25Only) {
+          console.error("Note: Running in BM25-only mode (no embedding API configured).");
+          console.error("      Results are based on keyword matching only.\n");
+          warnedBm25 = true;
+        }
+      }
 
       // Get more results per directory, then merge and trim
       const perDirMax = Math.ceil(maxResults * 1.5);

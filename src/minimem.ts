@@ -155,6 +155,7 @@ export class Minimem {
   private openAi?: OpenAiEmbeddingClient;
   private gemini?: GeminiEmbeddingClient;
   private providerKey: string = "";
+  private providerFallbackReason?: string;
   private db!: DatabaseSync;
 
   private readonly vector: {
@@ -235,6 +236,12 @@ export class Minimem {
     this.openAi = providerResult.openAi;
     this.gemini = providerResult.gemini;
     this.providerKey = this.computeProviderKey();
+    this.providerFallbackReason = providerResult.fallbackReason;
+
+    // Log warning if in BM25-only fallback mode
+    if (this.provider.id === "none") {
+      this.debug?.("Running in BM25-only mode (no embedding API available)");
+    }
 
     // Open database
     this.db = this.openDatabase();
@@ -962,6 +969,8 @@ export class Minimem {
     model: string;
     vectorAvailable: boolean;
     ftsAvailable: boolean;
+    bm25Only: boolean;
+    fallbackReason?: string;
     fileCount: number;
     chunkCount: number;
     cacheCount: number;
@@ -979,6 +988,8 @@ export class Minimem {
       model: this.provider.model,
       vectorAvailable: this.vector.available === true,
       ftsAvailable: this.fts.available,
+      bm25Only: this.provider.id === "none",
+      fallbackReason: this.providerFallbackReason,
       fileCount: fileRow.count,
       chunkCount: chunkRow.count,
       cacheCount: cacheRow.count,

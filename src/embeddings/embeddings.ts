@@ -21,7 +21,7 @@ export type EmbeddingProviderResult = {
 };
 
 export type EmbeddingProviderOptions = {
-  provider: "openai" | "local" | "gemini" | "auto";
+  provider: "openai" | "local" | "gemini" | "auto" | "none";
   model?: string;
   fallback?: "openai" | "gemini" | "local" | "none";
   openai?: {
@@ -58,6 +58,19 @@ const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 const DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+/**
+ * Creates a no-op embedding provider that returns empty vectors.
+ * Used for BM25-only mode when no embedding API is available.
+ */
+function createNoOpEmbeddingProvider(): EmbeddingProvider {
+  return {
+    id: "none",
+    model: "bm25-only",
+    embedQuery: async () => [],
+    embedBatch: async (texts) => texts.map(() => []),
+  };
+}
 
 function resolveUserPath(filePath: string): string {
   if (filePath.startsWith("~/")) {
@@ -302,6 +315,14 @@ export async function createEmbeddingProvider(
   const requestedProvider = options.provider;
   const fallback = options.fallback ?? "none";
 
+  // Handle explicit "none" provider (BM25-only mode)
+  if (requestedProvider === "none") {
+    return {
+      provider: createNoOpEmbeddingProvider(),
+      requestedProvider: "none" as "auto", // Type coercion for compatibility
+    };
+  }
+
   const createProvider = async (id: "openai" | "local" | "gemini") => {
     if (id === "local") {
       const provider = await createLocalEmbeddingProvider(options);
@@ -345,11 +366,14 @@ export async function createEmbeddingProvider(
       }
     }
 
-    const details = [...missingKeyErrors, localError].filter(Boolean) as string[];
-    if (details.length > 0) {
-      throw new Error(details.join("\n\n"));
-    }
-    throw new Error("No embeddings provider available.");
+    // Fall back to BM25-only mode instead of throwing
+    // This allows the system to work without any API keys using full-text search only
+    return {
+      provider: createNoOpEmbeddingProvider(),
+      requestedProvider,
+      fallbackFrom: "auto" as "openai", // Indicate this is a fallback
+      fallbackReason: "No embedding API available. Using BM25 full-text search only.",
+    };
   }
 
   try {

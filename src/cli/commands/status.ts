@@ -53,11 +53,23 @@ export async function status(options: StatusOptions): Promise<void> {
     console.log(`Database:    ${formatPath(info.dbPath)}`);
     console.log();
     console.log("Embedding Provider");
-    console.log(`  Provider:  ${info.provider}`);
-    console.log(`  Model:     ${info.model}`);
+    if (info.bm25Only) {
+      console.log(`  Provider:  none (BM25-only mode)`);
+      console.log(`  Model:     ${info.model}`);
+      if (info.fallbackReason) {
+        console.log(`  Reason:    ${info.fallbackReason}`);
+      }
+    } else {
+      console.log(`  Provider:  ${info.provider}`);
+      console.log(`  Model:     ${info.model}`);
+    }
     console.log();
     console.log("Search Capabilities");
-    console.log(`  Vector:    ${info.vectorAvailable ? "available" : "not available"}`);
+    if (info.bm25Only) {
+      console.log(`  Vector:    disabled (no embedding provider)`);
+    } else {
+      console.log(`  Vector:    ${info.vectorAvailable ? "available" : "not available"}`);
+    }
     console.log(`  FTS:       ${info.ftsAvailable ? "available" : "not available"}`);
     console.log();
     console.log("Index Stats");

@@ -8,7 +8,7 @@ import path from "node:path";
 import {
   resolveMemoryDir,
   saveConfig,
-  getDefaultConfig,
+  getInitConfig,
   isInitialized,
   formatPath,
 } from "../config.js";
@@ -64,7 +64,7 @@ export async function init(
   }
 
   // Create config
-  const config = getDefaultConfig();
+  const config = getInitConfig();
   await saveConfig(memoryDir, config);
   console.log("  Created .minimem/config.json");
 

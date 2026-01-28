@@ -315,14 +315,25 @@ describe("createEmbeddingProvider auto selection", () => {
     expect(result.provider.id).toBe("gemini");
   });
 
-  it("throws when no providers available", async () => {
+  it("falls back to BM25-only when no providers available", async () => {
     const { createEmbeddingProvider } = await import("../embeddings.js");
 
-    await expect(
-      createEmbeddingProvider({
-        provider: "auto",
-      }),
-    ).rejects.toThrow(/API key/i);
+    const result = await createEmbeddingProvider({
+      provider: "auto",
+    });
+
+    // Should fall back to BM25-only (no-op provider)
+    expect(result.provider.id).toBe("none");
+    expect(result.provider.model).toBe("bm25-only");
+    expect(result.fallbackFrom).toBe("auto");
+    expect(result.fallbackReason).toContain("BM25");
+
+    // No-op provider should return empty embeddings
+    const queryEmbed = await result.provider.embedQuery("test");
+    expect(queryEmbed).toEqual([]);
+
+    const batchEmbed = await result.provider.embedBatch(["test1", "test2"]);
+    expect(batchEmbed).toEqual([[], []]);
   });
 });
 

@@ -13,6 +13,7 @@ import { status } from "./commands/status.js";
 import { append } from "./commands/append.js";
 import { upsert } from "./commands/upsert.js";
 import { mcp } from "./commands/mcp.js";
+import { config } from "./commands/config.js";
 
 // Read version from package.json at runtime would require fs
 // For simplicity, hardcode it (update during releases)
@@ -91,6 +92,17 @@ program
   .option("-g, --global", "Include ~/.minimem")
   .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
   .action(mcp);
+
+// minimem config
+program
+  .command("config")
+  .description("View or modify configuration")
+  .option("-d, --dir <path>", "Memory directory")
+  .option("-g, --global", "Use ~/.minimem")
+  .option("--json", "Output as JSON")
+  .option("--set <key=value>", "Set a config value (e.g., embedding.provider=openai)")
+  .option("--unset <key>", "Remove a config value")
+  .action(config);
 
 // Parse and run
 program.parse();
