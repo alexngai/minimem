@@ -14,12 +14,19 @@ import {
   isInitialized,
   formatPath,
 } from "../config.js";
+import {
+  addFrontmatter,
+  parseFrontmatter,
+  type SessionContext,
+} from "../../session.js";
 
 export type UpsertOptions = {
   dir?: string;
   global?: boolean;
   provider?: string;
   stdin?: boolean;
+  session?: string;
+  sessionSource?: string;
 };
 
 export async function upsert(
@@ -48,6 +55,15 @@ export async function upsert(
     process.exit(1);
   }
 
+  // Build session context from explicit options
+  const session: SessionContext | undefined = options.session
+    ? {
+        id: options.session,
+        source: options.sessionSource,
+        project: process.cwd(),
+      }
+    : undefined;
+
   // Resolve file path relative to memory directory
   const filePath = resolveFilePath(file, memoryDir);
 
@@ -67,20 +83,57 @@ export async function upsert(
 
   // Check if file exists (for reporting)
   let isUpdate = false;
+  let existingContent: string | undefined;
   try {
     await fs.access(filePath);
     isUpdate = true;
+    existingContent = await fs.readFile(filePath, "utf-8");
   } catch {
     // File doesn't exist, this is a create
   }
 
+  // Add session frontmatter if session context exists and file is markdown
+  let contentToWrite = finalContent;
+  if (session && filePath.endsWith(".md")) {
+    if (isUpdate && existingContent) {
+      // For updates, preserve existing frontmatter but update session
+      const { frontmatter: existing, body } = parseFrontmatter(existingContent);
+      // Check if the new content already has frontmatter
+      const { frontmatter: newFm, body: newBody } = parseFrontmatter(finalContent);
+      if (newFm) {
+        // New content has frontmatter, merge with existing
+        contentToWrite = addFrontmatter(newBody, {
+          ...existing,
+          ...newFm,
+          session: { ...existing?.session, ...newFm.session, ...session },
+        });
+      } else {
+        // New content has no frontmatter, add session to new content
+        contentToWrite = addFrontmatter(finalContent, {
+          ...existing,
+          session: { ...existing?.session, ...session },
+        });
+      }
+    } else {
+      // New file - add frontmatter with session
+      const { frontmatter: existingFm, body } = parseFrontmatter(finalContent);
+      contentToWrite = addFrontmatter(body, {
+        ...existingFm,
+        session,
+      });
+    }
+  }
+
   // Write content to file
-  await fs.writeFile(filePath, finalContent, "utf-8");
+  await fs.writeFile(filePath, contentToWrite, "utf-8");
 
   const relativePath = path.relative(memoryDir, filePath);
   const action = isUpdate ? "Updated" : "Created";
   console.log(`${action}: ${relativePath}`);
   console.log(`  in ${formatPath(memoryDir)}`);
+  if (options.session) {
+    console.log(`  Session: ${options.session}`);
+  }
 
   // Try to sync the index (requires embedding provider)
   let minimem: Minimem | null = null;

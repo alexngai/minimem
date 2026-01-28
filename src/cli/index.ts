@@ -72,6 +72,8 @@ program
   .option("-g, --global", "Use ~/.minimem")
   .option("-f, --file <path>", "Append to specific file instead of today's log")
   .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
+  .option("-s, --session <id>", "Session ID to associate with this memory")
+  .option("--session-source <name>", "Session source (claude-code, vscode, etc.)")
   .action(append);
 
 // minimem upsert <file> [content]
@@ -82,6 +84,8 @@ program
   .option("-g, --global", "Use ~/.minimem")
   .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
   .option("--stdin", "Read content from stdin")
+  .option("-s, --session <id>", "Session ID to associate with this memory")
+  .option("--session-source <name>", "Session source (claude-code, vscode, etc.)")
   .action(upsert);
 
 // minimem mcp

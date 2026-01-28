@@ -16,6 +16,8 @@ export type AppendOptions = {
   global?: boolean;
   file?: string;
   provider?: string;
+  session?: string;
+  sessionSource?: string;
 };
 
 export async function append(
@@ -29,6 +31,14 @@ export async function append(
     console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
     console.error(`Run: minimem init${options.dir ? ` ${options.dir}` : ""}`);
     process.exit(1);
+  }
+
+  // Add session marker if explicit session provided
+  let finalText = text;
+  if (options.session) {
+    const timestamp = new Date().toISOString();
+    const sourceInfo = options.sessionSource ? ` source=${options.sessionSource}` : "";
+    finalText = `<!-- ${timestamp} session=${options.session}${sourceInfo} -->\n${text}`;
   }
 
   // Load config and create Minimem instance
@@ -48,13 +58,16 @@ export async function append(
     if (options.file) {
       // Append to specific file
       targetPath = options.file;
-      await minimem.appendFile(targetPath, text);
+      await minimem.appendFile(targetPath, finalText);
     } else {
       // Append to today's daily log
-      targetPath = await minimem.appendToday(text);
+      targetPath = await minimem.appendToday(finalText);
     }
 
     console.log(`Appended to ${targetPath}`);
+    if (options.session) {
+      console.log(`  Session: ${options.session}`);
+    }
   } finally {
     minimem?.close();
   }

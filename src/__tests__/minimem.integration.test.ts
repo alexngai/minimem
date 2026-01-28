@@ -666,3 +666,89 @@ Database uses PostgreSQL.
     assert.ok(hasDb, "Expected to find PostgreSQL/database in results");
   });
 });
+
+describe("Minimem Staleness Detection", () => {
+  let tempDir: string;
+  let minimem: Minimem;
+  let originalFetch: typeof global.fetch;
+
+  before(async () => {
+    originalFetch = global.fetch;
+    global.fetch = createMockFetch() as unknown as typeof global.fetch;
+
+    // Set fake API key (required by provider validation)
+    process.env.OPENAI_API_KEY = "test-api-key-for-staleness-tests";
+
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-stale-test-"));
+
+    await fs.writeFile(
+      path.join(tempDir, "MEMORY.md"),
+      "# Original Content\n\nThis is the original memory content."
+    );
+
+    // Create with watch disabled - this is the scenario we're testing
+    minimem = await Minimem.create({
+      memoryDir: tempDir,
+      embedding: { provider: "openai" },
+      watch: { enabled: false },
+      hybrid: { enabled: true },
+      query: { minScore: 0.0 }, // Lower threshold for testing
+    });
+
+    // Initial sync
+    await minimem.sync();
+  });
+
+  after(async () => {
+    global.fetch = originalFetch;
+    delete process.env.OPENAI_API_KEY;
+    minimem?.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("detects modified files without watcher", async () => {
+    // First search - should find original content
+    const results1 = await minimem.search("original content");
+    assert.ok(results1.length > 0, "Should find original content");
+
+    // Modify the file externally (simulating user edit)
+    await fs.writeFile(
+      path.join(tempDir, "MEMORY.md"),
+      "# Updated Content\n\nThis is completely new modified content about bananas."
+    );
+
+    // Search again - should detect staleness and re-sync
+    const results2 = await minimem.search("bananas");
+    assert.ok(results2.length > 0, "Should find new content after mtime-based staleness detection");
+    const hasBananas = results2.some(r => r.snippet.toLowerCase().includes("banana"));
+    assert.ok(hasBananas, "Should have indexed the new content");
+  });
+
+  it("detects new files without watcher", async () => {
+    // Add a new file
+    await fs.mkdir(path.join(tempDir, "memory"), { recursive: true });
+    await fs.writeFile(
+      path.join(tempDir, "memory", "new-topic.md"),
+      "# New Topic\n\nThis document discusses elephants and their habitats."
+    );
+
+    // Search - should detect the new file and sync
+    const results = await minimem.search("elephants habitats");
+    assert.ok(results.length > 0, "Should find content from new file");
+    const hasElephants = results.some(r => r.snippet.toLowerCase().includes("elephant"));
+    assert.ok(hasElephants, "Should have indexed the new file");
+  });
+
+  it("detects deleted files without watcher", async () => {
+    // Delete the file we just created
+    await fs.rm(path.join(tempDir, "memory", "new-topic.md"));
+
+    // Search - should detect the deletion and re-sync
+    const results = await minimem.search("elephants");
+
+    // After re-sync, the deleted content should no longer be found
+    // (or have lower relevance since it's not in the index anymore)
+    const hasElephants = results.some(r => r.snippet.toLowerCase().includes("elephant"));
+    assert.ok(!hasElephants, "Should not find content from deleted file after staleness detection");
+  });
+});

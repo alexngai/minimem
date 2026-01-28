@@ -55,3 +55,14 @@ export {
   generateMcpConfig,
   type McpServerConfig,
 } from "./server/mcp.js";
+
+// Session tracking
+export {
+  parseFrontmatter,
+  serializeFrontmatter,
+  addFrontmatter,
+  addSessionToContent,
+  extractSession,
+  type SessionContext,
+  type MemoryFrontmatter,
+} from "./session.js";

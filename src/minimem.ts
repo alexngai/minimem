@@ -333,11 +333,62 @@ export class Minimem {
     this.watcher.on("unlink", scheduleSync);
   }
 
+  /**
+   * Check if the index is stale by comparing file mtimes against stored values.
+   * This is a lightweight check (stat calls only, no file reads).
+   */
+  private async isStale(): Promise<boolean> {
+    try {
+      const files = await listMemoryFiles(this.memoryDir);
+
+      // Get stored file records
+      const stored = this.db
+        .prepare(`SELECT path, mtime FROM files WHERE source = ?`)
+        .all("memory") as Array<{ path: string; mtime: number }>;
+
+      // Quick check: different file count means stale
+      if (files.length !== stored.length) {
+        this.debug?.(`Stale: file count changed (${stored.length} -> ${files.length})`);
+        return true;
+      }
+
+      // Build lookup map of stored mtimes
+      const storedMap = new Map(stored.map((f) => [f.path, f.mtime]));
+
+      // Check each file's mtime against stored value
+      for (const absPath of files) {
+        const relPath = path.relative(this.memoryDir, absPath).replace(/\\/g, "/");
+        const storedMtime = storedMap.get(relPath);
+
+        // File not in index = stale
+        if (storedMtime === undefined) {
+          this.debug?.(`Stale: new file ${relPath}`);
+          return true;
+        }
+
+        // Check mtime
+        const stat = await fs.stat(absPath);
+        const currentMtime = Math.floor(stat.mtimeMs);
+        if (currentMtime !== storedMtime) {
+          this.debug?.(`Stale: mtime changed for ${relPath}`);
+          return true;
+        }
+      }
+
+      return false;
+    } catch (err) {
+      // On error, assume stale to be safe
+      this.debug?.(`Stale check failed: ${String(err)}`);
+      return true;
+    }
+  }
+
   async search(
     query: string,
     opts?: { maxResults?: number; minScore?: number },
   ): Promise<MinimemSearchResult[]> {
-    if (this.dirty) {
+    // Check staleness: use dirty flag if watcher is on, otherwise check mtimes
+    if (this.dirty || (!this.watchConfig.enabled && (await this.isStale()))) {
       await this.sync({ reason: "search" });
     }
 
