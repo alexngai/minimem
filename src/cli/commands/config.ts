@@ -6,19 +6,25 @@ import {
   resolveMemoryDir,
   loadConfig,
   loadGlobalConfig,
+  loadXdgConfig,
   saveConfig,
+  saveXdgConfig,
   getConfigPath,
   getGlobalConfigPath,
+  getXdgConfigPath,
   mergeConfig,
   getDefaultConfig,
+  getSyncConfig,
   isInitialized,
   formatPath,
   type CliConfig,
+  type GlobalConfig,
 } from "../config.js";
 
 export type ConfigOptions = {
   dir?: string;
   global?: boolean;
+  xdgGlobal?: boolean;
   json?: boolean;
   set?: string;
   unset?: string;
@@ -45,8 +51,10 @@ async function showConfig(options: ConfigOptions): Promise<void> {
 
   // Load configs
   const globalConfig = await loadGlobalConfig();
+  const xdgConfig = await loadXdgConfig();
   const localConfig = await loadConfig(memoryDir);
   const mergedConfig = mergeConfig(localConfig);
+  const syncConfig = await getSyncConfig(memoryDir);
   const defaults = getDefaultConfig();
 
   if (options.json) {
@@ -54,6 +62,8 @@ async function showConfig(options: ConfigOptions): Promise<void> {
       effective: mergedConfig,
       local: localConfig,
       global: globalConfig,
+      xdgGlobal: xdgConfig,
+      syncConfig,
       defaults,
     }, null, 2));
     return;
@@ -64,12 +74,13 @@ async function showConfig(options: ConfigOptions): Promise<void> {
   console.log();
 
   console.log("Config Files:");
-  console.log(`  Global:  ${formatPath(getGlobalConfigPath())}`);
-  console.log(`  Local:   ${formatPath(getConfigPath(memoryDir))}`);
+  console.log(`  XDG Global:    ${formatPath(getXdgConfigPath())}`);
+  console.log(`  Legacy Global: ${formatPath(getGlobalConfigPath())}`);
+  console.log(`  Local:         ${formatPath(getConfigPath(memoryDir))}`);
   console.log();
 
   console.log("Effective Configuration:");
-  console.log("(merged from defaults → global → local)");
+  console.log("(merged from defaults → xdg global → legacy global → local)");
   console.log();
 
   printConfigSection("Embedding", {
@@ -94,11 +105,30 @@ async function showConfig(options: ConfigOptions): Promise<void> {
     "overlap": mergedConfig.chunking?.overlap,
   });
 
+  printConfigSection("Sync (Local)", {
+    "enabled": syncConfig.enabled,
+    "path": syncConfig.path || "(not configured)",
+    "include": syncConfig.include.join(", "),
+    "exclude": syncConfig.exclude.length > 0 ? syncConfig.exclude.join(", ") : "(none)",
+  });
+
+  printConfigSection("Sync (Global)", {
+    "centralRepo": syncConfig.centralRepo || "(not configured)",
+    "conflictStrategy": syncConfig.conflictStrategy,
+    "autoSync": syncConfig.autoSync,
+    "autoCommit": syncConfig.autoCommit,
+    "mergeResolver": syncConfig.mergeResolver || "(default)",
+  });
+
   console.log();
   console.log("To modify configuration:");
   console.log("  minimem config --set embedding.provider=openai");
-  console.log("  minimem config --set query.maxResults=20");
-  console.log("  minimem config --global --set embedding.model=text-embedding-3-large");
+  console.log("  minimem config --set sync.enabled=true");
+  console.log("  minimem config --set sync.path=myproject/");
+  console.log();
+  console.log("Global sync settings (use --xdg-global flag):");
+  console.log("  minimem config --xdg-global --set centralRepo=~/memories-repo");
+  console.log("  minimem config --xdg-global --set sync.conflictStrategy=merge");
 }
 
 function printConfigSection(title: string, values: Record<string, unknown>): void {
@@ -110,6 +140,12 @@ function printConfigSection(title: string, values: Record<string, unknown>): voi
 }
 
 async function handleConfigEdit(options: ConfigOptions): Promise<void> {
+  // Handle XDG global config edits
+  if (options.xdgGlobal) {
+    await handleXdgConfigEdit(options);
+    return;
+  }
+
   const memoryDir = resolveMemoryDir({ dir: options.dir, global: options.global });
   const configPath = getConfigPath(memoryDir);
 
@@ -122,23 +158,48 @@ async function handleConfigEdit(options: ConfigOptions): Promise<void> {
   const currentConfig = await loadConfigFile(configPath);
 
   if (options.set) {
-    const [path, value] = options.set.split("=");
-    if (!path || value === undefined) {
+    const [keyPath, value] = options.set.split("=");
+    if (!keyPath || value === undefined) {
       console.error("Error: --set requires format: key.path=value");
       console.error("Example: --set embedding.provider=openai");
       process.exit(1);
     }
 
-    const newConfig = setConfigValue(currentConfig, path, parseValue(value));
+    const newConfig = setConfigValue(currentConfig, keyPath, parseValue(value));
     await saveConfig(memoryDir, newConfig);
-    console.log(`Set ${path}=${value} in ${formatPath(configPath)}`);
+    console.log(`Set ${keyPath}=${value} in ${formatPath(configPath)}`);
   }
 
   if (options.unset) {
-    const path = options.unset;
-    const newConfig = unsetConfigValue(currentConfig, path);
+    const keyPath = options.unset;
+    const newConfig = unsetConfigValue(currentConfig, keyPath);
     await saveConfig(memoryDir, newConfig);
-    console.log(`Unset ${path} in ${formatPath(configPath)}`);
+    console.log(`Unset ${keyPath} in ${formatPath(configPath)}`);
+  }
+}
+
+async function handleXdgConfigEdit(options: ConfigOptions): Promise<void> {
+  const configPath = getXdgConfigPath();
+  const currentConfig = await loadXdgConfig();
+
+  if (options.set) {
+    const [keyPath, value] = options.set.split("=");
+    if (!keyPath || value === undefined) {
+      console.error("Error: --set requires format: key.path=value");
+      console.error("Example: --set centralRepo=~/memories-repo");
+      process.exit(1);
+    }
+
+    const newConfig = setConfigValue(currentConfig as Record<string, unknown>, keyPath, parseValue(value)) as GlobalConfig;
+    await saveXdgConfig(newConfig);
+    console.log(`Set ${keyPath}=${value} in ${formatPath(configPath)}`);
+  }
+
+  if (options.unset) {
+    const keyPath = options.unset;
+    const newConfig = unsetConfigValue(currentConfig as Record<string, unknown>, keyPath) as GlobalConfig;
+    await saveXdgConfig(newConfig);
+    console.log(`Unset ${keyPath} in ${formatPath(configPath)}`);
   }
 }
 
@@ -162,9 +223,9 @@ function parseValue(value: string): unknown {
   }
 }
 
-function setConfigValue(config: CliConfig, path: string, value: unknown): CliConfig {
-  const parts = path.split(".");
-  const result = { ...config };
+function setConfigValue<T extends Record<string, unknown>>(config: T, keyPath: string, value: unknown): T {
+  const parts = keyPath.split(".");
+  const result = { ...config } as Record<string, unknown>;
   let current: Record<string, unknown> = result;
 
   for (let i = 0; i < parts.length - 1; i++) {
@@ -178,23 +239,23 @@ function setConfigValue(config: CliConfig, path: string, value: unknown): CliCon
   }
 
   current[parts[parts.length - 1]] = value;
-  return result;
+  return result as T;
 }
 
-function unsetConfigValue(config: CliConfig, path: string): CliConfig {
-  const parts = path.split(".");
-  const result = { ...config };
+function unsetConfigValue<T extends Record<string, unknown>>(config: T, keyPath: string): T {
+  const parts = keyPath.split(".");
+  const result = { ...config } as Record<string, unknown>;
   let current: Record<string, unknown> = result;
 
   for (let i = 0; i < parts.length - 1; i++) {
     const key = parts[i];
     if (!(key in current) || typeof current[key] !== "object") {
-      return result; // Path doesn't exist
+      return result as T; // Path doesn't exist
     }
     current[key] = { ...(current[key] as Record<string, unknown>) };
     current = current[key] as Record<string, unknown>;
   }
 
   delete current[parts[parts.length - 1]];
-  return result;
+  return result as T;
 }

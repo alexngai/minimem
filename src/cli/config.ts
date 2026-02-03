@@ -11,6 +11,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 
 import type { MinimemConfig } from "../minimem.js";
 import type { EmbeddingProviderOptions } from "../embeddings/embeddings.js";
@@ -18,6 +19,8 @@ import type { EmbeddingProviderOptions } from "../embeddings/embeddings.js";
 const CONFIG_FILENAME = "config.json";
 const CONFIG_DIR = ".minimem";
 const GLOBAL_DIR = ".minimem";
+// XDG-style global config directory for sync settings
+const XDG_CONFIG_DIR = ".config/minimem";
 
 export type CliConfig = {
   embedding?: {
@@ -71,6 +74,44 @@ export type CliConfig = {
     /** Overlap tokens between chunks */
     overlap?: number;
   };
+  /** Sync configuration (for git-based syncing) */
+  sync?: {
+    /** Enable sync for this directory */
+    enabled?: boolean;
+    /** Path in central repo for this directory's memories */
+    path?: string;
+    /** Glob patterns for files to include in sync */
+    include?: string[];
+    /** Glob patterns for files to exclude from sync */
+    exclude?: string[];
+  };
+};
+
+/**
+ * Global config stored at ~/.config/minimem/config.json
+ * Contains settings that apply across all memory directories
+ */
+export type GlobalConfig = {
+  /** Path to central repository for syncing */
+  centralRepo?: string;
+  /** Unique machine identifier for registry */
+  machineId?: string;
+  /** Global sync settings */
+  sync?: {
+    /** Default conflict resolution strategy */
+    conflictStrategy?: "keep-both" | "merge" | "manual" | "last-write-wins";
+    /** Enable automatic sync when daemon is running */
+    autoSync?: boolean;
+    /** Automatically commit changes to central repo */
+    autoCommit?: boolean;
+    /** External merge resolver command */
+    mergeResolver?: string;
+  };
+  /** Embedding and other settings can be inherited */
+  embedding?: CliConfig["embedding"];
+  hybrid?: CliConfig["hybrid"];
+  query?: CliConfig["query"];
+  chunking?: CliConfig["chunking"];
 };
 
 export type ResolvedConfig = {
@@ -127,6 +168,99 @@ export function getGlobalConfigPath(): string {
  */
 export function getConfigPath(memoryDir: string): string {
   return path.join(memoryDir, CONFIG_DIR, CONFIG_FILENAME);
+}
+
+/**
+ * Get the XDG-style global config directory (~/.config/minimem)
+ */
+export function getXdgConfigDir(): string {
+  return path.join(os.homedir(), XDG_CONFIG_DIR);
+}
+
+/**
+ * Get the XDG-style global config file path (~/.config/minimem/config.json)
+ */
+export function getXdgConfigPath(): string {
+  return path.join(getXdgConfigDir(), CONFIG_FILENAME);
+}
+
+/**
+ * Expand ~ to home directory in paths
+ */
+export function expandPath(filePath: string): string {
+  if (filePath.startsWith("~/")) {
+    return path.join(os.homedir(), filePath.slice(2));
+  }
+  if (filePath === "~") {
+    return os.homedir();
+  }
+  return filePath;
+}
+
+/**
+ * Load XDG global config from ~/.config/minimem/config.json
+ */
+export async function loadXdgConfig(): Promise<GlobalConfig> {
+  try {
+    const content = await fs.readFile(getXdgConfigPath(), "utf-8");
+    return JSON.parse(content) as GlobalConfig;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Save XDG global config to ~/.config/minimem/config.json
+ */
+export async function saveXdgConfig(config: GlobalConfig): Promise<void> {
+  const configDir = getXdgConfigDir();
+  const configPath = getXdgConfigPath();
+
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2), "utf-8");
+}
+
+/**
+ * Get or generate a unique machine ID
+ * Format: {hostname}-{random4hex}
+ * Stored in XDG global config
+ */
+export async function getMachineId(): Promise<string> {
+  const globalConfig = await loadXdgConfig();
+
+  if (globalConfig.machineId) {
+    return globalConfig.machineId;
+  }
+
+  // Generate new machine ID
+  const hostname = os.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const suffix = crypto.randomBytes(2).toString("hex");
+  const machineId = `${hostname}-${suffix}`;
+
+  // Save to global config
+  await saveXdgConfig({ ...globalConfig, machineId });
+
+  return machineId;
+}
+
+/**
+ * Get the central repo path from global config (expanded)
+ */
+export async function getCentralRepo(): Promise<string | undefined> {
+  const globalConfig = await loadXdgConfig();
+  if (globalConfig.centralRepo) {
+    return expandPath(globalConfig.centralRepo);
+  }
+  return undefined;
+}
+
+/**
+ * Set the central repo path in global config
+ */
+export async function setCentralRepo(repoPath: string): Promise<void> {
+  const globalConfig = await loadXdgConfig();
+  globalConfig.centralRepo = repoPath;
+  await saveXdgConfig(globalConfig);
 }
 
 /**
@@ -208,6 +342,17 @@ function deepMergeConfig(target: CliConfig, source: CliConfig): CliConfig {
     result.chunking = { ...target.chunking, ...source.chunking };
   }
 
+  if (source.sync) {
+    result.sync = { ...target.sync, ...source.sync };
+    // Arrays should be replaced, not merged
+    if (source.sync.include) {
+      result.sync.include = source.sync.include;
+    }
+    if (source.sync.exclude) {
+      result.sync.exclude = source.sync.exclude;
+    }
+  }
+
   return result;
 }
 
@@ -248,6 +393,97 @@ export function getDefaultConfig(): CliConfig {
       tokens: 256,
       overlap: 32,
     },
+  };
+}
+
+/**
+ * Get default sync configuration
+ */
+export function getDefaultSyncConfig(): NonNullable<CliConfig["sync"]> {
+  return {
+    enabled: false,
+    include: ["MEMORY.md", "memory/**/*.md"],
+    exclude: [],
+  };
+}
+
+/**
+ * Get default global sync settings
+ */
+export function getDefaultGlobalSyncConfig(): NonNullable<GlobalConfig["sync"]> {
+  return {
+    conflictStrategy: "keep-both",
+    autoSync: false,
+    autoCommit: false,
+  };
+}
+
+/**
+ * Load full config including XDG global settings
+ * Resolution order:
+ * 1. Built-in defaults
+ * 2. XDG global config (~/.config/minimem/config.json)
+ * 3. Legacy global config (~/.minimem/.minimem/config.json)
+ * 4. Local config (.minimem/config.json in memory directory)
+ */
+export async function loadFullConfig(memoryDir: string): Promise<{
+  local: CliConfig;
+  global: GlobalConfig;
+  merged: CliConfig;
+}> {
+  const globalDir = getGlobalDir();
+  const isGlobalDir = path.resolve(memoryDir) === globalDir;
+
+  // Load XDG global config
+  const xdgConfig = await loadXdgConfig();
+
+  // Load legacy global config (unless we're loading the global dir itself)
+  const legacyGlobalConfig = isGlobalDir ? {} : await loadGlobalConfig();
+
+  // Load local config
+  const localConfig = await loadConfigFile(getConfigPath(memoryDir));
+
+  // Merge: XDG → legacy global → local
+  const merged = deepMergeConfig(
+    deepMergeConfig(xdgConfig as CliConfig, legacyGlobalConfig),
+    localConfig
+  );
+
+  return {
+    local: localConfig,
+    global: xdgConfig,
+    merged,
+  };
+}
+
+/**
+ * Get sync config for a directory with defaults applied
+ */
+export async function getSyncConfig(memoryDir: string): Promise<{
+  enabled: boolean;
+  path?: string;
+  include: string[];
+  exclude: string[];
+  centralRepo?: string;
+  conflictStrategy: NonNullable<GlobalConfig["sync"]>["conflictStrategy"];
+  autoSync: boolean;
+  autoCommit: boolean;
+  mergeResolver?: string;
+}> {
+  const { merged, global: xdgConfig } = await loadFullConfig(memoryDir);
+  const defaults = getDefaultSyncConfig();
+  const globalDefaults = getDefaultGlobalSyncConfig();
+
+  return {
+    enabled: merged.sync?.enabled ?? defaults.enabled ?? false,
+    path: merged.sync?.path,
+    include: merged.sync?.include ?? defaults.include,
+    exclude: merged.sync?.exclude ?? defaults.exclude,
+    centralRepo: xdgConfig.centralRepo ? expandPath(xdgConfig.centralRepo) : undefined,
+    conflictStrategy: xdgConfig.sync?.conflictStrategy ?? globalDefaults.conflictStrategy,
+    autoSync: xdgConfig.sync?.autoSync ?? globalDefaults.autoSync,
+    autoCommit: xdgConfig.sync?.autoCommit ?? globalDefaults.autoCommit,
+    mergeResolver: xdgConfig.sync?.mergeResolver,
   };
 }
 

@@ -8,12 +8,17 @@ export default defineConfig({
       "**/node_modules/**",
       "**/clawdbot/**",
       "**/dist/**",
-      // Integration tests use Node.js native test runner (node:test)
-      // Run with: npm run test:integration
+      // These tests use node:sqlite which Vite can't handle
+      // Run with: npm run test:integration or npm run test:cli
       "**/*.integration.test.ts",
-      // CLI tests use Node.js native test runner (node:sqlite not supported in vitest)
-      // Run with: npm run test:cli
-      "**/cli/__tests__/**",
+      "**/cli/__tests__/commands.test.ts",
     ],
+    // Run tests sequentially to avoid XDG_CONFIG_HOME conflicts
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        singleFork: true,
+      },
+    },
   },
 });

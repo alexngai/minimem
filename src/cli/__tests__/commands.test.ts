@@ -19,8 +19,20 @@ import { sync } from "../commands/sync.js";
 import { status } from "../commands/status.js";
 import { append } from "../commands/append.js";
 import { upsert } from "../commands/upsert.js";
+import { config } from "../commands/config.js";
 import { resolveDirectories, ensureGlobalInitialized, getDirName } from "../commands/mcp.js";
-import { isInitialized } from "../config.js";
+import {
+  isInitialized,
+  expandPath,
+  getXdgConfigPath,
+  loadXdgConfig,
+  saveXdgConfig,
+  getMachineId,
+  getSyncConfig,
+  getDefaultSyncConfig,
+  getDefaultGlobalSyncConfig,
+  type GlobalConfig,
+} from "../config.js";
 
 // Deterministic embedding function
 function createDeterministicEmbedding(text: string): number[] {
@@ -595,8 +607,8 @@ This is an urgent bug fix needed.
 
         // Check config exists
         const configPath = path.join(fakeGlobalDir, ".minimem", "config.json");
-        const config = JSON.parse(await fs.readFile(configPath, "utf-8"));
-        assert.strictEqual(config.embedding.provider, "auto");
+        const configData = JSON.parse(await fs.readFile(configPath, "utf-8"));
+        assert.strictEqual(configData.embedding.provider, "auto");
 
         // Check .gitignore exists
         const gitignore = await fs.readFile(
@@ -628,6 +640,130 @@ This is an urgent bug fix needed.
         const memoryMd = await fs.readFile(path.join(fakeGlobalDir, "MEMORY.md"), "utf-8");
         assert.strictEqual(memoryMd, "My custom content", "Should preserve existing MEMORY.md");
       });
+    });
+  });
+
+  describe("config utilities", () => {
+    describe("expandPath", () => {
+      it("should expand ~ to home directory", () => {
+        const expanded = expandPath("~/test/path");
+        assert.strictEqual(expanded, path.join(os.homedir(), "test/path"));
+      });
+
+      it("should expand lone ~", () => {
+        const expanded = expandPath("~");
+        assert.strictEqual(expanded, os.homedir());
+      });
+
+      it("should not modify paths without ~", () => {
+        const expanded = expandPath("/absolute/path");
+        assert.strictEqual(expanded, "/absolute/path");
+      });
+
+      it("should not expand ~ in the middle of path", () => {
+        const expanded = expandPath("/some/~path");
+        assert.strictEqual(expanded, "/some/~path");
+      });
+    });
+
+    describe("getDefaultSyncConfig", () => {
+      it("should return default sync configuration", () => {
+        const defaults = getDefaultSyncConfig();
+        assert.strictEqual(defaults.enabled, false);
+        assert.deepStrictEqual(defaults.include, ["MEMORY.md", "memory/**/*.md"]);
+        assert.deepStrictEqual(defaults.exclude, []);
+      });
+    });
+
+    describe("getDefaultGlobalSyncConfig", () => {
+      it("should return default global sync configuration", () => {
+        const defaults = getDefaultGlobalSyncConfig();
+        assert.strictEqual(defaults.conflictStrategy, "keep-both");
+        assert.strictEqual(defaults.autoSync, false);
+        assert.strictEqual(defaults.autoCommit, false);
+      });
+    });
+  });
+
+  describe("sync config", () => {
+    beforeEach(async () => {
+      await init(tempDir, { global: false, force: false });
+    });
+
+    it("should set sync.enabled via config command", async () => {
+      const capture = captureConsole();
+
+      try {
+        await config({ dir: tempDir, set: "sync.enabled=true" });
+      } finally {
+        capture.restore();
+      }
+
+      // Verify the config was set
+      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+      assert.strictEqual(savedConfig.sync?.enabled, true);
+    });
+
+    it("should set sync.path via config command", async () => {
+      const capture = captureConsole();
+
+      try {
+        await config({ dir: tempDir, set: "sync.path=myproject/" });
+      } finally {
+        capture.restore();
+      }
+
+      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+      assert.strictEqual(savedConfig.sync?.path, "myproject/");
+    });
+
+    it("should get sync config with defaults", async () => {
+      const syncConfig = await getSyncConfig(tempDir);
+
+      // Should have defaults applied
+      assert.strictEqual(syncConfig.enabled, false);
+      assert.deepStrictEqual(syncConfig.include, ["MEMORY.md", "memory/**/*.md"]);
+      assert.strictEqual(syncConfig.conflictStrategy, "keep-both");
+      assert.strictEqual(syncConfig.autoSync, false);
+    });
+
+    it("should merge local sync config with defaults", async () => {
+      // Set some local config
+      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const localConfig = {
+        embedding: { provider: "auto" },
+        sync: {
+          enabled: true,
+          path: "test-project/",
+          include: ["MEMORY.md", "custom/**/*.md"],
+        },
+      };
+      await fs.writeFile(configPath, JSON.stringify(localConfig, null, 2));
+
+      const syncConfig = await getSyncConfig(tempDir);
+
+      assert.strictEqual(syncConfig.enabled, true);
+      assert.strictEqual(syncConfig.path, "test-project/");
+      assert.deepStrictEqual(syncConfig.include, ["MEMORY.md", "custom/**/*.md"]);
+      // Defaults still applied for unset values
+      assert.strictEqual(syncConfig.conflictStrategy, "keep-both");
+    });
+
+    it("should display sync config in config command output", async () => {
+      const capture = captureConsole();
+
+      try {
+        await config({ dir: tempDir });
+      } finally {
+        capture.restore();
+      }
+
+      // Should show sync sections
+      assert.ok(capture.logs.some(l => l.includes("Sync (Local)")));
+      assert.ok(capture.logs.some(l => l.includes("Sync (Global)")));
+      assert.ok(capture.logs.some(l => l.includes("conflictStrategy")));
     });
   });
 });
