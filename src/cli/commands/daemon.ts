@@ -12,6 +12,7 @@ import {
   isDaemonRunning,
   getDaemonLogPath,
 } from "../sync/daemon.js";
+import { exitWithError } from "../config.js";
 
 export type DaemonOptions = {
   background?: boolean;
@@ -28,8 +29,8 @@ export async function daemonCommand(options: DaemonOptions): Promise<void> {
     try {
       await startDaemon();
     } catch (error) {
-      console.error(`Daemon error: ${error}`);
-      process.exit(1);
+      const message = error instanceof Error ? error.message : String(error);
+      exitWithError(`Daemon: ${message}`);
     }
     return;
   }
@@ -48,8 +49,8 @@ export async function daemonCommand(options: DaemonOptions): Promise<void> {
       console.log(`Daemon started with PID ${pid}`);
       console.log(`Log file: ${getDaemonLogPath()}`);
     } catch (error) {
-      console.error(`Failed to start daemon: ${error}`);
-      process.exit(1);
+      const message = error instanceof Error ? error.message : String(error);
+      exitWithError(`Failed to start daemon: ${message}`);
     }
   } else {
     console.log("Starting daemon in foreground...");
@@ -58,8 +59,8 @@ export async function daemonCommand(options: DaemonOptions): Promise<void> {
     try {
       await startDaemon();
     } catch (error) {
-      console.error(`Daemon error: ${error}`);
-      process.exit(1);
+      const message = error instanceof Error ? error.message : String(error);
+      exitWithError(`Daemon: ${message}`);
     }
   }
 }
@@ -82,8 +83,7 @@ export async function daemonStopCommand(): Promise<void> {
   if (stopped) {
     console.log("Daemon stopped.");
   } else {
-    console.error("Failed to stop daemon.");
-    process.exit(1);
+    exitWithError("Failed to stop daemon.");
   }
 }
 
@@ -162,8 +162,8 @@ export async function daemonLogsCommand(options: LogOptions): Promise<void> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       console.log("No daemon log found.");
     } else {
-      console.error(`Error reading log: ${error}`);
-      process.exit(1);
+      const message = error instanceof Error ? error.message : String(error);
+      exitWithError(`Error reading log: ${message}`);
     }
   }
 }

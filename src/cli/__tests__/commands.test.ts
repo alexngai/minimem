@@ -20,7 +20,7 @@ import { status } from "../commands/status.js";
 import { append } from "../commands/append.js";
 import { upsert } from "../commands/upsert.js";
 import { config } from "../commands/config.js";
-import { resolveDirectories, ensureGlobalInitialized, getDirName } from "../commands/mcp.js";
+import { ensureGlobalInitialized } from "../commands/mcp.js";
 import {
   isInitialized,
   expandPath,
@@ -31,6 +31,8 @@ import {
   getSyncConfig,
   getDefaultSyncConfig,
   getDefaultGlobalSyncConfig,
+  resolveMemoryDirs,
+  getDirName,
   type GlobalConfig,
 } from "../config.js";
 
@@ -535,28 +537,28 @@ This is an urgent bug fix needed.
   });
 
   describe("mcp command helpers", () => {
-    describe("resolveDirectories", () => {
+    describe("resolveMemoryDirs", () => {
       it("should use current directory by default", () => {
-        const dirs = resolveDirectories({});
+        const dirs = resolveMemoryDirs({});
         assert.strictEqual(dirs.length, 1);
         assert.strictEqual(dirs[0], process.cwd());
       });
 
       it("should use specified directories", () => {
-        const dirs = resolveDirectories({ dir: ["/path/one", "/path/two"] });
+        const dirs = resolveMemoryDirs({ dir: ["/path/one", "/path/two"] });
         assert.strictEqual(dirs.length, 2);
         assert.ok(dirs[0].endsWith("one"));
         assert.ok(dirs[1].endsWith("two"));
       });
 
       it("should add global directory with --global flag", () => {
-        const dirs = resolveDirectories({ global: true });
+        const dirs = resolveMemoryDirs({ global: true });
         assert.strictEqual(dirs.length, 1);
         assert.ok(dirs[0].endsWith(".minimem"), "Should include global directory");
       });
 
       it("should combine --dir and --global", () => {
-        const dirs = resolveDirectories({ dir: ["/path/project"], global: true });
+        const dirs = resolveMemoryDirs({ dir: ["/path/project"], global: true });
         assert.strictEqual(dirs.length, 2);
         assert.ok(dirs[0].endsWith("project"));
         assert.ok(dirs[1].endsWith(".minimem"));
@@ -564,7 +566,7 @@ This is an urgent bug fix needed.
 
       it("should not duplicate global directory", () => {
         const globalPath = path.join(os.homedir(), ".minimem");
-        const dirs = resolveDirectories({ dir: [globalPath], global: true });
+        const dirs = resolveMemoryDirs({ dir: [globalPath], global: true });
         assert.strictEqual(dirs.length, 1);
         assert.strictEqual(dirs[0], globalPath);
       });

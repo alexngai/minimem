@@ -20,6 +20,9 @@ import {
   formatPath,
   getInitConfig,
   saveConfig,
+  exitWithError,
+  warn,
+  note,
 } from "../config.js";
 
 export type McpOptions = {
@@ -34,9 +37,10 @@ export async function mcp(options: McpOptions): Promise<void> {
   const globalDir = getGlobalMemoryDir();
 
   if (directories.length === 0) {
-    console.error("Error: No memory directories specified.");
-    console.error("Use --dir <path> or --global to specify directories.");
-    process.exit(1);
+    exitWithError(
+      "No memory directories specified.",
+      "Use --dir <path> or --global to specify directories."
+    );
   }
 
   // Auto-initialize global directory if it will be used
@@ -54,7 +58,7 @@ export async function mcp(options: McpOptions): Promise<void> {
 
     if (!(await isInitialized(memoryDir))) {
       // Write to stderr so it doesn't interfere with MCP JSON-RPC
-      console.error(`Warning: ${formatPath(memoryDir)} is not initialized, skipping.`);
+      warn(`${formatPath(memoryDir)} is not initialized, skipping.`);
 
       // If current directory isn't initialized and global isn't already included,
       // add global as a fallback
@@ -82,8 +86,8 @@ export async function mcp(options: McpOptions): Promise<void> {
       const status = await minimem.status();
       if (status.bm25Only && instances.length === 0) {
         // Only warn once
-        console.error(`Note: Running in BM25-only mode (no embedding API configured).`);
-        console.error(`      Search results will be based on keyword matching only.`);
+        note("Running in BM25-only mode (no embedding API configured).");
+        note("Search results will be based on keyword matching only.");
       }
 
       // Create a friendly name for the directory
@@ -96,13 +100,12 @@ export async function mcp(options: McpOptions): Promise<void> {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`Warning: Failed to load ${formatPath(memoryDir)}: ${message}`);
+      warn(`Failed to load ${formatPath(memoryDir)}: ${message}`);
     }
   }
 
   if (instances.length === 0) {
-    console.error("Error: No valid memory directories found.");
-    process.exit(1);
+    exitWithError("No valid memory directories found.");
   }
 
   // Log which directories are being served (to stderr)

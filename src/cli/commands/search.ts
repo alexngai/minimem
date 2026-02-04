@@ -7,6 +7,9 @@
 import { Minimem, type MinimemSearchResult } from "../../minimem.js";
 import {
   resolveMemoryDirs,
+  exitWithError,
+  warn,
+  note,
   loadConfig,
   buildMinimemConfig,
   isInitialized,
@@ -30,13 +33,13 @@ export async function search(
   query: string,
   options: SearchOptions,
 ): Promise<void> {
-  // Collect all directories to search (now uses shared implementation)
   const directories = resolveMemoryDirs(options);
 
   if (directories.length === 0) {
-    console.error("Error: No memory directories specified.");
-    console.error("Use --dir <path> or --global to specify directories to search.");
-    process.exit(1);
+    exitWithError(
+      "No memory directories specified.",
+      "Use --dir <path> or --global to specify directories to search."
+    );
   }
 
   // Validate all directories are initialized
@@ -45,13 +48,12 @@ export async function search(
     if (await isInitialized(dir)) {
       validDirs.push(dir);
     } else {
-      console.error(`Warning: ${formatPath(dir)} is not initialized, skipping.`);
+      warn(`${formatPath(dir)} is not initialized, skipping.`);
     }
   }
 
   if (validDirs.length === 0) {
-    console.error("Error: No valid initialized memory directories found.");
-    process.exit(1);
+    exitWithError("No valid initialized memory directories found.");
   }
 
   const maxResults = options.max ? parseInt(options.max, 10) : 10;
@@ -78,8 +80,8 @@ export async function search(
       if (!warnedBm25) {
         const status = await minimem.status();
         if (status.bm25Only) {
-          console.error("Note: Running in BM25-only mode (no embedding API configured).");
-          console.error("      Results are based on keyword matching only.\n");
+          note("Running in BM25-only mode (no embedding API configured).");
+          note("Results are based on keyword matching only.\n");
           warnedBm25 = true;
         }
       }

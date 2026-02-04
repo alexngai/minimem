@@ -5,6 +5,7 @@
 import { Minimem } from "../../minimem.js";
 import {
   resolveMemoryDir,
+  exitWithError,
   loadConfig,
   buildMinimemConfig,
   isInitialized,
@@ -23,9 +24,10 @@ export async function status(options: StatusOptions): Promise<void> {
 
   // Check if initialized
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    console.error(`Run: minimem init${options.dir ? ` ${options.dir}` : ""}`);
-    process.exit(1);
+    exitWithError(
+      `${formatPath(memoryDir)} is not initialized.`,
+      `Run: minimem init${options.dir ? ` ${options.dir}` : ""}`
+    );
   }
 
   // Load config and create Minimem instance

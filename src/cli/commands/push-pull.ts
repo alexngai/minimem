@@ -4,6 +4,7 @@
 
 import {
   resolveMemoryDir,
+  exitWithError,
   isInitialized,
   formatPath,
 } from "../config.js";
@@ -27,8 +28,7 @@ export async function pushCommand(options: PushPullOptions): Promise<void> {
   });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   console.log(`Pushing from ${formatPath(memoryDir)}...`);
@@ -77,8 +77,8 @@ export async function pushCommand(options: PushPullOptions): Promise<void> {
       console.log("Nothing to push - already in sync");
     }
   } catch (error) {
-    console.error(`Error: ${error}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : String(error);
+    exitWithError(message);
   }
 }
 
@@ -92,8 +92,7 @@ export async function pullCommand(options: PushPullOptions): Promise<void> {
   });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   console.log(`Pulling to ${formatPath(memoryDir)}...`);
@@ -142,8 +141,8 @@ export async function pullCommand(options: PushPullOptions): Promise<void> {
       console.log("Nothing to pull - already in sync");
     }
   } catch (error) {
-    console.error(`Error: ${error}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : String(error);
+    exitWithError(message);
   }
 }
 
@@ -157,8 +156,7 @@ export async function syncStatusCommand(options: { dir?: string; global?: boolea
   });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   try {
@@ -209,7 +207,7 @@ export async function syncStatusCommand(options: { dir?: string; global?: boolea
       }
     }
   } catch (error) {
-    console.error(`Error: ${error}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : String(error);
+    exitWithError(message);
   }
 }

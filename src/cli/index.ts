@@ -20,6 +20,7 @@ import { conflictsCommand, resolveCommand, cleanupCommand, logCommand } from "./
 import { daemonCommand, daemonStopCommand, daemonStatusCommand, daemonLogsCommand } from "./commands/daemon.js";
 import { validateRegistry, formatValidationResult } from "./sync/validation.js";
 import { VERSION } from "./version.js";
+import { exitWithError } from "./config.js";
 
 program
   .name("minimem")
@@ -81,7 +82,7 @@ program
 // minimem upsert <file> [content]
 program
   .command("upsert <file> [content]")
-  .description("Create or update a memory file")
+  .description("Create or update a memory file (file path relative to memory dir)")
   .option("-d, --dir <path>", "Memory directory")
   .option("-g, --global", "Use ~/.minimem")
   .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
@@ -254,8 +255,8 @@ program
         process.exit(1);
       }
     } catch (error) {
-      console.error(`Error: ${error}`);
-      process.exit(1);
+      const message = error instanceof Error ? error.message : String(error);
+      exitWithError(message);
     }
   });
 

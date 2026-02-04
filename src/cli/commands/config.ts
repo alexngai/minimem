@@ -4,6 +4,7 @@
 
 import {
   resolveMemoryDir,
+  exitWithError,
   loadConfig,
   loadGlobalConfig,
   loadXdgConfig,
@@ -45,8 +46,7 @@ async function showConfig(options: ConfigOptions): Promise<void> {
   const memoryDir = resolveMemoryDir({ dir: options.dir, global: options.global });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   // Load configs
@@ -150,8 +150,7 @@ async function handleConfigEdit(options: ConfigOptions): Promise<void> {
   const configPath = getConfigPath(memoryDir);
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   // Load current config (just the local file, not merged)
@@ -160,9 +159,10 @@ async function handleConfigEdit(options: ConfigOptions): Promise<void> {
   if (options.set) {
     const [keyPath, value] = options.set.split("=");
     if (!keyPath || value === undefined) {
-      console.error("Error: --set requires format: key.path=value");
-      console.error("Example: --set embedding.provider=openai");
-      process.exit(1);
+      exitWithError(
+        "--set requires format: key.path=value",
+        "Example: --set embedding.provider=openai"
+      );
     }
 
     const newConfig = setConfigValue(currentConfig, keyPath, parseValue(value));
@@ -185,9 +185,10 @@ async function handleXdgConfigEdit(options: ConfigOptions): Promise<void> {
   if (options.set) {
     const [keyPath, value] = options.set.split("=");
     if (!keyPath || value === undefined) {
-      console.error("Error: --set requires format: key.path=value");
-      console.error("Example: --set centralRepo=~/memories-repo");
-      process.exit(1);
+      exitWithError(
+        "--set requires format: key.path=value",
+        "Example: --set centralRepo=~/memories-repo"
+      );
     }
 
     const newConfig = setConfigValue(currentConfig as Record<string, unknown>, keyPath, parseValue(value)) as GlobalConfig;

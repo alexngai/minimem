@@ -14,6 +14,7 @@ import {
   getMachineId,
   expandPath,
   getDefaultSyncConfig,
+  exitWithError,
 } from "../config.js";
 import {
   getCentralRepoPath,
@@ -54,8 +55,7 @@ export async function syncInitCentral(
   const result = await initCentralRepo(repoPath);
 
   if (!result.success) {
-    console.error(`Error: ${result.message}`);
-    process.exit(1);
+    exitWithError(result.message);
   }
 
   if (result.created) {
@@ -91,16 +91,18 @@ export async function syncInit(options: SyncInitOptions): Promise<void> {
 
   // Check if initialized
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    console.error("Run 'minimem init' first.");
-    process.exit(1);
+    exitWithError(
+      `${formatPath(memoryDir)} is not initialized.`,
+      "Run 'minimem init' first."
+    );
   }
 
   // Check if --path is provided
   if (!options.path) {
-    console.error("Error: --path is required.");
-    console.error("Example: minimem sync init --path myproject/");
-    process.exit(1);
+    exitWithError(
+      "--path is required.",
+      "Example: minimem sync init --path myproject/"
+    );
   }
 
   const centralPath = options.path;
@@ -108,20 +110,18 @@ export async function syncInit(options: SyncInitOptions): Promise<void> {
   // Get central repo
   const centralRepo = await getCentralRepoPath();
   if (!centralRepo) {
-    console.error("Error: No central repository configured.");
-    console.error("First initialize a central repository:");
-    console.error("  minimem sync init-central ~/memories-repo");
-    process.exit(1);
+    exitWithError(
+      "No central repository configured.",
+      "First initialize a central repository: minimem sync init-central ~/memories-repo"
+    );
   }
 
   // Validate central repo
   const validation = await validateCentralRepo(centralRepo);
   if (!validation.valid) {
-    console.error(`Error: Central repository is invalid:`);
-    for (const error of validation.errors) {
-      console.error(`  - ${error}`);
-    }
-    process.exit(1);
+    exitWithError(
+      `Central repository is invalid: ${validation.errors.join(", ")}`
+    );
   }
 
   if (validation.warnings.length > 0) {
@@ -143,15 +143,11 @@ export async function syncInit(options: SyncInitOptions): Promise<void> {
     const existingMapping = registry.mappings.find(
       (m) => m.path === centralPath || m.path === `${centralPath}/`
     );
-    console.error(`Error: Path '${centralPath}' is already mapped by another machine.`);
+    let details = `Path '${centralPath}' is already mapped by another machine.`;
     if (existingMapping) {
-      console.error(`  Machine: ${existingMapping.machineId}`);
-      console.error(`  Local path: ${existingMapping.localPath}`);
-      console.error(`  Last sync: ${existingMapping.lastSync}`);
+      details += ` Machine: ${existingMapping.machineId}, Local: ${existingMapping.localPath}`;
     }
-    console.error();
-    console.error("Choose a different path or remove the existing mapping.");
-    process.exit(1);
+    exitWithError(details, "Choose a different path or remove the existing mapping.");
   }
 
   // Detect directory type
@@ -261,14 +257,12 @@ export async function syncRemove(options: { local?: string; global?: boolean }):
 
   const centralRepo = await getCentralRepoPath();
   if (!centralRepo) {
-    console.error("Error: No central repository configured.");
-    process.exit(1);
+    exitWithError("No central repository configured.");
   }
 
   const localConfig = await loadConfig(memoryDir);
   if (!localConfig.sync?.path) {
-    console.error(`Error: ${formatPath(memoryDir)} is not configured for sync.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not configured for sync.`);
   }
 
   const centralPath = localConfig.sync.path;
