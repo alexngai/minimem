@@ -4,10 +4,9 @@
  * Supports searching across multiple memory directories in a single query.
  */
 
-import * as path from "node:path";
-import * as os from "node:os";
-import { Minimem, type SearchResult } from "../../minimem.js";
+import { Minimem, type MinimemSearchResult } from "../../minimem.js";
 import {
+  resolveMemoryDirs,
   loadConfig,
   buildMinimemConfig,
   isInitialized,
@@ -23,7 +22,7 @@ export type SearchOptions = {
   json?: boolean;
 };
 
-type SearchResultWithSource = SearchResult & {
+type SearchResultWithSource = MinimemSearchResult & {
   memoryDir: string;
 };
 
@@ -31,8 +30,8 @@ export async function search(
   query: string,
   options: SearchOptions,
 ): Promise<void> {
-  // Collect all directories to search
-  const directories = resolveSearchDirectories(options);
+  // Collect all directories to search (now uses shared implementation)
+  const directories = resolveMemoryDirs(options);
 
   if (directories.length === 0) {
     console.error("Error: No memory directories specified.");
@@ -139,35 +138,6 @@ export async function search(
       instance.close();
     }
   }
-}
-
-/**
- * Resolve all directories to search based on options
- */
-function resolveSearchDirectories(options: SearchOptions): string[] {
-  const dirs: string[] = [];
-
-  // Add explicit directories
-  if (options.dir && options.dir.length > 0) {
-    for (const dir of options.dir) {
-      dirs.push(path.resolve(dir));
-    }
-  }
-
-  // Add global directory if --global flag is set
-  if (options.global) {
-    const globalDir = path.join(os.homedir(), ".minimem");
-    if (!dirs.includes(globalDir)) {
-      dirs.push(globalDir);
-    }
-  }
-
-  // If no directories specified, use current directory
-  if (dirs.length === 0) {
-    dirs.push(process.cwd());
-  }
-
-  return dirs;
 }
 
 /**

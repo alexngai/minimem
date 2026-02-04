@@ -16,6 +16,19 @@ import crypto from "node:crypto";
 import type { MinimemConfig } from "../minimem.js";
 import type { EmbeddingProviderOptions } from "../embeddings/embeddings.js";
 
+// Re-export shared utilities for backward compatibility
+export {
+  resolveMemoryDir,
+  resolveMemoryDirs,
+  getGlobalMemoryDir,
+  exitWithError,
+  warn,
+  note,
+  logError,
+  getDirName,
+  type DirOptions,
+} from "./shared.js";
+
 const CONFIG_FILENAME = "config.json";
 const CONFIG_DIR = ".minimem";
 const GLOBAL_DIR = ".minimem";
@@ -119,34 +132,7 @@ export type ResolvedConfig = {
   config: CliConfig;
 };
 
-/**
- * Resolve the memory directory based on options
- *
- * Priority:
- * 1. --dir flag
- * 2. MEMORY_DIR environment variable
- * 3. --global flag → ~/.minimem
- * 4. Current working directory
- */
-export function resolveMemoryDir(options: {
-  dir?: string;
-  global?: boolean;
-}): string {
-  if (options.dir) {
-    return path.resolve(options.dir);
-  }
-
-  const envDir = process.env.MEMORY_DIR;
-  if (envDir) {
-    return path.resolve(envDir);
-  }
-
-  if (options.global) {
-    return path.join(os.homedir(), ".minimem");
-  }
-
-  return process.cwd();
-}
+// Note: resolveMemoryDir is now imported from ./shared.js and re-exported above
 
 /**
  * Get the global config directory path (~/.minimem)

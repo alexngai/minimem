@@ -31,26 +31,33 @@ describe("bm25RankToScore", () => {
     expect(bm25RankToScore(0)).toBeCloseTo(1);
   });
 
-  it("returns 0.5 for rank 1", () => {
+  it("returns 0.5 for rank 1 or -1", () => {
+    // Both positive and negative 1 give same result (absolute value)
     expect(bm25RankToScore(1)).toBeCloseTo(0.5);
+    expect(bm25RankToScore(-1)).toBeCloseTo(0.5);
   });
 
-  it("is monotonically decreasing", () => {
+  it("is monotonically decreasing with absolute value", () => {
+    // Higher magnitude = lower score
     expect(bm25RankToScore(10)).toBeLessThan(bm25RankToScore(1));
     expect(bm25RankToScore(100)).toBeLessThan(bm25RankToScore(10));
   });
 
-  it("clamps negative ranks to 0", () => {
-    expect(bm25RankToScore(-100)).toBeCloseTo(1);
+  it("treats negative ranks same as positive (uses absolute value)", () => {
+    // FTS5 BM25 ranks are negative, so -10 should give same score as 10
+    expect(bm25RankToScore(-10)).toBeCloseTo(bm25RankToScore(10));
+    expect(bm25RankToScore(-100)).toBeCloseTo(bm25RankToScore(100));
+    // -100 → abs = 100 → score = 1/101 ≈ 0.0099
+    expect(bm25RankToScore(-100)).toBeCloseTo(1 / 101);
   });
 
-  it("handles infinity", () => {
-    expect(bm25RankToScore(Infinity)).toBeLessThan(0.01);
+  it("handles infinity by returning 0", () => {
+    expect(bm25RankToScore(Infinity)).toBe(0);
+    expect(bm25RankToScore(-Infinity)).toBe(0);
   });
 
-  it("handles NaN", () => {
-    const score = bm25RankToScore(NaN);
-    expect(score).toBeLessThan(0.01);
+  it("handles NaN by returning 0", () => {
+    expect(bm25RankToScore(NaN)).toBe(0);
   });
 });
 

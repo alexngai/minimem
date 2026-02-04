@@ -6,9 +6,9 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as os from "node:os";
 import { Minimem } from "../../minimem.js";
 import {
+  resolveMemoryDir,
   loadConfig,
   buildMinimemConfig,
   isInitialized,
@@ -34,8 +34,8 @@ export async function upsert(
   content: string | undefined,
   options: UpsertOptions,
 ): Promise<void> {
-  // Resolve memory directory
-  const memoryDir = resolveMemoryDir(options);
+  // Resolve memory directory (now uses shared implementation with MEMORY_DIR support)
+  const memoryDir = resolveMemoryDir({ dir: options.dir, global: options.global });
 
   // Check if initialized
   if (!(await isInitialized(memoryDir))) {
@@ -154,19 +154,6 @@ export async function upsert(
   } finally {
     minimem?.close();
   }
-}
-
-/**
- * Resolve memory directory from options
- */
-function resolveMemoryDir(options: UpsertOptions): string {
-  if (options.dir) {
-    return path.resolve(options.dir);
-  }
-  if (options.global) {
-    return path.join(os.homedir(), ".minimem");
-  }
-  return process.cwd();
 }
 
 /**

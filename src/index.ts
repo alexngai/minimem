@@ -1,6 +1,9 @@
 // Main export
 export { Minimem, type MinimemConfig, type MinimemSearchResult } from "./minimem.js";
 
+// Type alias for backward compatibility (some files import SearchResult)
+export type { MinimemSearchResult as SearchResult } from "./minimem.js";
+
 // Embedding providers
 export {
   createEmbeddingProvider,
@@ -22,8 +25,10 @@ export {
   cosineSimilarity,
   isMemoryPath,
   normalizeRelPath,
+  logError,
   type MemoryChunk,
   type MemoryFileEntry,
+  type DebugFn,
 } from "./internal.js";
 
 // Search utilities

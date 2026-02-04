@@ -3,6 +3,30 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+/**
+ * Debug function type for optional logging
+ */
+export type DebugFn = (message: string, data?: unknown) => void;
+
+/**
+ * Log an error with context (for debugging).
+ * Only logs if a debug function is provided.
+ *
+ * @param context - A short identifier for where the error occurred
+ * @param error - The error object or message
+ * @param debug - Optional debug function to log to
+ */
+export function logError(
+  context: string,
+  error: unknown,
+  debug?: DebugFn
+): void {
+  if (!debug) return;
+
+  const message = error instanceof Error ? error.message : String(error);
+  debug(`[${context}] Error: ${message}`);
+}
+
 export type MemoryFileEntry = {
   path: string;
   absPath: string;
@@ -18,10 +42,24 @@ export type MemoryChunk = {
   hash: string;
 };
 
-export function ensureDir(dir: string): string {
+/**
+ * Ensure a directory exists, creating it if necessary.
+ *
+ * @param dir - The directory path to ensure exists
+ * @param debug - Optional debug function for logging errors
+ * @returns The directory path
+ */
+export function ensureDir(dir: string, debug?: DebugFn): string {
   try {
     fsSync.mkdirSync(dir, { recursive: true });
-  } catch {}
+  } catch (error) {
+    // Only swallow EEXIST errors (directory already exists)
+    // Log other errors for debugging
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== "EEXIST") {
+      logError("ensureDir", error, debug);
+    }
+  }
   return dir;
 }
 

@@ -19,10 +19,7 @@ import { pushCommand, pullCommand, syncStatusCommand } from "./commands/push-pul
 import { conflictsCommand, resolveCommand, cleanupCommand, logCommand } from "./commands/conflicts.js";
 import { daemonCommand, daemonStopCommand, daemonStatusCommand, daemonLogsCommand } from "./commands/daemon.js";
 import { validateRegistry, formatValidationResult } from "./sync/validation.js";
-
-// Read version from package.json at runtime would require fs
-// For simplicity, hardcode it (update during releases)
-const VERSION = "0.0.2";
+import { VERSION } from "./version.js";
 
 program
   .name("minimem")
