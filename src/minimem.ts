@@ -10,6 +10,7 @@ import {
   ensureDir,
   hashText,
   listMemoryFiles,
+  logError,
   type MemoryChunk,
   type MemoryFileEntry,
   parseEmbedding,
@@ -177,6 +178,7 @@ export class Minimem {
   private closed = false;
   private dirty = true;
   private syncing: Promise<void> | null = null;
+  private syncLock = false;
   private embeddingOptions: EmbeddingProviderOptions;
 
   private constructor(config: MinimemConfig) {
@@ -483,16 +485,25 @@ export class Minimem {
   }
 
   async sync(opts?: { reason?: string; force?: boolean }): Promise<void> {
+    // If a sync is already running, wait for it instead of starting another
     if (this.syncing) {
       await this.syncing;
       return;
     }
+
+    // Use a synchronous flag to prevent the race window between
+    // checking this.syncing and assigning to it
+    if (this.syncLock) {
+      return;
+    }
+    this.syncLock = true;
 
     this.syncing = this.runSync(opts);
     try {
       await this.syncing;
     } finally {
       this.syncing = null;
+      this.syncLock = false;
     }
   }
 
@@ -543,14 +554,18 @@ export class Minimem {
             `DELETE FROM ${VECTOR_TABLE} WHERE id IN (SELECT id FROM chunks WHERE path = ? AND source = ?)`,
           )
           .run(stale.path, "memory");
-      } catch {}
+      } catch (err) {
+        logError("deleteStaleVectorEntries", err, this.debug);
+      }
       this.db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(stale.path, "memory");
       if (this.fts.enabled && this.fts.available) {
         try {
           this.db
             .prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ? AND source = ? AND model = ?`)
             .run(stale.path, "memory", this.provider.model);
-        } catch {}
+        } catch (err) {
+          logError("deleteStaleFtsEntries", err, this.debug);
+        }
       }
     }
 
@@ -592,14 +607,18 @@ export class Minimem {
           `DELETE FROM ${VECTOR_TABLE} WHERE id IN (SELECT id FROM chunks WHERE path = ? AND source = ?)`,
         )
         .run(entry.path, "memory");
-    } catch {}
+    } catch (err) {
+      logError("deleteOldVectorChunks", err, this.debug);
+    }
     this.db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(entry.path, "memory");
     if (this.fts.enabled && this.fts.available) {
       try {
         this.db
           .prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ? AND source = ? AND model = ?`)
           .run(entry.path, "memory", this.provider.model);
-      } catch {}
+      } catch (err) {
+        logError("deleteOldFtsChunks", err, this.debug);
+      }
     }
 
     // Insert new chunks
@@ -637,7 +656,9 @@ export class Minimem {
           this.db
             .prepare(`INSERT INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`)
             .run(chunkId, vectorToBlob(embedding));
-        } catch {}
+        } catch (err) {
+          logError("insertVectorChunk", err, this.debug);
+        }
       }
 
       // Insert into FTS table if available
@@ -657,7 +678,9 @@ export class Minimem {
               chunk.startLine,
               chunk.endLine,
             );
-        } catch {}
+        } catch (err) {
+          logError("insertFtsChunk", err, this.debug);
+        }
       }
     }
   }
@@ -772,12 +795,22 @@ export class Minimem {
     const timeout =
       this.provider.id === "local" ? EMBEDDING_QUERY_TIMEOUT_LOCAL_MS : EMBEDDING_QUERY_TIMEOUT_REMOTE_MS;
 
-    return Promise.race([
-      this.provider.embedQuery(text),
-      new Promise<number[]>((_, reject) =>
-        setTimeout(() => reject(new Error("embedding query timeout")), timeout),
-      ),
-    ]);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeout);
+
+    try {
+      const result = await Promise.race([
+        this.provider.embedQuery(text),
+        new Promise<number[]>((_, reject) => {
+          ac.signal.addEventListener("abort", () =>
+            reject(new Error("embedding query timeout")),
+          );
+        }),
+      ]);
+      return result;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private loadEmbeddingCache(hashes: string[]): Map<string, number[]> {
@@ -1063,6 +1096,8 @@ export class Minimem {
 
     try {
       this.db.close();
-    } catch {}
+    } catch (err) {
+      logError("dbClose", err, this.debug);
+    }
   }
 }

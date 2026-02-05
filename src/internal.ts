@@ -6,7 +6,7 @@ import path from "node:path";
 /**
  * Debug function type for optional logging
  */
-export type DebugFn = (message: string, data?: unknown) => void;
+export type DebugFn = (message: string, data?: Record<string, unknown>) => void;
 
 /**
  * Log an error with context (for debugging).
@@ -102,8 +102,30 @@ export async function listMemoryFiles(memoryDir: string): Promise<string[]> {
   const result: string[] = [];
   const memoryFile = path.join(memoryDir, "MEMORY.md");
   const altMemoryFile = path.join(memoryDir, "memory.md");
-  if (await exists(memoryFile)) result.push(memoryFile);
-  if (await exists(altMemoryFile)) result.push(altMemoryFile);
+  const hasUpper = await exists(memoryFile);
+  const hasLower = await exists(altMemoryFile);
+
+  // Prevent ambiguity: both MEMORY.md and memory.md cannot coexist
+  // (unless they resolve to the same file on case-insensitive filesystems)
+  if (hasUpper && hasLower) {
+    let upperReal = memoryFile;
+    let lowerReal = altMemoryFile;
+    try { upperReal = await fs.realpath(memoryFile); } catch {}
+    try { lowerReal = await fs.realpath(altMemoryFile); } catch {}
+    if (upperReal !== lowerReal) {
+      throw new Error(
+        `Both MEMORY.md and memory.md exist in ${memoryDir}. ` +
+        `Please remove one to avoid ambiguity.`
+      );
+    }
+    // Same file (case-insensitive FS) — only include once
+    result.push(memoryFile);
+  } else if (hasUpper) {
+    result.push(memoryFile);
+  } else if (hasLower) {
+    result.push(altMemoryFile);
+  }
+
   const memorySubDir = path.join(memoryDir, "memory");
   if (await exists(memorySubDir)) {
     await walkDir(memorySubDir, result);

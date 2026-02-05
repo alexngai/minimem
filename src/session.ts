@@ -69,8 +69,17 @@ export function parseFrontmatter(content: string): {
 }
 
 /**
- * Simple YAML parser for frontmatter
- * Handles basic key-value pairs and nested objects
+ * Simple YAML parser for frontmatter.
+ *
+ * **Limitations** (by design — keeps the dependency count at zero):
+ * - Only supports 2-level nesting (e.g., `session.id`, not `a.b.c`)
+ * - Does not handle multi-line strings (block scalars `|` / `>`)
+ * - Does not handle YAML list items with `- ` syntax (only inline `[a, b]`)
+ * - Does not preserve comments
+ * - Keys must be simple `\w+` identifiers (no quoted or special-char keys)
+ *
+ * If you need full YAML support, consider replacing this with a library
+ * such as `yaml` (https://www.npmjs.com/package/yaml).
  */
 function parseSimpleYaml(yaml: string): MemoryFrontmatter {
   const result: MemoryFrontmatter = {};
