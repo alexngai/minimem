@@ -69,3 +69,14 @@ export {
   type SessionContext,
   type MemoryFrontmatter,
 } from "./session.js";
+
+// Core components (for advanced usage and custom integrations)
+export {
+  MemoryIndexer,
+  MemorySearcher,
+  type IndexerConfig,
+  type SearchConfig,
+  type IndexStats,
+  type MemoryIndexMeta,
+  type SearchResult as CoreSearchResult,
+} from "./core/index.js";
