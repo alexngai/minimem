@@ -172,7 +172,7 @@ describe("mergeHybridResults", () => {
     expect(merged).toHaveLength(0);
   });
 
-  it("handles vector-only results", () => {
+  it("handles vector-only results with normalized weights", () => {
     const merged = mergeHybridResults({
       vectorWeight: 0.7,
       textWeight: 0.3,
@@ -191,10 +191,11 @@ describe("mergeHybridResults", () => {
     });
 
     expect(merged).toHaveLength(1);
-    expect(merged[0]?.score).toBeCloseTo(0.7 * 0.8);
+    // When keyword side is empty, vector weight normalizes to 1.0
+    expect(merged[0]?.score).toBeCloseTo(0.8);
   });
 
-  it("handles keyword-only results", () => {
+  it("handles keyword-only results with normalized weights", () => {
     const merged = mergeHybridResults({
       vectorWeight: 0.7,
       textWeight: 0.3,
@@ -213,7 +214,8 @@ describe("mergeHybridResults", () => {
     });
 
     expect(merged).toHaveLength(1);
-    expect(merged[0]?.score).toBeCloseTo(0.3 * 0.9);
+    // When vector side is empty, text weight normalizes to 1.0
+    expect(merged[0]?.score).toBeCloseTo(0.9);
   });
 
   it("preserves all metadata fields", () => {

@@ -121,8 +121,22 @@ export function mergeHybridResults(params: {
     }
   }
 
+  // When one side of the hybrid search has no results, normalize weights
+  // so the available side scores at full strength. Without this, BM25-only
+  // results would be scaled to 0.3 * textScore which is too low to pass
+  // the default minScore threshold.
+  let vw = params.vectorWeight;
+  let tw = params.textWeight;
+  if (params.vector.length === 0 && params.keyword.length > 0) {
+    vw = 0;
+    tw = 1;
+  } else if (params.keyword.length === 0 && params.vector.length > 0) {
+    vw = 1;
+    tw = 0;
+  }
+
   const merged = Array.from(byId.values()).map((entry) => {
-    const score = params.vectorWeight * entry.vectorScore + params.textWeight * entry.textScore;
+    const score = vw * entry.vectorScore + tw * entry.textScore;
     return {
       path: entry.path,
       startLine: entry.startLine,
