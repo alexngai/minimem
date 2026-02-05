@@ -24,15 +24,13 @@ export {
   buildFileEntry,
   cosineSimilarity,
   isMemoryPath,
-  normalizeRelPath,
-  logError,
   type MemoryChunk,
   type MemoryFileEntry,
   type DebugFn,
 } from "./internal.js";
 
-// Search utilities
-export { buildFtsQuery, bm25RankToScore, mergeHybridResults } from "./search/hybrid.js";
+// Note: Internal utilities (normalizeRelPath, logError, buildFtsQuery, bm25RankToScore,
+// mergeHybridResults) are not exported. Import from source files directly if needed.
 
 // Batch embedding
 export { runOpenAiEmbeddingBatches, type OpenAiBatchRequest } from "./embeddings/batch-openai.js";

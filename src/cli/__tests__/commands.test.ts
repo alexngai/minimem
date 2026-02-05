@@ -10,7 +10,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert";
 
 import { init } from "../commands/init.js";
@@ -35,86 +35,7 @@ import {
   getDirName,
   type GlobalConfig,
 } from "../config.js";
-
-// Deterministic embedding function
-function createDeterministicEmbedding(text: string): number[] {
-  const lower = text.toLowerCase();
-  const keywords = [
-    "project", "meeting", "todo", "bug", "feature", "api", "database", "user",
-    "test", "deploy", "config", "error", "fix", "update", "review", "design",
-    "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
-    "important", "urgent", "note", "remember", "decision", "action", "plan", "goal",
-  ];
-
-  const vec = new Array(128).fill(0);
-
-  keywords.forEach((keyword, i) => {
-    const count = (lower.match(new RegExp(keyword, "g")) || []).length;
-    vec[i] = count * 0.5;
-  });
-
-  for (let i = 32; i < 128; i++) {
-    vec[i] = (lower.charCodeAt(i % lower.length) || 0) / 1000;
-  }
-
-  const magnitude = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0)) || 1;
-  return vec.map(v => v / magnitude);
-}
-
-// Mock fetch for embeddings
-function createMockFetch() {
-  return mock.fn(async (url: string | URL, init?: RequestInit) => {
-    const urlStr = url.toString();
-    const body = init?.body ? JSON.parse(init.body as string) : {};
-
-    if (urlStr.includes("/embeddings")) {
-      const inputs = Array.isArray(body.input) ? body.input : [body.input];
-      const data = inputs.map((text: string, index: number) => ({
-        object: "embedding",
-        index,
-        embedding: createDeterministicEmbedding(text),
-      }));
-
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ object: "list", data, model: body.model }),
-        text: async () => JSON.stringify({ object: "list", data, model: body.model }),
-      };
-    }
-
-    return {
-      ok: false,
-      status: 404,
-      json: async () => ({ error: "Not found" }),
-      text: async () => "Not found",
-    };
-  });
-}
-
-// Capture console output
-function captureConsole() {
-  const logs: string[] = [];
-  const errors: string[] = [];
-  const originalLog = console.log;
-  const originalError = console.error;
-
-  console.log = (...args: unknown[]) => {
-    logs.push(args.map(a => String(a)).join(" "));
-  };
-  console.error = (...args: unknown[]) => {
-    errors.push(args.map(a => String(a)).join(" "));
-  };
-
-  return {
-    logs,
-    errors,
-    restore: () => {
-      console.log = originalLog;
-      console.error = originalError;
-    },
-  };
-}
+import { createMockFetch, captureConsole } from "../../__tests__/helpers.js";
 
 describe("CLI Commands", () => {
   let tempDir: string;

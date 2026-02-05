@@ -13,72 +13,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { after, before, describe, it, mock } from "node:test";
+import { after, before, describe, it } from "node:test";
 import assert from "node:assert";
 
 import { Minimem } from "../minimem.js";
-
-// Deterministic embedding function based on keyword presence
-// Returns a 128-dimensional vector with values based on word frequencies
-function createDeterministicEmbedding(text: string): number[] {
-  const lower = text.toLowerCase();
-  const keywords = [
-    "project", "meeting", "todo", "bug", "feature", "api", "database", "user",
-    "test", "deploy", "config", "error", "fix", "update", "review", "design",
-    "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
-    "important", "urgent", "note", "remember", "decision", "action", "plan", "goal",
-  ];
-
-  const vec = new Array(128).fill(0);
-
-  // Set values based on keyword presence
-  keywords.forEach((keyword, i) => {
-    const count = (lower.match(new RegExp(keyword, "g")) || []).length;
-    vec[i] = count * 0.5;
-  });
-
-  // Add some variation based on text length and characters
-  for (let i = 32; i < 128; i++) {
-    vec[i] = (lower.charCodeAt(i % lower.length) || 0) / 1000;
-  }
-
-  // Normalize
-  const magnitude = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0)) || 1;
-  return vec.map(v => v / magnitude);
-}
-
-// Mock fetch to return deterministic embeddings
-function createMockFetch() {
-  return mock.fn(async (url: string | URL, init?: RequestInit) => {
-    const urlStr = url.toString();
-    const body = init?.body ? JSON.parse(init.body as string) : {};
-
-    // Handle OpenAI embeddings endpoint
-    if (urlStr.includes("/embeddings")) {
-      const inputs = Array.isArray(body.input) ? body.input : [body.input];
-      const data = inputs.map((text: string, index: number) => ({
-        object: "embedding",
-        index,
-        embedding: createDeterministicEmbedding(text),
-      }));
-
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ object: "list", data, model: body.model }),
-        text: async () => JSON.stringify({ object: "list", data, model: body.model }),
-      };
-    }
-
-    // Default: return error
-    return {
-      ok: false,
-      status: 404,
-      json: async () => ({ error: "Not found" }),
-      text: async () => "Not found",
-    };
-  });
-}
+import { createMockFetch } from "./helpers.js";
 
 describe("Minimem E2E Integration", () => {
   let tempDir: string;
