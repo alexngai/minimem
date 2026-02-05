@@ -7,17 +7,22 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as os from "node:os";
 import { Minimem } from "../../minimem.js";
 import { createMcpServer, runMcpServer } from "../../server/mcp.js";
 import type { MemoryInstance } from "../../server/tools.js";
 import {
+  resolveMemoryDirs,
+  getGlobalMemoryDir,
+  getDirName,
   loadConfig,
   buildMinimemConfig,
   isInitialized,
   formatPath,
   getInitConfig,
   saveConfig,
+  exitWithError,
+  warn,
+  note,
 } from "../config.js";
 
 export type McpOptions = {
@@ -27,14 +32,15 @@ export type McpOptions = {
 };
 
 export async function mcp(options: McpOptions): Promise<void> {
-  // Collect all directories
-  const directories = resolveDirectories(options);
-  const globalDir = path.join(os.homedir(), ".minimem");
+  // Collect all directories (now uses shared implementation)
+  const directories = resolveMemoryDirs(options);
+  const globalDir = getGlobalMemoryDir();
 
   if (directories.length === 0) {
-    console.error("Error: No memory directories specified.");
-    console.error("Use --dir <path> or --global to specify directories.");
-    process.exit(1);
+    exitWithError(
+      "No memory directories specified.",
+      "Use --dir <path> or --global to specify directories."
+    );
   }
 
   // Auto-initialize global directory if it will be used
@@ -52,7 +58,7 @@ export async function mcp(options: McpOptions): Promise<void> {
 
     if (!(await isInitialized(memoryDir))) {
       // Write to stderr so it doesn't interfere with MCP JSON-RPC
-      console.error(`Warning: ${formatPath(memoryDir)} is not initialized, skipping.`);
+      warn(`${formatPath(memoryDir)} is not initialized, skipping.`);
 
       // If current directory isn't initialized and global isn't already included,
       // add global as a fallback
@@ -80,8 +86,8 @@ export async function mcp(options: McpOptions): Promise<void> {
       const status = await minimem.status();
       if (status.bm25Only && instances.length === 0) {
         // Only warn once
-        console.error(`Note: Running in BM25-only mode (no embedding API configured).`);
-        console.error(`      Search results will be based on keyword matching only.`);
+        note("Running in BM25-only mode (no embedding API configured).");
+        note("Search results will be based on keyword matching only.");
       }
 
       // Create a friendly name for the directory
@@ -94,13 +100,12 @@ export async function mcp(options: McpOptions): Promise<void> {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`Warning: Failed to load ${formatPath(memoryDir)}: ${message}`);
+      warn(`Failed to load ${formatPath(memoryDir)}: ${message}`);
     }
   }
 
   if (instances.length === 0) {
-    console.error("Error: No valid memory directories found.");
-    process.exit(1);
+    exitWithError("No valid memory directories found.");
   }
 
   // Log which directories are being served (to stderr)
@@ -130,57 +135,7 @@ export async function mcp(options: McpOptions): Promise<void> {
   await runMcpServer(server);
 }
 
-/**
- * Resolve all directories from options
- */
-export function resolveDirectories(options: McpOptions): string[] {
-  const dirs: string[] = [];
-
-  // Add explicit directories
-  if (options.dir && options.dir.length > 0) {
-    for (const dir of options.dir) {
-      dirs.push(path.resolve(dir));
-    }
-  }
-
-  // Add global directory if --global flag is set
-  if (options.global) {
-    const globalDir = path.join(os.homedir(), ".minimem");
-    if (!dirs.includes(globalDir)) {
-      dirs.push(globalDir);
-    }
-  }
-
-  // If no directories specified, use current directory
-  if (dirs.length === 0) {
-    dirs.push(process.cwd());
-  }
-
-  return dirs;
-}
-
-/**
- * Get a friendly name for a directory
- */
-export function getDirName(memoryDir: string): string {
-  const home = os.homedir();
-
-  // Check if it's the global directory
-  if (memoryDir === path.join(home, ".minimem")) {
-    return "global";
-  }
-
-  // Use the directory name
-  const name = path.basename(memoryDir);
-
-  // If it's a hidden directory, use parent + name
-  if (name.startsWith(".")) {
-    const parent = path.basename(path.dirname(memoryDir));
-    return `${parent}/${name}`;
-  }
-
-  return name;
-}
+// resolveDirectories and getDirName are now imported from ../config.js (via shared.ts)
 
 /**
  * Auto-initialize the global memory directory silently

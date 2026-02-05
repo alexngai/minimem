@@ -1,14 +1,19 @@
 /**
  * minimem upsert - Create or update a memory file
  *
- * Supports upserting memories across different memory directories.
+ * File paths are relative to the memory directory:
+ *   minimem upsert MEMORY.md "content"        → {memoryDir}/MEMORY.md
+ *   minimem upsert memory/notes.md "content"  → {memoryDir}/memory/notes.md
+ *   minimem upsert /abs/path.md "content"     → /abs/path.md
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as os from "node:os";
 import { Minimem } from "../../minimem.js";
 import {
+  resolveMemoryDir,
+  exitWithError,
+  note,
   loadConfig,
   buildMinimemConfig,
   isInitialized,
@@ -34,14 +39,14 @@ export async function upsert(
   content: string | undefined,
   options: UpsertOptions,
 ): Promise<void> {
-  // Resolve memory directory
-  const memoryDir = resolveMemoryDir(options);
+  const memoryDir = resolveMemoryDir({ dir: options.dir, global: options.global });
 
   // Check if initialized
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    console.error(`Run: minimem init${options.dir ? ` ${options.dir}` : ""}`);
-    process.exit(1);
+    exitWithError(
+      `${formatPath(memoryDir)} is not initialized.`,
+      `Run: minimem init${options.dir ? ` ${options.dir}` : ""}`
+    );
   }
 
   // Get content from stdin if --stdin flag is set
@@ -51,8 +56,10 @@ export async function upsert(
   }
 
   if (!finalContent) {
-    console.error("Error: No content provided. Use --stdin or provide content as argument.");
-    process.exit(1);
+    exitWithError(
+      "No content provided.",
+      "Use --stdin or provide content as argument."
+    );
   }
 
   // Build session context from explicit options
@@ -64,17 +71,17 @@ export async function upsert(
       }
     : undefined;
 
-  // Resolve file path relative to memory directory
+  // Resolve file path - all relative paths are relative to memoryDir
   const filePath = resolveFilePath(file, memoryDir);
 
   // Ensure the file is within the memory directory
   const resolvedPath = path.resolve(filePath);
   const resolvedMemoryDir = path.resolve(memoryDir);
-  if (!resolvedPath.startsWith(resolvedMemoryDir)) {
-    console.error(`Error: File path must be within the memory directory.`);
-    console.error(`  Memory dir: ${formatPath(memoryDir)}`);
-    console.error(`  File path: ${formatPath(filePath)}`);
-    process.exit(1);
+  if (!resolvedPath.startsWith(resolvedMemoryDir + path.sep) && resolvedPath !== resolvedMemoryDir) {
+    exitWithError(
+      "File path must be within the memory directory.",
+      `Memory dir: ${formatPath(memoryDir)}, File: ${formatPath(filePath)}`
+    );
   }
 
   // Ensure parent directory exists
@@ -148,48 +155,32 @@ export async function upsert(
     minimem = await Minimem.create(config);
     await minimem.sync();
     console.log("  Index synced.");
-  } catch (error) {
+  } catch {
     // Sync failed, but file was written successfully
-    console.log("  Note: Index not synced (run 'minimem sync' with API key to index).");
+    note("Index not synced (run 'minimem sync' with API key to index).");
   } finally {
     minimem?.close();
   }
 }
 
 /**
- * Resolve memory directory from options
- */
-function resolveMemoryDir(options: UpsertOptions): string {
-  if (options.dir) {
-    return path.resolve(options.dir);
-  }
-  if (options.global) {
-    return path.join(os.homedir(), ".minimem");
-  }
-  return process.cwd();
-}
-
-/**
- * Resolve file path, handling both absolute and relative paths
+ * Resolve file path to an absolute path.
+ *
+ * Simple rules:
+ * - Absolute paths are used as-is
+ * - Relative paths are relative to memoryDir
+ *
+ * Examples:
+ *   MEMORY.md           → {memoryDir}/MEMORY.md
+ *   memory/notes.md     → {memoryDir}/memory/notes.md
+ *   memory/2024/jan.md  → {memoryDir}/memory/2024/jan.md
+ *   /abs/path.md        → /abs/path.md
  */
 function resolveFilePath(file: string, memoryDir: string): string {
-  // If absolute path, use as-is
   if (path.isAbsolute(file)) {
     return file;
   }
-
-  // If starts with memory/, use relative to memory dir
-  if (file.startsWith("memory/") || file.startsWith("memory\\")) {
-    return path.join(memoryDir, file);
-  }
-
-  // Otherwise, assume it's in the memory/ subdirectory
-  // Unless it's MEMORY.md or similar root file
-  if (file === "MEMORY.md" || file.endsWith(".md") && !file.includes("/")) {
-    return path.join(memoryDir, file);
-  }
-
-  return path.join(memoryDir, "memory", file);
+  return path.join(memoryDir, file);
 }
 
 /**

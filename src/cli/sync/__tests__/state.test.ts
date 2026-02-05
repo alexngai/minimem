@@ -1,5 +1,8 @@
 /**
  * Tests for sync state tracking
+ *
+ * Uses simplified 2-way comparison (local vs remote).
+ * No lastSyncedHash - conflict resolution is last-write-wins.
  */
 
 import fs from "node:fs/promises";
@@ -34,7 +37,7 @@ describe("Sync State", () => {
   describe("createEmptySyncState", () => {
     it("should create empty state with central path", () => {
       const state = createEmptySyncState("myproject/");
-      expect(state.version).toBe(1);
+      expect(state.version).toBe(2);
       expect(state.lastSync).toBe(null);
       expect(state.centralPath).toBe("myproject/");
       expect(state.files).toEqual({});
@@ -52,6 +55,30 @@ describe("Sync State", () => {
       await fs.mkdir(path.join(tempDir, ".minimem"), { recursive: true });
 
       const state: SyncState = {
+        version: 2,
+        lastSync: "2024-01-15T10:30:00.000Z",
+        centralPath: "myproject/",
+        files: {
+          "MEMORY.md": {
+            localHash: "abc123",
+            remoteHash: "abc123",
+            lastModified: "2024-01-15T10:30:00.000Z",
+          },
+        },
+      };
+
+      await saveSyncState(tempDir, state);
+      const loaded = await loadSyncState(tempDir, "myproject/");
+
+      expect(loaded.lastSync).toBe("2024-01-15T10:30:00.000Z");
+      expect(loaded.files["MEMORY.md"].localHash).toBe("abc123");
+    });
+
+    it("should migrate v1 state to v2", async () => {
+      await fs.mkdir(path.join(tempDir, ".minimem"), { recursive: true });
+
+      // Write v1 state with lastSyncedHash
+      const v1State = {
         version: 1,
         lastSync: "2024-01-15T10:30:00.000Z",
         centralPath: "myproject/",
@@ -65,11 +92,16 @@ describe("Sync State", () => {
         },
       };
 
-      await saveSyncState(tempDir, state);
+      await fs.writeFile(
+        path.join(tempDir, ".minimem", "sync-state.json"),
+        JSON.stringify(v1State, null, 2)
+      );
+
       const loaded = await loadSyncState(tempDir, "myproject/");
 
-      expect(loaded.lastSync).toBe("2024-01-15T10:30:00.000Z");
-      expect(loaded.files["MEMORY.md"].localHash).toBe("abc123");
+      expect(loaded.version).toBe(2);
+      // lastSyncedHash should be removed during migration
+      expect((loaded.files["MEMORY.md"] as unknown as { lastSyncedHash?: string }).lastSyncedHash).toBeUndefined();
     });
   });
 
@@ -155,48 +187,30 @@ describe("Sync State", () => {
   });
 
   describe("getFileSyncStatus", () => {
+    // 2-way comparison: only localHash and remoteHash
+
     it("should return unchanged when hashes match", () => {
-      const status = getFileSyncStatus("abc", "abc", "abc");
+      const status = getFileSyncStatus("abc", "abc");
       expect(status).toBe("unchanged");
     });
 
-    it("should return local-only when only local changed", () => {
-      const status = getFileSyncStatus("new", "old", "old");
+    it("should return local-modified when hashes differ", () => {
+      const status = getFileSyncStatus("local", "remote");
+      expect(status).toBe("local-modified");
+    });
+
+    it("should return local-only for file only on local", () => {
+      const status = getFileSyncStatus("abc", null);
       expect(status).toBe("local-only");
     });
 
-    it("should return remote-only when only remote changed", () => {
-      const status = getFileSyncStatus("old", "new", "old");
+    it("should return remote-only for file only on remote", () => {
+      const status = getFileSyncStatus(null, "abc");
       expect(status).toBe("remote-only");
     });
 
-    it("should return conflict when both changed differently", () => {
-      const status = getFileSyncStatus("local", "remote", "old");
-      expect(status).toBe("conflict");
-    });
-
-    it("should return new-local for new local file", () => {
-      const status = getFileSyncStatus("abc", null, null);
-      expect(status).toBe("new-local");
-    });
-
-    it("should return new-remote for new remote file", () => {
-      const status = getFileSyncStatus(null, "abc", null);
-      expect(status).toBe("new-remote");
-    });
-
-    it("should return deleted-local when file deleted locally", () => {
-      const status = getFileSyncStatus(null, "abc", "abc");
-      expect(status).toBe("deleted-local");
-    });
-
-    it("should return deleted-remote when file deleted remotely", () => {
-      const status = getFileSyncStatus("abc", null, "abc");
-      expect(status).toBe("deleted-remote");
-    });
-
-    it("should return unchanged when both changed to same value", () => {
-      const status = getFileSyncStatus("same", "same", "old");
+    it("should return unchanged when both null", () => {
+      const status = getFileSyncStatus(null, null);
       expect(status).toBe("unchanged");
     });
   });
@@ -209,27 +223,24 @@ describe("Sync State", () => {
       expect(updated.lastSync).toBeTruthy();
       expect(updated.files["MEMORY.md"].localHash).toBe("newhash");
       expect(updated.files["MEMORY.md"].remoteHash).toBe("newhash");
-      expect(updated.files["MEMORY.md"].lastSyncedHash).toBe("newhash");
     });
   });
 
   describe("removeFileFromSyncState", () => {
     it("should remove file entry", () => {
       const state: SyncState = {
-        version: 1,
+        version: 2,
         lastSync: "2024-01-15T10:30:00.000Z",
         centralPath: "test/",
         files: {
           "MEMORY.md": {
             localHash: "abc",
             remoteHash: "abc",
-            lastSyncedHash: "abc",
             lastModified: "2024-01-15T10:30:00.000Z",
           },
           "notes.md": {
             localHash: "def",
             remoteHash: "def",
-            lastSyncedHash: "def",
             lastModified: "2024-01-15T10:30:00.000Z",
           },
         },

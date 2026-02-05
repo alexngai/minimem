@@ -1,6 +1,9 @@
 // Main export
 export { Minimem, type MinimemConfig, type MinimemSearchResult } from "./minimem.js";
 
+// Type alias for backward compatibility (some files import SearchResult)
+export type { MinimemSearchResult as SearchResult } from "./minimem.js";
+
 // Embedding providers
 export {
   createEmbeddingProvider,
@@ -21,13 +24,13 @@ export {
   buildFileEntry,
   cosineSimilarity,
   isMemoryPath,
-  normalizeRelPath,
   type MemoryChunk,
   type MemoryFileEntry,
+  type DebugFn,
 } from "./internal.js";
 
-// Search utilities
-export { buildFtsQuery, bm25RankToScore, mergeHybridResults } from "./search/hybrid.js";
+// Note: Internal utilities (normalizeRelPath, logError, buildFtsQuery, bm25RankToScore,
+// mergeHybridResults) are not exported. Import from source files directly if needed.
 
 // Batch embedding
 export { runOpenAiEmbeddingBatches, type OpenAiBatchRequest } from "./embeddings/batch-openai.js";
@@ -66,3 +69,14 @@ export {
   type SessionContext,
   type MemoryFrontmatter,
 } from "./session.js";
+
+// Core components (for advanced usage and custom integrations)
+export {
+  MemoryIndexer,
+  MemorySearcher,
+  type IndexerConfig,
+  type SearchConfig,
+  type IndexStats,
+  type MemoryIndexMeta,
+  type SearchResult as CoreSearchResult,
+} from "./core/index.js";

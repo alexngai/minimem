@@ -3,8 +3,8 @@
  *
  * Tests end-to-end workflows including:
  * - Bootstrap flows (central repo creation, sync init)
- * - Push/pull operations
- * - Conflict detection and resolution
+ * - Push/pull operations with last-write-wins
+ * - Change detection
  * - Collision prevention
  */
 
@@ -27,7 +27,7 @@ import {
   computeFileHash,
   listSyncableFiles,
 } from "../state.js";
-import { detectConflicts, quarantineConflict, listQuarantinedConflicts } from "../conflicts.js";
+import { detectChanges, quarantineConflict, listQuarantinedConflicts } from "../conflicts.js";
 import { push, pull, bidirectionalSync } from "../operations.js";
 import { validateRegistry } from "../validation.js";
 import { saveConfig, loadXdgConfig, saveXdgConfig } from "../../config.js";
@@ -222,89 +222,103 @@ describe("Git Sync Integration Tests", () => {
     });
   });
 
-  describe("Conflict Scenarios", () => {
+  describe("Change Detection (Last-Write-Wins)", () => {
     beforeEach(async () => {
       await initCentralRepo(centralRepo);
       await saveXdgConfig({ centralRepo, machineId: "test-machine" });
 
       await fs.writeFile(path.join(localDir1, "MEMORY.md"), "# Original\n");
-      await saveConfig(localDir1, { sync: { enabled: true, path: "conflict-test" } });
+      await saveConfig(localDir1, { sync: { enabled: true, path: "change-test" } });
 
-      const remotePath = path.join(centralRepo, "conflict-test");
+      const remotePath = path.join(centralRepo, "change-test");
       await fs.mkdir(remotePath, { recursive: true });
       await fs.writeFile(path.join(remotePath, "MEMORY.md"), "# Original\n");
 
       // Set up initial sync state
       const hash = await computeFileHash(path.join(localDir1, "MEMORY.md"));
       await saveSyncState(localDir1, {
-        repoPath: "conflict-test",
+        version: 2,
+        centralPath: "change-test",
         lastSync: new Date().toISOString(),
         files: {
           "MEMORY.md": {
             localHash: hash,
             remoteHash: hash,
-            lastSyncedHash: hash,
             lastModified: new Date().toISOString(),
           },
         },
       });
     });
 
-    it("should detect conflicts when both sides changed", async () => {
+    it("should detect changes when both sides modified", async () => {
       // Local change
       await fs.writeFile(path.join(localDir1, "MEMORY.md"), "# Local Change\n");
 
       // Remote change
-      const remotePath = path.join(centralRepo, "conflict-test");
+      const remotePath = path.join(centralRepo, "change-test");
       await fs.writeFile(path.join(remotePath, "MEMORY.md"), "# Remote Change\n");
 
-      const detection = await detectConflicts(localDir1);
+      const detection = await detectChanges(localDir1);
 
-      expect(detection.summary.conflicts).toBe(1);
-      expect(detection.changes.some((c) => c.status === "conflict")).toBeTruthy();
+      // With 2-way comparison, different content = local-modified
+      expect(detection.summary.localModified).toBe(1);
+      expect(detection.changes.some((c) => c.status === "local-modified")).toBeTruthy();
     });
 
-    it("should use keep-both strategy by default", async () => {
-      // Set conflict strategy
-      await saveConfig(localDir1, {
-        sync: {
-          enabled: true,
-          path: "conflict-test",
-          conflictStrategy: "keep-both",
-        },
-      });
-
-      // Create conflict
+    it("should push local changes overwriting remote (last-write-wins)", async () => {
+      // Local change
       await fs.writeFile(path.join(localDir1, "MEMORY.md"), "# Local Content\n");
-      const remotePath = path.join(centralRepo, "conflict-test");
+
+      // Remote has different content
+      const remotePath = path.join(centralRepo, "change-test");
       await fs.writeFile(path.join(remotePath, "MEMORY.md"), "# Remote Content\n");
 
-      // Push should merge with keep-both
+      // Push overwrites remote
       const result = await push(localDir1, {});
 
-      // If keep-both worked, both contents should be in merged file
-      const content = await fs.readFile(path.join(localDir1, "MEMORY.md"), "utf-8");
-      expect(content.includes("LOCAL") || content.includes("Local")).toBeTruthy();
+      expect(result.success).toBe(true);
+      expect(result.pushed.includes("MEMORY.md")).toBeTruthy();
+
+      // Verify remote now has local content
+      const remoteContent = await fs.readFile(path.join(remotePath, "MEMORY.md"), "utf-8");
+      expect(remoteContent).toBe("# Local Content\n");
     });
 
-    it("should quarantine conflicts for manual resolution", async () => {
+    it("should pull remote changes overwriting local with --force", async () => {
+      // Local has changes
+      await fs.writeFile(path.join(localDir1, "MEMORY.md"), "# Local Content\n");
+
+      // Remote has different content
+      const remotePath = path.join(centralRepo, "change-test");
+      await fs.writeFile(path.join(remotePath, "MEMORY.md"), "# Remote Content\n");
+
+      // Pull with force overwrites local
+      const result = await pull(localDir1, { force: true });
+
+      expect(result.success).toBe(true);
+      expect(result.pulled.includes("MEMORY.md")).toBeTruthy();
+
+      // Verify local now has remote content
+      const localContent = await fs.readFile(path.join(localDir1, "MEMORY.md"), "utf-8");
+      expect(localContent).toBe("# Remote Content\n");
+    });
+
+    it("should quarantine files for manual review", async () => {
       const localContent = "Local version";
       const remoteContent = "Remote version";
-      const baseContent = "Base version";
 
       const conflictDir = await quarantineConflict(
         localDir1,
         "MEMORY.md",
         localContent,
-        remoteContent,
-        baseContent
+        remoteContent
       );
 
       expect(conflictDir.includes("conflicts")).toBeTruthy();
 
-      const conflicts = await listQuarantinedConflicts(localDir1);
-      expect(conflicts.length > 0).toBeTruthy();
-      expect(conflicts[0].files.includes("MEMORY.md")).toBeTruthy();
+      const quarantined = await listQuarantinedConflicts(localDir1);
+      expect(quarantined.length > 0).toBeTruthy();
+      expect(quarantined[0].files.includes("MEMORY.md")).toBeTruthy();
     });
   });
 
@@ -449,10 +463,10 @@ describe("Git Sync Integration Tests", () => {
       // 8. Simulate remote change
       await fs.appendFile(path.join(remotePath, "MEMORY.md"), "\n## New Section\nAdded remotely.\n");
 
-      // 9. Pull changes
-      const pullResult = await pull(localDir1, {});
-      // May have conflicts or succeed depending on sync state
-      expect(pullResult.success || pullResult.conflicts.length > 0).toBeTruthy();
+      // 9. Pull changes - with last-write-wins, this may skip if local has changes
+      const pullResult = await pull(localDir1, { force: true });
+      // With force, should succeed
+      expect(pullResult.success).toBeTruthy();
 
       // 10. Validate registry
       const validation = await validateRegistry();

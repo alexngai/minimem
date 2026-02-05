@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsup && npm run postbuild",
-    "postbuild": "sed -i '' 's/from \"sqlite\"/from \"node:sqlite\"/g' dist/cli/index.js",
+    "postbuild": "node scripts/postbuild.js",
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:integration": "npx tsx --test src/__tests__/minimem.integration.test.ts",

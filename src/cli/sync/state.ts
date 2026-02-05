@@ -1,8 +1,12 @@
 /**
  * Sync state tracking with content hashing
  *
- * Tracks file hashes to detect changes and conflicts between
- * local directories and the central repository.
+ * Tracks file hashes to detect changes between local directories
+ * and the central repository. Uses 2-way comparison (local vs remote).
+ *
+ * Conflict resolution: Last-write-wins
+ * - Push: local overwrites remote
+ * - Pull: remote overwrites local
  */
 
 import fs from "node:fs/promises";
@@ -18,8 +22,6 @@ export type FileHashInfo = {
   localHash: string;
   /** SHA-256 hash of remote file content */
   remoteHash: string;
-  /** Hash at last successful sync (the common base) */
-  lastSyncedHash: string;
   /** Last modified timestamp (ISO) */
   lastModified: string;
 };
@@ -47,7 +49,7 @@ export function getSyncStatePath(dir: string): string {
  */
 export function createEmptySyncState(centralPath: string): SyncState {
   return {
-    version: 1,
+    version: 2, // Bumped version for simplified state
     lastSync: null,
     centralPath,
     files: {},
@@ -76,6 +78,15 @@ export async function loadSyncState(
     // Update centralPath if it changed
     state.centralPath = centralPath;
 
+    // Migrate v1 state (remove lastSyncedHash if present)
+    if (state.version === 1) {
+      for (const file of Object.keys(state.files)) {
+        const entry = state.files[file] as FileHashInfo & { lastSyncedHash?: string };
+        delete entry.lastSyncedHash;
+      }
+      state.version = 2;
+    }
+
     return state;
   } catch {
     return createEmptySyncState(centralPath);
@@ -97,7 +108,7 @@ export async function saveSyncState(
   await fs.mkdir(stateDir, { recursive: true });
 
   // Ensure version is set
-  state.version = state.version || 1;
+  state.version = state.version || 2;
 
   // Write to temp file
   await fs.writeFile(tempPath, JSON.stringify(state, null, 2), "utf-8");
@@ -193,56 +204,47 @@ export async function getFileHashInfo(
 }
 
 /**
- * Compare local and remote files to determine sync status
+ * Sync status for a file (2-way comparison)
+ *
+ * With last-write-wins, there are no conflicts:
+ * - Push operations: local changes overwrite remote
+ * - Pull operations: remote changes overwrite local
  */
 export type FileSyncStatus =
-  | "unchanged" // Both same, matches last sync
-  | "local-only" // Only local changed
-  | "remote-only" // Only remote changed
-  | "conflict" // Both changed differently
-  | "new-local" // New file locally
-  | "new-remote" // New file on remote
-  | "deleted-local" // Deleted locally
-  | "deleted-remote"; // Deleted on remote
+  | "unchanged"      // Both same
+  | "local-modified" // Local differs from remote (push will overwrite remote)
+  | "remote-modified"// Remote differs from local (pull will overwrite local)
+  | "local-only"     // File exists only locally
+  | "remote-only";   // File exists only on remote
 
+/**
+ * Compare local and remote files to determine sync status
+ * Simple 2-way comparison (no 3-way merge needed with last-write-wins)
+ */
 export function getFileSyncStatus(
   localHash: string | null,
-  remoteHash: string | null,
-  lastSyncedHash: string | null
+  remoteHash: string | null
 ): FileSyncStatus {
   // Both exist and are the same
   if (localHash && remoteHash && localHash === remoteHash) {
     return "unchanged";
   }
 
-  // New files (no last sync record)
-  if (!lastSyncedHash) {
-    if (localHash && !remoteHash) return "new-local";
-    if (!localHash && remoteHash) return "new-remote";
-    if (localHash && remoteHash && localHash !== remoteHash) return "conflict";
+  // File exists in both but differs
+  if (localHash && remoteHash && localHash !== remoteHash) {
+    // With last-write-wins, caller decides direction
+    // Return "local-modified" to indicate a difference
+    return "local-modified";
   }
 
-  // Deletions
-  if (lastSyncedHash && !localHash && remoteHash === lastSyncedHash) {
-    return "deleted-local";
-  }
-  if (lastSyncedHash && !remoteHash && localHash === lastSyncedHash) {
-    return "deleted-remote";
+  // File only exists locally
+  if (localHash && !remoteHash) {
+    return "local-only";
   }
 
-  // Changes since last sync
-  if (lastSyncedHash) {
-    const localChanged = localHash !== lastSyncedHash;
-    const remoteChanged = remoteHash !== lastSyncedHash;
-
-    if (localChanged && !remoteChanged) return "local-only";
-    if (!localChanged && remoteChanged) return "remote-only";
-    if (localChanged && remoteChanged) {
-      // Both changed - conflict if they're different
-      if (localHash !== remoteHash) return "conflict";
-      // Both changed to same value - unchanged
-      return "unchanged";
-    }
+  // File only exists on remote
+  if (!localHash && remoteHash) {
+    return "remote-only";
   }
 
   return "unchanged";
@@ -264,7 +266,6 @@ export function updateSyncStateAfterSync(
       [filePath]: {
         localHash: hash,
         remoteHash: hash,
-        lastSyncedHash: hash,
         lastModified: new Date().toISOString(),
       },
     },
@@ -293,8 +294,7 @@ export async function buildSyncState(
   remoteDir: string,
   centralPath: string,
   include: string[],
-  exclude: string[],
-  existingState?: SyncState
+  exclude: string[]
 ): Promise<{
   state: SyncState;
   changes: Array<{
@@ -304,7 +304,7 @@ export async function buildSyncState(
     remoteHash: string | null;
   }>;
 }> {
-  const state = existingState || createEmptySyncState(centralPath);
+  const state = createEmptySyncState(centralPath);
   const changes: Array<{
     file: string;
     status: FileSyncStatus;
@@ -329,13 +329,9 @@ export async function buildSyncState(
       getFileHashInfo(remotePath),
     ]);
 
-    const existingEntry = state.files[file];
-    const lastSyncedHash = existingEntry?.lastSyncedHash ?? null;
-
     const status = getFileSyncStatus(
       localInfo.hash ?? null,
-      remoteInfo.hash ?? null,
-      lastSyncedHash
+      remoteInfo.hash ?? null
     );
 
     if (status !== "unchanged") {
@@ -349,9 +345,8 @@ export async function buildSyncState(
 
     // Update state with current hashes
     state.files[file] = {
-      localHash: localInfo.hash ?? existingEntry?.localHash ?? "",
-      remoteHash: remoteInfo.hash ?? existingEntry?.remoteHash ?? "",
-      lastSyncedHash: existingEntry?.lastSyncedHash ?? "",
+      localHash: localInfo.hash ?? "",
+      remoteHash: remoteInfo.hash ?? "",
       lastModified: localInfo.mtime ?? remoteInfo.mtime ?? new Date().toISOString(),
     };
   }

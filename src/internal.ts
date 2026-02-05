@@ -3,6 +3,30 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+/**
+ * Debug function type for optional logging
+ */
+export type DebugFn = (message: string, data?: Record<string, unknown>) => void;
+
+/**
+ * Log an error with context (for debugging).
+ * Only logs if a debug function is provided.
+ *
+ * @param context - A short identifier for where the error occurred
+ * @param error - The error object or message
+ * @param debug - Optional debug function to log to
+ */
+export function logError(
+  context: string,
+  error: unknown,
+  debug?: DebugFn
+): void {
+  if (!debug) return;
+
+  const message = error instanceof Error ? error.message : String(error);
+  debug(`[${context}] Error: ${message}`);
+}
+
 export type MemoryFileEntry = {
   path: string;
   absPath: string;
@@ -18,10 +42,24 @@ export type MemoryChunk = {
   hash: string;
 };
 
-export function ensureDir(dir: string): string {
+/**
+ * Ensure a directory exists, creating it if necessary.
+ *
+ * @param dir - The directory path to ensure exists
+ * @param debug - Optional debug function for logging errors
+ * @returns The directory path
+ */
+export function ensureDir(dir: string, debug?: DebugFn): string {
   try {
     fsSync.mkdirSync(dir, { recursive: true });
-  } catch {}
+  } catch (error) {
+    // Only swallow EEXIST errors (directory already exists)
+    // Log other errors for debugging
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== "EEXIST") {
+      logError("ensureDir", error, debug);
+    }
+  }
   return dir;
 }
 
@@ -64,8 +102,30 @@ export async function listMemoryFiles(memoryDir: string): Promise<string[]> {
   const result: string[] = [];
   const memoryFile = path.join(memoryDir, "MEMORY.md");
   const altMemoryFile = path.join(memoryDir, "memory.md");
-  if (await exists(memoryFile)) result.push(memoryFile);
-  if (await exists(altMemoryFile)) result.push(altMemoryFile);
+  const hasUpper = await exists(memoryFile);
+  const hasLower = await exists(altMemoryFile);
+
+  // Prevent ambiguity: both MEMORY.md and memory.md cannot coexist
+  // (unless they resolve to the same file on case-insensitive filesystems)
+  if (hasUpper && hasLower) {
+    let upperReal = memoryFile;
+    let lowerReal = altMemoryFile;
+    try { upperReal = await fs.realpath(memoryFile); } catch {}
+    try { lowerReal = await fs.realpath(altMemoryFile); } catch {}
+    if (upperReal !== lowerReal) {
+      throw new Error(
+        `Both MEMORY.md and memory.md exist in ${memoryDir}. ` +
+        `Please remove one to avoid ambiguity.`
+      );
+    }
+    // Same file (case-insensitive FS) — only include once
+    result.push(memoryFile);
+  } else if (hasUpper) {
+    result.push(memoryFile);
+  } else if (hasLower) {
+    result.push(altMemoryFile);
+  }
+
   const memorySubDir = path.join(memoryDir, "memory");
   if (await exists(memorySubDir)) {
     await walkDir(memorySubDir, result);
@@ -207,4 +267,12 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 export function truncateUtf16Safe(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return text.slice(0, maxChars);
+}
+
+/**
+ * Convert a numeric embedding vector to a Buffer suitable for sqlite-vec storage.
+ * Uses Float32 encoding, which is the format expected by sqlite-vec's vector functions.
+ */
+export function vectorToBlob(embedding: number[]): Buffer {
+  return Buffer.from(new Float32Array(embedding).buffer);
 }

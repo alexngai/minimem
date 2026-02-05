@@ -13,8 +13,8 @@ export type EmbeddingProvider = {
 
 export type EmbeddingProviderResult = {
   provider: EmbeddingProvider;
-  requestedProvider: "openai" | "local" | "gemini" | "auto";
-  fallbackFrom?: "openai" | "local" | "gemini";
+  requestedProvider: "openai" | "local" | "gemini" | "auto" | "none";
+  fallbackFrom?: "openai" | "local" | "gemini" | "auto";
   fallbackReason?: string;
   openAi?: OpenAiEmbeddingClient;
   gemini?: GeminiEmbeddingClient;
@@ -319,7 +319,7 @@ export async function createEmbeddingProvider(
   if (requestedProvider === "none") {
     return {
       provider: createNoOpEmbeddingProvider(),
-      requestedProvider: "none" as "auto", // Type coercion for compatibility
+      requestedProvider: "none",
     };
   }
 
@@ -371,7 +371,7 @@ export async function createEmbeddingProvider(
     return {
       provider: createNoOpEmbeddingProvider(),
       requestedProvider,
-      fallbackFrom: "auto" as "openai", // Indicate this is a fallback
+      fallbackFrom: "auto",
       fallbackReason: "No embedding API available. Using BM25 full-text search only.",
     };
   }

@@ -11,6 +11,8 @@ import {
   isInitialized,
   formatPath,
   getSyncConfig,
+  exitWithError,
+  warn,
 } from "../config.js";
 import {
   listQuarantinedConflicts,
@@ -35,8 +37,7 @@ export async function conflictsCommand(options: ConflictsOptions): Promise<void>
   });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   try {
@@ -65,8 +66,8 @@ export async function conflictsCommand(options: ConflictsOptions): Promise<void>
     console.log(`\nTotal: ${conflicts.length} conflict set(s)`);
     console.log("\nUse 'minimem sync:resolve <timestamp>' to resolve a conflict.");
   } catch (error) {
-    console.error(`Error: ${error}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : String(error);
+    exitWithError(message);
   }
 }
 
@@ -89,8 +90,7 @@ export async function resolveCommand(
   });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   const conflictDir = path.join(getConflictsDir(memoryDir), timestamp);
@@ -98,9 +98,10 @@ export async function resolveCommand(
   try {
     await fs.access(conflictDir);
   } catch {
-    console.error(`Error: Conflict '${timestamp}' not found.`);
-    console.error("Use 'minimem sync:conflicts' to list available conflicts.");
-    process.exit(1);
+    exitWithError(
+      `Conflict '${timestamp}' not found.`,
+      "Use 'minimem sync:conflicts' to list available conflicts."
+    );
   }
 
   try {
@@ -121,8 +122,7 @@ export async function resolveCommand(
     }
 
     if (fileGroups.size === 0) {
-      console.error("No conflict files found in this directory.");
-      process.exit(1);
+      exitWithError("No conflict files found in this directory.");
     }
 
     // Determine merge tool
@@ -170,8 +170,8 @@ export async function resolveCommand(
     console.log("\nMerge complete. Remove conflict directory when satisfied:");
     console.log(`  rm -rf "${conflictDir}"`);
   } catch (error) {
-    console.error(`Error: ${error}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : String(error);
+    exitWithError(message);
   }
 }
 
@@ -211,8 +211,7 @@ export async function cleanupCommand(options: CleanupOptions): Promise<void> {
   });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   const maxAgeDays = options.days ?? 30;
@@ -264,8 +263,8 @@ export async function cleanupCommand(options: CleanupOptions): Promise<void> {
       console.log(`\nRemoved ${cleaned} conflict(s), kept ${kept}`);
     }
   } catch (error) {
-    console.error(`Error: ${error}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : String(error);
+    exitWithError(message);
   }
 }
 
@@ -327,7 +326,8 @@ export async function appendSyncLog(
     await fs.writeFile(logPath, content);
   } catch (error) {
     // Log failures are non-fatal
-    console.error(`Warning: Failed to write sync log: ${error}`);
+    const message = error instanceof Error ? error.message : String(error);
+    warn(`Failed to write sync log: ${message}`);
   }
 }
 
@@ -365,8 +365,7 @@ export async function logCommand(options: LogOptions): Promise<void> {
   });
 
   if (!(await isInitialized(memoryDir))) {
-    console.error(`Error: ${formatPath(memoryDir)} is not initialized.`);
-    process.exit(1);
+    exitWithError(`${formatPath(memoryDir)} is not initialized.`);
   }
 
   try {
@@ -408,7 +407,7 @@ export async function logCommand(options: LogOptions): Promise<void> {
       }
     }
   } catch (error) {
-    console.error(`Error: ${error}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : String(error);
+    exitWithError(message);
   }
 }

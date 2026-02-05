@@ -2,17 +2,21 @@
  * Directory type detection for sync system
  *
  * Detects whether a memory directory is:
- * - project-bound: inside git repo, no sync config
- * - standalone: has sync config, not inside git repo
- * - hybrid: inside git repo AND has sync config
- * - unmanaged: no git repo, no sync config
+ * - project-bound: inside git repo (synced via project's git)
+ * - standalone: has minimem sync config (synced via central repo)
  */
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getConfigPath } from "../config.js";
 
-export type DirectoryType = "project-bound" | "standalone" | "hybrid" | "unmanaged";
+/**
+ * Directory type for sync purposes
+ *
+ * - project-bound: Memory is inside a git repo and synced via project's git
+ * - standalone: Memory has minimem sync config and syncs via central repo
+ */
+export type DirectoryType = "project-bound" | "standalone";
 
 /**
  * Check if a directory is inside a git repository
@@ -82,29 +86,26 @@ export async function hasSyncConfig(dir: string): Promise<boolean> {
 /**
  * Detect the directory type based on git repo presence and sync config
  *
- * Decision matrix:
- * | Sync Config | In Git Repo | Result        |
- * |-------------|-------------|---------------|
- * | Yes         | Yes         | hybrid        |
- * | Yes         | No          | standalone    |
- * | No          | Yes         | project-bound |
- * | No          | No          | unmanaged     |
+ * - If has sync config -> standalone (uses minimem central repo sync)
+ * - If inside git repo -> project-bound (synced via project's git)
+ * - Otherwise -> standalone (default, can set up sync later)
  */
 export async function detectDirectoryType(dir: string): Promise<DirectoryType> {
-  const [hasSync, inGit] = await Promise.all([
-    hasSyncConfig(dir),
-    isInsideGitRepo(dir),
-  ]);
+  const hasSync = await hasSyncConfig(dir);
 
-  if (hasSync && inGit) {
-    return "hybrid";
-  } else if (hasSync && !inGit) {
+  // If has sync config, it's standalone (uses minimem sync)
+  if (hasSync) {
     return "standalone";
-  } else if (!hasSync && inGit) {
-    return "project-bound";
-  } else {
-    return "unmanaged";
   }
+
+  // If inside git repo, it's project-bound (synced via git)
+  const inGit = await isInsideGitRepo(dir);
+  if (inGit) {
+    return "project-bound";
+  }
+
+  // Default to standalone (can set up sync later)
+  return "standalone";
 }
 
 /**
@@ -120,17 +121,13 @@ export async function getDirectoryInfo(dir: string): Promise<{
     getGitRoot(dir),
   ]);
 
-  const inGit = gitRoot !== undefined;
-
   let type: DirectoryType;
-  if (hasSync && inGit) {
-    type = "hybrid";
-  } else if (hasSync && !inGit) {
+  if (hasSync) {
     type = "standalone";
-  } else if (!hasSync && inGit) {
+  } else if (gitRoot !== undefined) {
     type = "project-bound";
   } else {
-    type = "unmanaged";
+    type = "standalone";
   }
 
   return {

@@ -4,10 +4,12 @@
  * Supports searching across multiple memory directories in a single query.
  */
 
-import * as path from "node:path";
-import * as os from "node:os";
-import { Minimem, type SearchResult } from "../../minimem.js";
+import { Minimem, type MinimemSearchResult } from "../../minimem.js";
 import {
+  resolveMemoryDirs,
+  exitWithError,
+  warn,
+  note,
   loadConfig,
   buildMinimemConfig,
   isInitialized,
@@ -23,7 +25,7 @@ export type SearchOptions = {
   json?: boolean;
 };
 
-type SearchResultWithSource = SearchResult & {
+type SearchResultWithSource = MinimemSearchResult & {
   memoryDir: string;
 };
 
@@ -31,13 +33,13 @@ export async function search(
   query: string,
   options: SearchOptions,
 ): Promise<void> {
-  // Collect all directories to search
-  const directories = resolveSearchDirectories(options);
+  const directories = resolveMemoryDirs(options);
 
   if (directories.length === 0) {
-    console.error("Error: No memory directories specified.");
-    console.error("Use --dir <path> or --global to specify directories to search.");
-    process.exit(1);
+    exitWithError(
+      "No memory directories specified.",
+      "Use --dir <path> or --global to specify directories to search."
+    );
   }
 
   // Validate all directories are initialized
@@ -46,13 +48,12 @@ export async function search(
     if (await isInitialized(dir)) {
       validDirs.push(dir);
     } else {
-      console.error(`Warning: ${formatPath(dir)} is not initialized, skipping.`);
+      warn(`${formatPath(dir)} is not initialized, skipping.`);
     }
   }
 
   if (validDirs.length === 0) {
-    console.error("Error: No valid initialized memory directories found.");
-    process.exit(1);
+    exitWithError("No valid initialized memory directories found.");
   }
 
   const maxResults = options.max ? parseInt(options.max, 10) : 10;
@@ -79,8 +80,8 @@ export async function search(
       if (!warnedBm25) {
         const status = await minimem.status();
         if (status.bm25Only) {
-          console.error("Note: Running in BM25-only mode (no embedding API configured).");
-          console.error("      Results are based on keyword matching only.\n");
+          note("Running in BM25-only mode (no embedding API configured).");
+          note("Results are based on keyword matching only.\n");
           warnedBm25 = true;
         }
       }
@@ -139,35 +140,6 @@ export async function search(
       instance.close();
     }
   }
-}
-
-/**
- * Resolve all directories to search based on options
- */
-function resolveSearchDirectories(options: SearchOptions): string[] {
-  const dirs: string[] = [];
-
-  // Add explicit directories
-  if (options.dir && options.dir.length > 0) {
-    for (const dir of options.dir) {
-      dirs.push(path.resolve(dir));
-    }
-  }
-
-  // Add global directory if --global flag is set
-  if (options.global) {
-    const globalDir = path.join(os.homedir(), ".minimem");
-    if (!dirs.includes(globalDir)) {
-      dirs.push(globalDir);
-    }
-  }
-
-  // If no directories specified, use current directory
-  if (dirs.length === 0) {
-    dirs.push(process.cwd());
-  }
-
-  return dirs;
 }
 
 /**
