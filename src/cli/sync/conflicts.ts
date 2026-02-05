@@ -1,8 +1,8 @@
 /**
- * Conflict detection and resolution
+ * Sync change detection
  *
- * Detects when files have changed on both local and remote since the last sync,
- * and provides mechanisms to resolve conflicts.
+ * Detects differences between local and remote files.
+ * With last-write-wins, there are no conflicts - just differences.
  */
 
 import fs from "node:fs/promises";
@@ -10,35 +10,32 @@ import path from "node:path";
 
 import { getSyncConfig } from "../config.js";
 import {
-  loadSyncState,
-  saveSyncState,
   listSyncableFiles,
   getFileHashInfo,
   getFileSyncStatus,
   type FileSyncStatus,
-  type SyncState,
 } from "./state.js";
 import { getCentralRepoPath } from "./central.js";
 
-const SHADOWS_DIR = "shadows";
 const CONFLICTS_DIR = "conflicts";
 
-export type FileConflict = {
+export type FileChange = {
   /** Relative file path */
   file: string;
   /** Sync status */
   status: FileSyncStatus;
-  /** Local file hash (null if deleted/missing) */
+  /** Local file hash (null if missing) */
   localHash: string | null;
-  /** Remote file hash (null if deleted/missing) */
+  /** Remote file hash (null if missing) */
   remoteHash: string | null;
-  /** Last synced hash (null if new file) */
-  baseHash: string | null;
 };
 
-export type ConflictDetectionResult = {
+// Keep FileConflict as an alias for backwards compatibility
+export type FileConflict = FileChange;
+
+export type ChangeDetectionResult = {
   /** Files that need action */
-  changes: FileConflict[];
+  changes: FileChange[];
   /** Files with no changes */
   unchanged: string[];
   /** Summary counts */
@@ -46,102 +43,29 @@ export type ConflictDetectionResult = {
     unchanged: number;
     localOnly: number;
     remoteOnly: number;
-    conflicts: number;
-    newLocal: number;
-    newRemote: number;
-    deletedLocal: number;
-    deletedRemote: number;
+    localModified: number;
   };
 };
 
-/**
- * Get the shadows directory path
- */
-export function getShadowsDir(memoryDir: string): string {
-  return path.join(memoryDir, ".minimem", SHADOWS_DIR);
-}
+// Keep ConflictDetectionResult as an alias for backwards compatibility
+export type ConflictDetectionResult = ChangeDetectionResult;
 
 /**
- * Get the conflicts directory path
+ * Get the conflicts directory path (for quarantined files)
  */
 export function getConflictsDir(memoryDir: string): string {
   return path.join(memoryDir, ".minimem", CONFLICTS_DIR);
 }
 
 /**
- * Get shadow file path for a given file
- */
-export function getShadowPath(memoryDir: string, filePath: string): string {
-  // Flatten path for shadow storage
-  const flatName = filePath.replace(/\//g, "_");
-  return path.join(getShadowsDir(memoryDir), `${flatName}.base`);
-}
-
-/**
- * Create a shadow copy of a file's content
- */
-export async function createShadowCopy(
-  memoryDir: string,
-  filePath: string,
-  content: string | Buffer
-): Promise<void> {
-  const shadowPath = getShadowPath(memoryDir, filePath);
-  await fs.mkdir(path.dirname(shadowPath), { recursive: true });
-  await fs.writeFile(shadowPath, content);
-}
-
-/**
- * Read a shadow copy if it exists
- */
-export async function readShadowCopy(
-  memoryDir: string,
-  filePath: string
-): Promise<string | null> {
-  const shadowPath = getShadowPath(memoryDir, filePath);
-  try {
-    return await fs.readFile(shadowPath, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Delete a shadow copy
- */
-export async function deleteShadowCopy(
-  memoryDir: string,
-  filePath: string
-): Promise<void> {
-  const shadowPath = getShadowPath(memoryDir, filePath);
-  try {
-    await fs.unlink(shadowPath);
-  } catch {
-    // File might not exist
-  }
-}
-
-/**
- * Clean up all shadow copies
- */
-export async function cleanShadows(memoryDir: string): Promise<void> {
-  const shadowsDir = getShadowsDir(memoryDir);
-  try {
-    await fs.rm(shadowsDir, { recursive: true, force: true });
-  } catch {
-    // Directory might not exist
-  }
-}
-
-/**
- * Quarantine a conflicted file
- * Saves local, remote, and base versions to conflicts directory
+ * Quarantine file versions for manual review
+ * Saves local and remote versions to conflicts directory
  */
 export async function quarantineConflict(
   memoryDir: string,
   filePath: string,
   localContent: string | Buffer | null,
-  remoteContent: string | Buffer | null,
-  baseContent: string | Buffer | null
+  remoteContent: string | Buffer | null
 ): Promise<string> {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const conflictDir = path.join(getConflictsDir(memoryDir), timestamp);
@@ -155,15 +79,12 @@ export async function quarantineConflict(
   if (remoteContent !== null) {
     await fs.writeFile(path.join(conflictDir, `${flatName}.remote`), remoteContent);
   }
-  if (baseContent !== null) {
-    await fs.writeFile(path.join(conflictDir, `${flatName}.base`), baseContent);
-  }
 
   return conflictDir;
 }
 
 /**
- * List all quarantined conflicts
+ * List all quarantined file versions
  */
 export async function listQuarantinedConflicts(
   memoryDir: string
@@ -179,7 +100,7 @@ export async function listQuarantinedConflicts(
         const dirPath = path.join(conflictsDir, entry.name);
         const files = await fs.readdir(dirPath);
 
-        // Extract unique file names (remove .local, .remote, .base suffixes)
+        // Extract unique file names (remove .local, .remote suffixes)
         const uniqueFiles = new Set<string>();
         for (const file of files) {
           const baseName = file.replace(/\.(local|remote|base)$/, "");
@@ -200,12 +121,11 @@ export async function listQuarantinedConflicts(
 }
 
 /**
- * Detect conflicts between local and remote
+ * Detect changes between local and remote
  */
-export async function detectConflicts(
-  memoryDir: string,
-  centralPath?: string
-): Promise<ConflictDetectionResult> {
+export async function detectChanges(
+  memoryDir: string
+): Promise<ChangeDetectionResult> {
   // Get central repo path
   const centralRepo = await getCentralRepoPath();
   if (!centralRepo) {
@@ -219,10 +139,6 @@ export async function detectConflicts(
   }
 
   const remotePath = path.join(centralRepo, syncConfig.path);
-  const effectiveCentralPath = centralPath ?? syncConfig.path;
-
-  // Load sync state
-  const state = await loadSyncState(memoryDir, effectiveCentralPath);
 
   // Get file lists
   const [localFiles, remoteFiles] = await Promise.all([
@@ -232,17 +148,13 @@ export async function detectConflicts(
 
   const allFiles = new Set([...localFiles, ...remoteFiles]);
 
-  const changes: FileConflict[] = [];
+  const changes: FileChange[] = [];
   const unchanged: string[] = [];
   const summary = {
     unchanged: 0,
     localOnly: 0,
     remoteOnly: 0,
-    conflicts: 0,
-    newLocal: 0,
-    newRemote: 0,
-    deletedLocal: 0,
-    deletedRemote: 0,
+    localModified: 0,
   };
 
   for (const file of allFiles) {
@@ -254,13 +166,9 @@ export async function detectConflicts(
       getFileHashInfo(remoteFilePath),
     ]);
 
-    const existingEntry = state.files[file];
-    const baseHash = existingEntry?.lastSyncedHash ?? null;
-
     const status = getFileSyncStatus(
       localInfo.hash ?? null,
-      remoteInfo.hash ?? null,
-      baseHash
+      remoteInfo.hash ?? null
     );
 
     if (status === "unchanged") {
@@ -272,7 +180,6 @@ export async function detectConflicts(
         status,
         localHash: localInfo.hash ?? null,
         remoteHash: remoteInfo.hash ?? null,
-        baseHash,
       });
 
       // Update summary
@@ -283,20 +190,8 @@ export async function detectConflicts(
         case "remote-only":
           summary.remoteOnly++;
           break;
-        case "conflict":
-          summary.conflicts++;
-          break;
-        case "new-local":
-          summary.newLocal++;
-          break;
-        case "new-remote":
-          summary.newRemote++;
-          break;
-        case "deleted-local":
-          summary.deletedLocal++;
-          break;
-        case "deleted-remote":
-          summary.deletedRemote++;
+        case "local-modified":
+          summary.localModified++;
           break;
       }
     }
@@ -305,40 +200,5 @@ export async function detectConflicts(
   return { changes, unchanged, summary };
 }
 
-/**
- * Create shadow copies for all conflicts
- * This preserves the base version for 3-way merge
- */
-export async function createShadowsForConflicts(
-  memoryDir: string,
-  conflicts: FileConflict[],
-  state: SyncState
-): Promise<void> {
-  const centralRepo = await getCentralRepoPath();
-  if (!centralRepo) return;
-
-  const syncConfig = await getSyncConfig(memoryDir);
-  if (!syncConfig.path) return;
-
-  for (const conflict of conflicts) {
-    if (conflict.status === "conflict" && conflict.baseHash) {
-      // We need the base content - try to get it from the state's recorded hash
-      // Since we don't store content, we'd need to have saved it before
-      // For now, create an empty shadow to mark that a conflict occurred
-      const shadowPath = getShadowPath(memoryDir, conflict.file);
-      await fs.mkdir(path.dirname(shadowPath), { recursive: true });
-
-      // Write a marker file indicating we need the base content
-      // In practice, the shadow should have been created during the last sync
-      try {
-        await fs.access(shadowPath);
-      } catch {
-        // Shadow doesn't exist - write a placeholder
-        await fs.writeFile(
-          shadowPath,
-          `# Shadow for ${conflict.file}\n# Base hash: ${conflict.baseHash}\n# Created during conflict detection\n`
-        );
-      }
-    }
-  }
-}
+// Keep detectConflicts as an alias for backwards compatibility
+export const detectConflicts = detectChanges;

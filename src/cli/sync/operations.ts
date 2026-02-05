@@ -1,12 +1,16 @@
 /**
  * Sync operations - push and pull
+ *
+ * Uses last-write-wins conflict resolution:
+ * - Push: local overwrites remote
+ * - Pull: remote overwrites local
  */
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 
-import { getSyncConfig, expandPath } from "../config.js";
+import { getSyncConfig } from "../config.js";
 import { getCentralRepoPath } from "./central.js";
 import {
   loadSyncState,
@@ -14,9 +18,8 @@ import {
   listSyncableFiles,
   computeFileHash,
   getFileSyncStatus,
-  type SyncState,
+  getFileHashInfo,
 } from "./state.js";
-import { detectConflicts, quarantineConflict, type FileConflict } from "./conflicts.js";
 import { readRegistry, writeRegistry, updateLastSync } from "./registry.js";
 import { getMachineId } from "../config.js";
 import { appendSyncLog, type SyncLogEntry } from "../commands/conflicts.js";
@@ -25,7 +28,6 @@ export type SyncResult = {
   success: boolean;
   pushed: string[];
   pulled: string[];
-  conflicts: string[];
   errors: string[];
   skipped: string[];
 };
@@ -61,24 +63,9 @@ async function copyFileAtomic(src: string, dest: string): Promise<void> {
 }
 
 /**
- * Apply keep-both merge strategy
- */
-function keepBothMerge(
-  localContent: string,
-  remoteContent: string,
-  localTimestamp: string,
-  remoteTimestamp: string
-): string {
-  return `<<<<<<< LOCAL (${localTimestamp})
-${localContent}
-=======
-${remoteContent}
->>>>>>> REMOTE (${remoteTimestamp})
-`;
-}
-
-/**
  * Push local changes to central repository
+ *
+ * Last-write-wins: local files always overwrite remote files
  */
 export async function push(
   memoryDir: string,
@@ -91,7 +78,6 @@ export async function push(
     success: true,
     pushed: [],
     pulled: [],
-    conflicts: [],
     errors: [],
     skipped: [],
   };
@@ -113,83 +99,73 @@ export async function push(
 
   const remotePath = path.join(centralRepo, syncConfig.path);
 
-  // Detect conflicts
-  const detection = await detectConflicts(memoryDir);
-
   // Load state
   const state = await loadSyncState(memoryDir, syncConfig.path);
 
-  // Process changes
-  for (const change of detection.changes) {
-    const localPath = path.join(memoryDir, change.file);
-    const remoteFilePath = path.join(remotePath, change.file);
+  // Get all local files
+  const localFiles = await listSyncableFiles(
+    memoryDir,
+    syncConfig.include,
+    syncConfig.exclude
+  );
+
+  // Get all remote files for comparison
+  const remoteFiles = await listSyncableFiles(
+    remotePath,
+    syncConfig.include,
+    syncConfig.exclude
+  );
+
+  const allFiles = new Set([...localFiles, ...remoteFiles]);
+
+  // Process each file
+  for (const file of allFiles) {
+    const localPath = path.join(memoryDir, file);
+    const remoteFilePath = path.join(remotePath, file);
 
     try {
-      switch (change.status) {
+      const [localInfo, remoteInfo] = await Promise.all([
+        getFileHashInfo(localPath),
+        getFileHashInfo(remoteFilePath),
+      ]);
+
+      const status = getFileSyncStatus(
+        localInfo.hash ?? null,
+        remoteInfo.hash ?? null
+      );
+
+      switch (status) {
+        case "unchanged":
+          // Already in sync
+          break;
+
         case "local-only":
-        case "new-local":
-          // Push local to remote
+        case "local-modified":
+          // Push local to remote (last-write-wins)
           if (!options.dryRun) {
             await copyFileAtomic(localPath, remoteFilePath);
-            const hash = await computeFileHash(localPath);
-            state.files[change.file] = {
+            const hash = localInfo.hash!;
+            state.files[file] = {
               localHash: hash,
               remoteHash: hash,
-              lastSyncedHash: hash,
               lastModified: new Date().toISOString(),
             };
           }
-          result.pushed.push(change.file);
+          result.pushed.push(file);
           break;
 
-        case "deleted-remote":
-          // Local file was deleted remotely, skip (don't push deletion)
-          result.skipped.push(change.file);
-          break;
-
-        case "conflict":
-          if (options.force) {
-            // Force push - overwrite remote
-            if (!options.dryRun) {
-              await copyFileAtomic(localPath, remoteFilePath);
-              const hash = await computeFileHash(localPath);
-              state.files[change.file] = {
-                localHash: hash,
-                remoteHash: hash,
-                lastSyncedHash: hash,
-                lastModified: new Date().toISOString(),
-              };
-            }
-            result.pushed.push(change.file);
-          } else {
-            // Handle conflict with keep-both strategy
-            if (!options.dryRun && syncConfig.conflictStrategy === "keep-both") {
-              const localContent = await fs.readFile(localPath, "utf-8");
-              const remoteContent = await fs.readFile(remoteFilePath, "utf-8");
-              const merged = keepBothMerge(
-                localContent,
-                remoteContent,
-                new Date().toISOString(),
-                new Date().toISOString()
-              );
-              await fs.writeFile(localPath, merged);
-              await fs.writeFile(remoteFilePath, merged);
-              const hash = computeFileHash(localPath);
-              result.pushed.push(change.file);
-            } else {
-              result.conflicts.push(change.file);
-              result.success = false;
-            }
-          }
+        case "remote-only":
+          // File only exists on remote - skip on push (don't delete)
+          result.skipped.push(file);
           break;
 
         default:
-          // remote-only, new-remote, deleted-local - skip on push
-          result.skipped.push(change.file);
+          result.skipped.push(file);
           break;
       }
     } catch (error) {
-      result.errors.push(`${change.file}: ${error}`);
+      const message = error instanceof Error ? error.message : String(error);
+      result.errors.push(`${file}: ${message}`);
       result.success = false;
     }
   }
@@ -211,9 +187,8 @@ export async function push(
     const logEntry: SyncLogEntry = {
       timestamp: new Date().toISOString(),
       operation: "push",
-      result: result.success ? (result.conflicts.length > 0 ? "partial" : "success") : "failure",
+      result: result.success ? "success" : "failure",
       pushed: result.pushed.length,
-      conflicts: result.conflicts.length,
       errors: result.errors.length > 0 ? result.errors : undefined,
     };
     await appendSyncLog(memoryDir, logEntry);
@@ -224,6 +199,8 @@ export async function push(
 
 /**
  * Pull changes from central repository
+ *
+ * Last-write-wins: remote files always overwrite local files
  */
 export async function pull(
   memoryDir: string,
@@ -236,7 +213,6 @@ export async function pull(
     success: true,
     pushed: [],
     pulled: [],
-    conflicts: [],
     errors: [],
     skipped: [],
   };
@@ -258,82 +234,90 @@ export async function pull(
 
   const remotePath = path.join(centralRepo, syncConfig.path);
 
-  // Detect conflicts
-  const detection = await detectConflicts(memoryDir);
-
   // Load state
   const state = await loadSyncState(memoryDir, syncConfig.path);
 
-  // Process changes
-  for (const change of detection.changes) {
-    const localPath = path.join(memoryDir, change.file);
-    const remoteFilePath = path.join(remotePath, change.file);
+  // Get all files from both sides
+  const localFiles = await listSyncableFiles(
+    memoryDir,
+    syncConfig.include,
+    syncConfig.exclude
+  );
+
+  const remoteFiles = await listSyncableFiles(
+    remotePath,
+    syncConfig.include,
+    syncConfig.exclude
+  );
+
+  const allFiles = new Set([...localFiles, ...remoteFiles]);
+
+  // Process each file
+  for (const file of allFiles) {
+    const localPath = path.join(memoryDir, file);
+    const remoteFilePath = path.join(remotePath, file);
 
     try {
-      switch (change.status) {
+      const [localInfo, remoteInfo] = await Promise.all([
+        getFileHashInfo(localPath),
+        getFileHashInfo(remoteFilePath),
+      ]);
+
+      const status = getFileSyncStatus(
+        localInfo.hash ?? null,
+        remoteInfo.hash ?? null
+      );
+
+      switch (status) {
+        case "unchanged":
+          // Already in sync
+          break;
+
         case "remote-only":
-        case "new-remote":
-          // Pull remote to local
+          // Pull new remote file to local
           if (!options.dryRun) {
             await copyFileAtomic(remoteFilePath, localPath);
-            const hash = await computeFileHash(localPath);
-            state.files[change.file] = {
+            const hash = remoteInfo.hash!;
+            state.files[file] = {
               localHash: hash,
               remoteHash: hash,
-              lastSyncedHash: hash,
               lastModified: new Date().toISOString(),
             };
           }
-          result.pulled.push(change.file);
+          result.pulled.push(file);
           break;
 
-        case "deleted-local":
-          // Remote file was deleted locally, skip (don't pull deletion)
-          result.skipped.push(change.file);
-          break;
-
-        case "conflict":
-          if (options.force) {
-            // Force pull - overwrite local
+        case "local-modified":
+          // Both have changes - with last-write-wins, pull overwrites local
+          if (options.force || !localInfo.exists) {
             if (!options.dryRun) {
               await copyFileAtomic(remoteFilePath, localPath);
-              const hash = await computeFileHash(localPath);
-              state.files[change.file] = {
+              const hash = remoteInfo.hash!;
+              state.files[file] = {
                 localHash: hash,
                 remoteHash: hash,
-                lastSyncedHash: hash,
                 lastModified: new Date().toISOString(),
               };
             }
-            result.pulled.push(change.file);
+            result.pulled.push(file);
           } else {
-            // Handle conflict with keep-both strategy
-            if (!options.dryRun && syncConfig.conflictStrategy === "keep-both") {
-              const localContent = await fs.readFile(localPath, "utf-8");
-              const remoteContent = await fs.readFile(remoteFilePath, "utf-8");
-              const merged = keepBothMerge(
-                localContent,
-                remoteContent,
-                new Date().toISOString(),
-                new Date().toISOString()
-              );
-              await fs.writeFile(localPath, merged);
-              await fs.writeFile(remoteFilePath, merged);
-              result.pulled.push(change.file);
-            } else {
-              result.conflicts.push(change.file);
-              result.success = false;
-            }
+            // Without --force, skip files that have local changes
+            result.skipped.push(file);
           }
           break;
 
+        case "local-only":
+          // File only exists locally - skip on pull (don't delete)
+          result.skipped.push(file);
+          break;
+
         default:
-          // local-only, new-local, deleted-remote - skip on pull
-          result.skipped.push(change.file);
+          result.skipped.push(file);
           break;
       }
     } catch (error) {
-      result.errors.push(`${change.file}: ${error}`);
+      const message = error instanceof Error ? error.message : String(error);
+      result.errors.push(`${file}: ${message}`);
       result.success = false;
     }
   }
@@ -355,9 +339,8 @@ export async function pull(
     const logEntry: SyncLogEntry = {
       timestamp: new Date().toISOString(),
       operation: "pull",
-      result: result.success ? (result.conflicts.length > 0 ? "partial" : "success") : "failure",
+      result: result.success ? "success" : "failure",
       pulled: result.pulled.length,
-      conflicts: result.conflicts.length,
       errors: result.errors.length > 0 ? result.errors : undefined,
     };
     await appendSyncLog(memoryDir, logEntry);
@@ -384,7 +367,6 @@ export async function bidirectionalSync(
     success: pushResult.success && pullResult.success,
     pushed: pushResult.pushed,
     pulled: pullResult.pulled,
-    conflicts: [...new Set([...pushResult.conflicts, ...pullResult.conflicts])],
     errors: [...pushResult.errors, ...pullResult.errors],
     skipped: [...new Set([...pushResult.skipped, ...pullResult.skipped])],
   };

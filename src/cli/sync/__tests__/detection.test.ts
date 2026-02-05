@@ -1,5 +1,9 @@
 /**
  * Tests for directory type detection
+ *
+ * Simplified to two types:
+ * - project-bound: inside git repo (synced via project's git)
+ * - standalone: uses minimem sync or not in git (default)
  */
 
 import fs from "node:fs/promises";
@@ -128,9 +132,9 @@ describe("Directory Type Detection", () => {
   });
 
   describe("detectDirectoryType", () => {
-    it("should detect unmanaged (no git, no sync)", async () => {
+    it("should detect standalone (no git, no sync)", async () => {
       const result = await detectDirectoryType(tempDir);
-      expect(result).toBe("unmanaged");
+      expect(result).toBe("standalone");
     });
 
     it("should detect project-bound (git, no sync)", async () => {
@@ -151,7 +155,7 @@ describe("Directory Type Detection", () => {
       expect(result).toBe("standalone");
     });
 
-    it("should detect hybrid (git and sync enabled)", async () => {
+    it("should detect standalone when both git and sync enabled (sync takes precedence)", async () => {
       await fs.mkdir(path.join(tempDir, ".git"));
       await fs.mkdir(path.join(tempDir, ".minimem"), { recursive: true });
       await fs.writeFile(
@@ -160,12 +164,13 @@ describe("Directory Type Detection", () => {
       );
 
       const result = await detectDirectoryType(tempDir);
-      expect(result).toBe("hybrid");
+      // Sync config takes precedence - directory uses minimem sync
+      expect(result).toBe("standalone");
     });
   });
 
   describe("getDirectoryInfo", () => {
-    it("should return full info for hybrid directory", async () => {
+    it("should return full info for directory with both git and sync", async () => {
       await fs.mkdir(path.join(tempDir, ".git"));
       await fs.mkdir(path.join(tempDir, ".minimem"), { recursive: true });
       await fs.writeFile(
@@ -175,7 +180,8 @@ describe("Directory Type Detection", () => {
 
       const info = await getDirectoryInfo(tempDir);
 
-      expect(info.type).toBe("hybrid");
+      // Sync config takes precedence
+      expect(info.type).toBe("standalone");
       expect(info.gitRoot).toBe(tempDir);
       expect(info.hasSyncConfig).toBe(true);
     });
@@ -183,8 +189,18 @@ describe("Directory Type Detection", () => {
     it("should return undefined gitRoot for non-git directory", async () => {
       const info = await getDirectoryInfo(tempDir);
 
-      expect(info.type).toBe("unmanaged");
+      expect(info.type).toBe("standalone");
       expect(info.gitRoot).toBe(undefined);
+      expect(info.hasSyncConfig).toBe(false);
+    });
+
+    it("should return project-bound for git-only directory", async () => {
+      await fs.mkdir(path.join(tempDir, ".git"));
+
+      const info = await getDirectoryInfo(tempDir);
+
+      expect(info.type).toBe("project-bound");
+      expect(info.gitRoot).toBe(tempDir);
       expect(info.hasSyncConfig).toBe(false);
     });
   });

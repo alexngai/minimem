@@ -1,5 +1,8 @@
 /**
- * Tests for conflict detection and quarantine
+ * Tests for change detection and quarantine
+ *
+ * Note: Shadow copy system was removed in favor of last-write-wins.
+ * Only quarantine functions remain for manual review when needed.
  */
 
 import { describe, it, beforeEach, afterEach, expect } from "vitest";
@@ -8,18 +11,13 @@ import path from "node:path";
 import os from "node:os";
 
 import {
-  detectConflicts,
+  detectChanges,
   quarantineConflict,
   listQuarantinedConflicts,
-  getShadowsDir,
   getConflictsDir,
-  createShadowCopy,
-  readShadowCopy,
-  deleteShadowCopy,
-  cleanShadows,
 } from "../conflicts.js";
 import { initCentralRepo } from "../central.js";
-import { loadSyncState, saveSyncState, computeFileHash } from "../state.js";
+import { saveSyncState, computeFileHash } from "../state.js";
 import { saveConfig } from "../../config.js";
 
 describe("conflicts", () => {
@@ -78,67 +76,21 @@ describe("conflicts", () => {
     }
   });
 
-  describe("shadow copies", () => {
-    it("should create and read shadow copy", async () => {
-      const content = "Original file content";
-      await createShadowCopy(localDir, "MEMORY.md", content);
-
-      const read = await readShadowCopy(localDir, "MEMORY.md");
-      expect(read).toBe(content);
-    });
-
-    it("should flatten file paths in shadow names", async () => {
-      await createShadowCopy(localDir, "memory/2024-01-01.md", "Content");
-
-      const shadowsDir = getShadowsDir(localDir);
-      const files = await fs.readdir(shadowsDir);
-      expect(files.some((f) => f.includes("memory_2024-01-01.md.base"))).toBeTruthy();
-    });
-
-    it("should return null for non-existent shadow", async () => {
-      const read = await readShadowCopy(localDir, "nonexistent.md");
-      expect(read).toBe(null);
-    });
-
-    it("should delete shadow copy", async () => {
-      await createShadowCopy(localDir, "MEMORY.md", "Content");
-      await deleteShadowCopy(localDir, "MEMORY.md");
-
-      const read = await readShadowCopy(localDir, "MEMORY.md");
-      expect(read).toBe(null);
-    });
-
-    it("should clean all shadows", async () => {
-      await createShadowCopy(localDir, "MEMORY.md", "Content 1");
-      await createShadowCopy(localDir, "memory/file.md", "Content 2");
-
-      await cleanShadows(localDir);
-
-      const read1 = await readShadowCopy(localDir, "MEMORY.md");
-      const read2 = await readShadowCopy(localDir, "memory/file.md");
-      expect(read1).toBe(null);
-      expect(read2).toBe(null);
-    });
-  });
-
   describe("quarantine", () => {
-    it("should quarantine conflict with all versions", async () => {
+    it("should quarantine file versions for manual review", async () => {
       const localContent = "Local version";
       const remoteContent = "Remote version";
-      const baseContent = "Base version";
 
       const conflictDir = await quarantineConflict(
         localDir,
         "MEMORY.md",
         localContent,
-        remoteContent,
-        baseContent
+        remoteContent
       );
 
       const files = await fs.readdir(conflictDir);
       expect(files.includes("MEMORY.md.local")).toBeTruthy();
       expect(files.includes("MEMORY.md.remote")).toBeTruthy();
-      expect(files.includes("MEMORY.md.base")).toBeTruthy();
 
       const local = await fs.readFile(path.join(conflictDir, "MEMORY.md.local"), "utf-8");
       expect(local).toBe(localContent);
@@ -149,20 +101,18 @@ describe("conflicts", () => {
         localDir,
         "MEMORY.md",
         "Local only",
-        null,
         null
       );
 
       const files = await fs.readdir(conflictDir);
       expect(files.includes("MEMORY.md.local")).toBeTruthy();
       expect(!files.includes("MEMORY.md.remote")).toBeTruthy();
-      expect(!files.includes("MEMORY.md.base")).toBeTruthy();
     });
 
-    it("should list quarantined conflicts", async () => {
-      await quarantineConflict(localDir, "MEMORY.md", "Local", "Remote", "Base");
+    it("should list quarantined file versions", async () => {
+      await quarantineConflict(localDir, "MEMORY.md", "Local", "Remote");
       await new Promise((r) => setTimeout(r, 50)); // Slight delay for unique timestamp
-      await quarantineConflict(localDir, "memory/file.md", "Local 2", "Remote 2", null);
+      await quarantineConflict(localDir, "memory/file.md", "Local 2", "Remote 2");
 
       const conflicts = await listQuarantinedConflicts(localDir);
 
@@ -171,13 +121,18 @@ describe("conflicts", () => {
       expect(conflicts.some((c) => c.files.includes("memory/file.md"))).toBeTruthy();
     });
 
-    it("should return empty array when no conflicts", async () => {
+    it("should return empty array when no quarantined files", async () => {
       const conflicts = await listQuarantinedConflicts(localDir);
       expect(conflicts.length).toBe(0);
     });
+
+    it("should create conflicts directory path correctly", () => {
+      const conflictsDir = getConflictsDir(localDir);
+      expect(conflictsDir).toBe(path.join(localDir, ".minimem", "conflicts"));
+    });
   });
 
-  describe("detectConflicts", () => {
+  describe("detectChanges", () => {
     it("should detect unchanged files", async () => {
       // Same content in both
       await fs.writeFile(path.join(localDir, "MEMORY.md"), "Same content");
@@ -186,23 +141,23 @@ describe("conflicts", () => {
       // Set up sync state with matching hash
       const hash = await computeFileHash(path.join(localDir, "MEMORY.md"));
       const state = {
-        repoPath: "test-project",
+        version: 2,
+        centralPath: "test-project",
         lastSync: new Date().toISOString(),
         files: {
           "MEMORY.md": {
             localHash: hash,
             remoteHash: hash,
-            lastSyncedHash: hash,
             lastModified: new Date().toISOString(),
           },
         },
       };
       await saveSyncState(localDir, state);
 
-      const result = await detectConflicts(localDir);
+      const result = await detectChanges(localDir);
 
       expect(result.summary.unchanged).toBe(1);
-      expect(result.summary.conflicts).toBe(0);
+      expect(result.changes.length).toBe(0);
     });
 
     it("should detect local-only changes", async () => {
@@ -210,108 +165,45 @@ describe("conflicts", () => {
       await fs.writeFile(path.join(localDir, "MEMORY.md"), "Local change");
       await fs.writeFile(path.join(remotePath, "MEMORY.md"), "Original");
 
-      // State shows original was synced
-      const hash = await computeFileHash(path.join(remotePath, "MEMORY.md"));
-      const state = {
-        repoPath: "test-project",
-        lastSync: new Date().toISOString(),
-        files: {
-          "MEMORY.md": {
-            localHash: hash,
-            remoteHash: hash,
-            lastSyncedHash: hash,
-            lastModified: new Date().toISOString(),
-          },
-        },
-      };
-      await saveSyncState(localDir, state);
+      const result = await detectChanges(localDir);
 
-      const result = await detectConflicts(localDir);
-
-      expect(result.summary.localOnly).toBe(1);
+      expect(result.summary.localModified).toBe(1);
     });
 
-    it("should detect remote-only changes", async () => {
-      // Remote has different content
-      await fs.writeFile(path.join(localDir, "MEMORY.md"), "Original");
-      await fs.writeFile(path.join(remotePath, "MEMORY.md"), "Remote change");
+    it("should detect remote-only files", async () => {
+      // Remove local file, keep remote
+      await fs.unlink(path.join(localDir, "MEMORY.md"));
 
-      // State shows original was synced
-      const hash = await computeFileHash(path.join(localDir, "MEMORY.md"));
-      const state = {
-        repoPath: "test-project",
-        lastSync: new Date().toISOString(),
-        files: {
-          "MEMORY.md": {
-            localHash: hash,
-            remoteHash: hash,
-            lastSyncedHash: hash,
-            lastModified: new Date().toISOString(),
-          },
-        },
-      };
-      await saveSyncState(localDir, state);
+      const result = await detectChanges(localDir);
 
-      const result = await detectConflicts(localDir);
-
-      expect(result.summary.remoteOnly).toBe(1);
+      expect(result.summary.remoteOnly >= 1).toBeTruthy();
     });
 
-    it("should detect conflicts when both changed", async () => {
-      // Both have different content from base
+    it("should detect differences when both changed", async () => {
+      // Both have different content
       await fs.writeFile(path.join(localDir, "MEMORY.md"), "Local change");
       await fs.writeFile(path.join(remotePath, "MEMORY.md"), "Remote change");
 
-      // State shows something else was synced
-      const state = {
-        repoPath: "test-project",
-        lastSync: new Date().toISOString(),
-        files: {
-          "MEMORY.md": {
-            localHash: "original-hash",
-            remoteHash: "original-hash",
-            lastSyncedHash: "original-hash",
-            lastModified: new Date().toISOString(),
-          },
-        },
-      };
-      await saveSyncState(localDir, state);
+      const result = await detectChanges(localDir);
 
-      const result = await detectConflicts(localDir);
-
-      expect(result.summary.conflicts).toBe(1);
+      // With 2-way comparison, different content = local-modified
+      expect(result.summary.localModified).toBe(1);
     });
 
     it("should detect new local files", async () => {
       await fs.writeFile(path.join(localDir, "memory", "new-file.md"), "New content");
 
-      // No state for this file
-      const state = {
-        repoPath: "test-project",
-        lastSync: new Date().toISOString(),
-        files: {},
-      };
-      await saveSyncState(localDir, state);
+      const result = await detectChanges(localDir);
 
-      const result = await detectConflicts(localDir);
-
-      expect(result.summary.newLocal >= 1).toBeTruthy();
+      expect(result.summary.localOnly >= 1).toBeTruthy();
     });
 
     it("should detect new remote files", async () => {
       await fs.writeFile(path.join(remotePath, "memory", "new-remote.md"), "Remote content");
 
-      // No state for this file
-      const state = {
-        repoPath: "test-project",
-        lastSync: new Date().toISOString(),
-        files: {},
-      };
-      await saveSyncState(localDir, state);
+      const result = await detectChanges(localDir);
 
-      const result = await detectConflicts(localDir);
-
-      expect(result.summary.newRemote >= 1).toBeTruthy();
+      expect(result.summary.remoteOnly >= 1).toBeTruthy();
     });
   });
 });
