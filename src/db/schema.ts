@@ -1,17 +1,31 @@
 import type { DatabaseSync } from "node:sqlite";
 
+/**
+ * Current schema version. Increment this when making breaking schema changes.
+ *
+ * Version history:
+ * - 1: Initial schema (meta, files, chunks, embedding_cache, FTS5)
+ * - 2: Added source column to files and chunks tables
+ */
+export const SCHEMA_VERSION = 2;
+
 export function ensureMemoryIndexSchema(params: {
   db: DatabaseSync;
   embeddingCacheTable: string;
   ftsTable: string;
   ftsEnabled: boolean;
-}): { ftsAvailable: boolean; ftsError?: string } {
+}): { ftsAvailable: boolean; ftsError?: string; migrated?: boolean } {
+  // Create meta table first (needed for version tracking)
   params.db.exec(`
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
   `);
+
+  // Check schema version and handle migration
+  const migrated = migrateIfNeeded(params.db, params.ftsTable);
+
   params.db.exec(`
     CREATE TABLE IF NOT EXISTS files (
       path TEXT PRIMARY KEY,
@@ -79,7 +93,53 @@ export function ensureMemoryIndexSchema(params: {
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);`);
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);`);
 
-  return { ftsAvailable, ...(ftsError ? { ftsError } : {}) };
+  // Store current schema version
+  params.db.prepare(
+    `INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`,
+  ).run(String(SCHEMA_VERSION));
+
+  return { ftsAvailable, ...(ftsError ? { ftsError } : {}), ...(migrated ? { migrated } : {}) };
+}
+
+/**
+ * Check the stored schema version and migrate if needed.
+ * For breaking changes, drops data tables so they get recreated fresh.
+ * The embedding cache is preserved across migrations when possible.
+ *
+ * @returns true if a migration was performed, false otherwise.
+ */
+function migrateIfNeeded(db: DatabaseSync, ftsTable: string): boolean {
+  let storedVersion = 0;
+  try {
+    const row = db.prepare(
+      `SELECT value FROM meta WHERE key = 'schema_version'`,
+    ).get() as { value: string } | undefined;
+    if (row) {
+      storedVersion = parseInt(row.value, 10) || 0;
+    }
+  } catch {
+    // meta table may not have the key yet (pre-versioning databases)
+    storedVersion = 0;
+  }
+
+  if (storedVersion >= SCHEMA_VERSION) return false;
+
+  if (storedVersion > 0 && storedVersion < SCHEMA_VERSION) {
+    // Breaking schema change: drop and recreate data tables.
+    // Embedding cache is preserved since embeddings are content-addressed
+    // and will be reused on re-index.
+    db.exec(`DROP TABLE IF EXISTS files`);
+    db.exec(`DROP TABLE IF EXISTS chunks`);
+    db.exec(`DROP TABLE IF EXISTS ${ftsTable}`);
+    // Also drop the vector table if it exists
+    try {
+      db.exec(`DROP TABLE IF EXISTS chunks_vec`);
+    } catch {
+      // sqlite-vec table may not exist
+    }
+  }
+
+  return storedVersion > 0;
 }
 
 function ensureColumn(

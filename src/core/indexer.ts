@@ -21,6 +21,7 @@ import {
   type MemoryChunk,
   type MemoryFileEntry,
   parseEmbedding,
+  vectorToBlob,
   type DebugFn,
 } from "../internal.js";
 import type {
@@ -42,9 +43,6 @@ const FTS_TABLE = "chunks_fts";
 const EMBEDDING_RETRY_MAX_ATTEMPTS = 3;
 const EMBEDDING_RETRY_BASE_DELAY_MS = 500;
 const EMBEDDING_RETRY_MAX_DELAY_MS = 8000;
-
-const vectorToBlob = (embedding: number[]): Buffer =>
-  Buffer.from(new Float32Array(embedding).buffer);
 
 export type IndexerConfig = {
   memoryDir: string;

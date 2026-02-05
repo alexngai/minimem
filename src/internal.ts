@@ -268,3 +268,11 @@ export function truncateUtf16Safe(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return text.slice(0, maxChars);
 }
+
+/**
+ * Convert a numeric embedding vector to a Buffer suitable for sqlite-vec storage.
+ * Uses Float32 encoding, which is the format expected by sqlite-vec's vector functions.
+ */
+export function vectorToBlob(embedding: number[]): Buffer {
+  return Buffer.from(new Float32Array(embedding).buffer);
+}

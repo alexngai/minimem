@@ -1,9 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import { cosineSimilarity, parseEmbedding, truncateUtf16Safe } from "../internal.js";
-
-const vectorToBlob = (embedding: number[]): Buffer =>
-  Buffer.from(new Float32Array(embedding).buffer);
+import { cosineSimilarity, parseEmbedding, truncateUtf16Safe, vectorToBlob } from "../internal.js";
 
 export type SearchSource = string;
 
@@ -17,6 +14,15 @@ export type SearchRowResult = {
   source: SearchSource;
 };
 
+/**
+ * Perform a vector similarity search against indexed memory chunks.
+ *
+ * First attempts to use sqlite-vec for fast approximate nearest neighbor search.
+ * Falls back to brute-force cosine similarity over all chunks if the vector
+ * extension is unavailable.
+ *
+ * @returns Matching chunks sorted by descending similarity score (0-1 range).
+ */
 export async function searchVector(params: {
   db: DatabaseSync;
   vectorTable: string;
@@ -91,6 +97,12 @@ export async function searchVector(params: {
     }));
 }
 
+/**
+ * List all indexed chunks for a given embedding model and source filter.
+ * Used as a fallback when sqlite-vec is not available for vector search.
+ *
+ * @returns All matching chunks with their parsed embedding vectors.
+ */
 export function listChunks(params: {
   db: DatabaseSync;
   providerModel: string;
@@ -131,6 +143,14 @@ export function listChunks(params: {
   }));
 }
 
+/**
+ * Perform a full-text keyword search using SQLite FTS5 with BM25 ranking.
+ *
+ * Tokenizes the query into quoted AND terms and runs them against the FTS index.
+ * Results are scored using BM25 rank converted to a 0-1 range.
+ *
+ * @returns Matching chunks sorted by BM25 relevance, with both score and textScore fields.
+ */
 export async function searchKeyword(params: {
   db: DatabaseSync;
   ftsTable: string;

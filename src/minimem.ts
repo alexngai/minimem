@@ -14,6 +14,7 @@ import {
   type MemoryChunk,
   type MemoryFileEntry,
   parseEmbedding,
+  vectorToBlob,
 } from "./internal.js";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./search/hybrid.js";
 import { searchKeyword, searchVector } from "./search/search.js";
@@ -43,9 +44,6 @@ const EMBEDDING_RETRY_MAX_DELAY_MS = 8000;
 const VECTOR_LOAD_TIMEOUT_MS = 30_000;
 const EMBEDDING_QUERY_TIMEOUT_REMOTE_MS = 60_000;
 const EMBEDDING_QUERY_TIMEOUT_LOCAL_MS = 5 * 60_000;
-
-const vectorToBlob = (embedding: number[]): Buffer =>
-  Buffer.from(new Float32Array(embedding).buffer);
 
 export type MinimemConfig = {
   /** Directory containing memory files (MEMORY.md, memory/*.md) */
