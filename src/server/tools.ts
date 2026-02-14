@@ -55,6 +55,18 @@ export type MemorySearchParams = {
   maxResults?: number;
   minScore?: number;
   directories?: string[];
+  /** "compact" returns lightweight index; "full" returns complete snippets (default: "compact") */
+  detail?: "compact" | "full";
+  /** Filter by observation type (e.g., "decision", "bugfix", "feature", "discovery") */
+  type?: string;
+};
+
+/**
+ * Memory get details tool parameters
+ */
+export type MemoryGetDetailsParams = {
+  results: Array<{ path: string; startLine: number; endLine: number }>;
+  directories?: string[];
 };
 
 /**
@@ -93,15 +105,54 @@ export const MEMORY_SEARCH_TOOL: ToolDefinition = {
           "Optional: filter to specific memory directories by name/path. " +
           "If omitted, searches all configured directories.",
       },
+      detail: {
+        type: "string",
+        enum: ["compact", "full"],
+        description:
+          "Result detail level. 'compact' returns a lightweight index with short previews (~80 chars). " +
+          "'full' returns complete snippets. Use 'compact' first, then memory_get_details for selected results. " +
+          "(default: 'compact')",
+      },
+      type: {
+        type: "string",
+        description:
+          "Filter by observation type. Matches <!-- type: X --> comments in memory entries. " +
+          "Common types: decision, bugfix, feature, discovery, context, note.",
+      },
     },
     required: ["query"],
+  },
+};
+
+export const MEMORY_GET_DETAILS_TOOL: ToolDefinition = {
+  name: "memory_get_details",
+  description:
+    "Fetch full text for specific memory chunks identified by path and line range. " +
+    "Use after memory_search with compact results to get details for selected items only. " +
+    "This two-step approach significantly reduces token usage.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      results: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          "Array of { path, startLine, endLine } objects from compact search results.",
+      },
+      directories: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional: filter to specific memory directories.",
+      },
+    },
+    required: ["results"],
   },
 };
 
 /**
  * All available memory tools
  */
-export const MEMORY_TOOLS: ToolDefinition[] = [MEMORY_SEARCH_TOOL];
+export const MEMORY_TOOLS: ToolDefinition[] = [MEMORY_SEARCH_TOOL, MEMORY_GET_DETAILS_TOOL];
 
 /**
  * Get tool definitions for use with LLM APIs
@@ -155,6 +206,8 @@ export class MemoryToolExecutor {
       switch (toolName) {
         case "memory_search":
           return await this.memorySearch(params as MemorySearchParams);
+        case "memory_get_details":
+          return await this.memoryGetDetails(params as MemoryGetDetailsParams);
         default:
           return {
             content: [{ type: "text", text: `Unknown tool: ${toolName}` }],
@@ -170,48 +223,54 @@ export class MemoryToolExecutor {
     }
   }
 
+  /**
+   * Filter instances by directory names/paths
+   */
+  private filterInstances(directories?: string[]): MemoryInstance[] | null {
+    if (!directories || directories.length === 0) return this.instances;
+
+    const dirFilter = new Set(directories.map((d) => d.toLowerCase()));
+    const filtered = this.instances.filter((i) => {
+      const name = (i.name ?? i.memoryDir).toLowerCase();
+      const dir = i.memoryDir.toLowerCase();
+      return (
+        dirFilter.has(name) ||
+        dirFilter.has(dir) ||
+        [...dirFilter].some((f) => dir.includes(f) || name.includes(f))
+      );
+    });
+
+    return filtered.length > 0 ? filtered : null;
+  }
+
   private async memorySearch(params: MemorySearchParams): Promise<ToolResult> {
     const maxResults = params.maxResults ?? 10;
     const minScore = params.minScore;
+    const detail = params.detail ?? "compact";
 
-    // Filter instances by directories param if provided
-    let instancesToSearch = this.instances;
-    if (params.directories && params.directories.length > 0) {
-      const dirFilter = new Set(params.directories.map((d) => d.toLowerCase()));
-      instancesToSearch = this.instances.filter((i) => {
-        const name = (i.name ?? i.memoryDir).toLowerCase();
-        const dir = i.memoryDir.toLowerCase();
-        return (
-          dirFilter.has(name) ||
-          dirFilter.has(dir) ||
-          // Also match partial paths
-          [...dirFilter].some((f) => dir.includes(f) || name.includes(f))
-        );
-      });
-
-      if (instancesToSearch.length === 0) {
-        const available = this.getDirectories().join(", ");
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No matching directories found. Available: ${available}`,
-            },
-          ],
-          isError: true,
-        };
-      }
+    const instancesToSearch = this.filterInstances(params.directories);
+    if (!instancesToSearch) {
+      const available = this.getDirectories().join(", ");
+      return {
+        content: [
+          {
+            type: "text",
+            text: `No matching directories found. Available: ${available}`,
+          },
+        ],
+        isError: true,
+      };
     }
 
     // Search all matching instances
     const allResults: SearchResultWithSource[] = [];
 
     for (const instance of instancesToSearch) {
-      // Get more results per directory, then merge and trim
       const perDirMax = Math.ceil(maxResults * 1.5);
       const results = await instance.minimem.search(params.query, {
         maxResults: perDirMax,
         minScore,
+        type: params.type,
       });
 
       for (const result of results) {
@@ -232,9 +291,44 @@ export class MemoryToolExecutor {
       };
     }
 
-    // Format results
     const showSource = instancesToSearch.length > 1;
-    const formatted = topResults
+
+    if (detail === "compact") {
+      return this.formatCompactResults(topResults, showSource, instancesToSearch.length);
+    }
+
+    return this.formatFullResults(topResults, showSource, instancesToSearch.length);
+  }
+
+  private formatCompactResults(
+    results: SearchResultWithSource[],
+    showSource: boolean,
+    dirCount: number,
+  ): ToolResult {
+    const formatted = results
+      .map((r, i) => {
+        const location = `${r.path}:${r.startLine}-${r.endLine}`;
+        const score = (r.score * 100).toFixed(0);
+        const source = showSource ? ` [${r.memoryDir}]` : "";
+        const preview = compactPreview(r.snippet);
+        return `[${i}] ${location}${source} (${score}%) — ${preview}`;
+      })
+      .join("\n");
+
+    const hint = "\n\nUse memory_get_details to fetch full text for selected results.";
+    const dirSummary = dirCount > 1 ? `\n(Searched ${dirCount} directories)` : "";
+
+    return {
+      content: [{ type: "text", text: formatted + dirSummary + hint }],
+    };
+  }
+
+  private formatFullResults(
+    results: SearchResultWithSource[],
+    showSource: boolean,
+    dirCount: number,
+  ): ToolResult {
+    const formatted = results
       .map((r, i) => {
         const location = `${r.path}:${r.startLine}-${r.endLine}`;
         const score = (r.score * 100).toFixed(1);
@@ -244,14 +338,83 @@ export class MemoryToolExecutor {
       .join("\n\n");
 
     const dirSummary =
-      instancesToSearch.length > 1
-        ? `\n\n(Searched ${instancesToSearch.length} directories)`
-        : "";
+      dirCount > 1 ? `\n\n(Searched ${dirCount} directories)` : "";
 
     return {
       content: [{ type: "text", text: formatted + dirSummary }],
     };
   }
+
+  private async memoryGetDetails(params: MemoryGetDetailsParams): Promise<ToolResult> {
+    if (!params.results || params.results.length === 0) {
+      return {
+        content: [{ type: "text", text: "No results specified." }],
+        isError: true,
+      };
+    }
+
+    const instancesToSearch = this.filterInstances(params.directories);
+    if (!instancesToSearch) {
+      const available = this.getDirectories().join(", ");
+      return {
+        content: [
+          {
+            type: "text",
+            text: `No matching directories found. Available: ${available}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const details: string[] = [];
+
+    for (const ref of params.results) {
+      let found = false;
+
+      for (const instance of instancesToSearch) {
+        const lineCount = ref.endLine - ref.startLine + 1;
+        const result = await instance.minimem.readLines(ref.path, {
+          from: ref.startLine,
+          lines: lineCount,
+        });
+
+        if (result) {
+          const location = `${ref.path}:${result.startLine}-${result.endLine}`;
+          details.push(`--- ${location} ---\n${result.content}`);
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        details.push(`--- ${ref.path}:${ref.startLine}-${ref.endLine} ---\n(not found)`);
+      }
+    }
+
+    return {
+      content: [{ type: "text", text: details.join("\n\n") }],
+    };
+  }
+}
+
+/**
+ * Generate a compact preview from a snippet (~80 chars).
+ * Prefers the first heading or first non-empty line.
+ */
+function compactPreview(snippet: string): string {
+  const maxLen = 80;
+  const lines = snippet.split("\n").filter((l) => l.trim());
+  if (lines.length === 0) return "(empty)";
+
+  // Prefer a heading line
+  const heading = lines.find((l) => l.startsWith("#"));
+  const text = heading ?? lines[0];
+  // Strip markdown heading markers for cleaner display
+  const cleaned = text.replace(/^#+\s*/, "").trim();
+
+  if (cleaned.length <= maxLen) return `"${cleaned}"`;
+  return `"${cleaned.slice(0, maxLen - 3)}..."`;
 }
 
 /**

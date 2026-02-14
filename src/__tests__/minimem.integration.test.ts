@@ -691,3 +691,437 @@ describe("Minimem Staleness Detection", () => {
     assert.ok(!hasElephants, "Should not find content from deleted file after staleness detection");
   });
 });
+
+describe("Minimem Type Filtering", () => {
+  let tempDir: string;
+  let minimem: Minimem;
+  let originalFetch: typeof global.fetch;
+
+  before(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-type-filter-"));
+    await fs.mkdir(path.join(tempDir, "memory"));
+
+    // Create memory files with different observation types
+    await fs.writeFile(
+      path.join(tempDir, "MEMORY.md"),
+      `# Memory
+
+## API Design Decision
+<!-- type: decision -->
+We decided to use REST for external APIs and GraphQL for internal services.
+Authentication will use JWT tokens.
+
+## General Notes
+Some general project notes without a type tag.
+The project uses TypeScript and Node.js.
+`
+    );
+
+    await fs.writeFile(
+      path.join(tempDir, "memory", "bugs.md"),
+      `# Bug Tracker
+
+## Login Bug
+<!-- type: bugfix -->
+Fixed critical login failure caused by expired JWT token not being refreshed.
+Root cause was missing refresh token rotation logic.
+
+## Dashboard Crash
+<!-- type: bugfix -->
+Fixed dashboard crash when user had no recent activity.
+Added null check for empty activity arrays.
+`
+    );
+
+    await fs.writeFile(
+      path.join(tempDir, "memory", "features.md"),
+      `# Features
+
+## Search Feature
+<!-- type: feature -->
+Implemented full-text search with BM25 ranking.
+Users can now search across all memory files.
+
+## Export Feature
+<!-- type: feature -->
+Added CSV and JSON export for memory entries.
+`
+    );
+
+    originalFetch = global.fetch;
+    global.fetch = createMockFetch() as unknown as typeof global.fetch;
+    process.env.OPENAI_API_KEY = "test-key-type-filter";
+
+    minimem = await Minimem.create({
+      memoryDir: tempDir,
+      embedding: { provider: "openai" },
+      watch: { enabled: false },
+      hybrid: { enabled: true },
+      query: { minScore: 0.0 },
+    });
+
+    await minimem.sync();
+  });
+
+  after(async () => {
+    minimem?.close();
+    global.fetch = originalFetch;
+    delete process.env.OPENAI_API_KEY;
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns all results when no type filter is specified", async () => {
+    const results = await minimem.search("API login search export");
+
+    assert.ok(results.length > 0, "Expected search results without type filter");
+  });
+
+  it("filters results by type: decision", async () => {
+    const results = await minimem.search("API design REST GraphQL JWT", { type: "decision" });
+
+    assert.ok(results.length > 0, "Expected decision results");
+
+    // Every result should come from the decision chunk
+    for (const r of results) {
+      assert.ok(
+        r.snippet.toLowerCase().includes("rest") ||
+        r.snippet.toLowerCase().includes("graphql") ||
+        r.snippet.toLowerCase().includes("decision") ||
+        r.snippet.toLowerCase().includes("jwt"),
+        `Decision result should contain relevant content, got: ${r.snippet.slice(0, 80)}`
+      );
+    }
+  });
+
+  it("filters results by type: bugfix", async () => {
+    const results = await minimem.search("login crash bug fix", { type: "bugfix" });
+
+    assert.ok(results.length > 0, "Expected bugfix results");
+
+    // Should only find bug-related content
+    const hasDecision = results.some(r =>
+      r.snippet.toLowerCase().includes("rest for external apis")
+    );
+    assert.ok(!hasDecision, "Bugfix filter should not return decision content");
+  });
+
+  it("filters results by type: feature", async () => {
+    const results = await minimem.search("search export feature", { type: "feature" });
+
+    assert.ok(results.length > 0, "Expected feature results");
+
+    // Should only find feature-related content
+    const hasBugfix = results.some(r =>
+      r.snippet.toLowerCase().includes("login failure") ||
+      r.snippet.toLowerCase().includes("dashboard crash")
+    );
+    assert.ok(!hasBugfix, "Feature filter should not return bugfix content");
+  });
+
+  it("returns empty results for non-matching type filter", async () => {
+    const results = await minimem.search("API design REST", { type: "discovery" });
+
+    // Should have no results since nothing is tagged as "discovery"
+    assert.equal(results.length, 0, "Expected no results for unused type");
+  });
+
+  it("type filter works with maxResults", async () => {
+    const results = await minimem.search("bug fix crash login", {
+      type: "bugfix",
+      maxResults: 1,
+    });
+
+    assert.ok(results.length <= 1, `Expected at most 1 result, got ${results.length}`);
+  });
+});
+
+describe("Minimem Privacy Tags", () => {
+  let tempDir: string;
+  let minimem: Minimem;
+  let originalFetch: typeof global.fetch;
+
+  before(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-privacy-"));
+    await fs.mkdir(path.join(tempDir, "memory"));
+
+    // Create memory files with private content
+    await fs.writeFile(
+      path.join(tempDir, "MEMORY.md"),
+      `# Memory
+
+## API Configuration
+API endpoint: api.example.com/v2
+Rate limit: 1000 requests per minute
+
+<private>
+API_KEY=sk-secret-key-12345
+DB_PASSWORD=hunter2
+AWS_SECRET=AKIAIOSFODNN7EXAMPLE
+</private>
+
+## Public Notes
+The API uses versioned endpoints.
+Documentation is at docs.example.com.
+`
+    );
+
+    await fs.writeFile(
+      path.join(tempDir, "memory", "credentials.md"),
+      `# Service Credentials
+
+## Production Database
+Host: db.prod.example.com
+Port: 5432
+
+<private>
+username: admin
+password: super-secret-password-123
+connection_string: postgres://admin:super-secret-password-123@db.prod.example.com:5432/main
+</private>
+
+## Staging Database
+Host: db.staging.example.com
+Port: 5432
+`
+    );
+
+    originalFetch = global.fetch;
+    global.fetch = createMockFetch() as unknown as typeof global.fetch;
+    process.env.OPENAI_API_KEY = "test-key-privacy";
+
+    minimem = await Minimem.create({
+      memoryDir: tempDir,
+      embedding: { provider: "openai" },
+      watch: { enabled: false },
+      hybrid: { enabled: true },
+      query: { minScore: 0.0 },
+    });
+
+    await minimem.sync();
+  });
+
+  after(async () => {
+    minimem?.close();
+    global.fetch = originalFetch;
+    delete process.env.OPENAI_API_KEY;
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("does not include private content in search snippets", async () => {
+    const results = await minimem.search("API key password secret credentials");
+
+    // Check that no snippet contains the actual secret values
+    for (const r of results) {
+      assert.ok(
+        !r.snippet.includes("sk-secret-key-12345"),
+        "Snippet should not contain API key"
+      );
+      assert.ok(
+        !r.snippet.includes("hunter2"),
+        "Snippet should not contain DB password"
+      );
+      assert.ok(
+        !r.snippet.includes("super-secret-password-123"),
+        "Snippet should not contain production password"
+      );
+      assert.ok(
+        !r.snippet.includes("AKIAIOSFODNN7EXAMPLE"),
+        "Snippet should not contain AWS secret"
+      );
+    }
+  });
+
+  it("still indexes non-private content from files with private blocks", async () => {
+    const results = await minimem.search("API endpoint rate limit documentation");
+
+    assert.ok(results.length > 0, "Expected to find non-private content");
+
+    const hasPublic = results.some(r =>
+      r.snippet.toLowerCase().includes("api endpoint") ||
+      r.snippet.toLowerCase().includes("rate limit") ||
+      r.snippet.toLowerCase().includes("documentation") ||
+      r.snippet.toLowerCase().includes("api.example.com")
+    );
+    assert.ok(hasPublic, "Should find public content from files with private blocks");
+  });
+
+  it("indexes content around private blocks correctly", async () => {
+    const results = await minimem.search("staging database host port");
+
+    assert.ok(results.length > 0, "Expected to find staging database content");
+
+    const hasStaging = results.some(r =>
+      r.snippet.toLowerCase().includes("staging")
+    );
+    assert.ok(hasStaging, "Should find staging database content after private block");
+  });
+});
+
+describe("Minimem Schema Migration", () => {
+  let tempDir: string;
+
+  before(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-migration-"));
+  });
+
+  after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("migrates from schema v2 to v3, preserving embedding cache", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { ensureMemoryIndexSchema, SCHEMA_VERSION } = await import("../db/schema.js");
+
+    const dbPath = path.join(tempDir, "migration-test.db");
+    const db = new DatabaseSync(dbPath);
+
+    // Set up a v2 database manually
+    db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')`).run();
+
+    db.exec(`CREATE TABLE IF NOT EXISTS files (
+      path TEXT PRIMARY KEY,
+      source TEXT NOT NULL DEFAULT 'memory',
+      hash TEXT NOT NULL,
+      mtime INTEGER NOT NULL,
+      size INTEGER NOT NULL
+    )`);
+    db.exec(`CREATE TABLE IF NOT EXISTS chunks (
+      id TEXT PRIMARY KEY,
+      path TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'memory',
+      start_line INTEGER NOT NULL,
+      end_line INTEGER NOT NULL,
+      hash TEXT NOT NULL,
+      model TEXT NOT NULL,
+      text TEXT NOT NULL,
+      embedding TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`);
+
+    // Insert some data to verify migration drops tables
+    db.prepare(`INSERT INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)`)
+      .run("MEMORY.md", "memory", "abc123", 1000, 100);
+    db.prepare(`INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run("chunk1", "MEMORY.md", "memory", 1, 5, "hash1", "test", "text", "[]", 1000);
+
+    // Create embedding cache with data that should be preserved
+    db.exec(`CREATE TABLE IF NOT EXISTS embedding_cache (
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      provider_key TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      embedding TEXT NOT NULL,
+      dims INTEGER,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (provider, model, provider_key, hash)
+    )`);
+    db.prepare(`INSERT INTO embedding_cache (provider, model, provider_key, hash, embedding, dims, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run("openai", "text-embedding-3-small", "key1", "cachehash1", "[0.1, 0.2]", 2, 2000);
+
+    // Run migration by calling ensureMemoryIndexSchema
+    const result = ensureMemoryIndexSchema({
+      db,
+      embeddingCacheTable: "embedding_cache",
+      ftsTable: "chunks_fts",
+      ftsEnabled: true,
+    });
+
+    // Verify migration occurred
+    assert.ok(result.migrated, "Migration should have been performed");
+
+    // Verify schema version is now current
+    const versionRow = db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string };
+    assert.equal(versionRow.value, String(SCHEMA_VERSION), "Schema version should be updated");
+
+    // Verify old data was dropped (tables recreated empty)
+    const fileCount = db.prepare(`SELECT COUNT(*) as count FROM files`).get() as { count: number };
+    assert.equal(fileCount.count, 0, "Files table should be empty after migration");
+
+    const chunkCount = db.prepare(`SELECT COUNT(*) as count FROM chunks`).get() as { count: number };
+    assert.equal(chunkCount.count, 0, "Chunks table should be empty after migration");
+
+    // Verify embedding cache was preserved
+    const cacheCount = db.prepare(`SELECT COUNT(*) as count FROM embedding_cache`).get() as { count: number };
+    assert.equal(cacheCount.count, 1, "Embedding cache should be preserved after migration");
+
+    const cacheRow = db.prepare(`SELECT hash, embedding FROM embedding_cache WHERE hash = ?`).get("cachehash1") as { hash: string; embedding: string } | undefined;
+    assert.ok(cacheRow, "Cached embedding should still exist");
+    assert.equal(cacheRow.embedding, "[0.1, 0.2]", "Cached embedding data should be intact");
+
+    // Verify the type column exists on chunks table
+    const columns = db.prepare(`PRAGMA table_info(chunks)`).all() as Array<{ name: string }>;
+    const hasTypeColumn = columns.some(c => c.name === "type");
+    assert.ok(hasTypeColumn, "Chunks table should have 'type' column after migration");
+
+    // Verify type index exists
+    const indexes = db.prepare(`PRAGMA index_list(chunks)`).all() as Array<{ name: string }>;
+    const hasTypeIndex = indexes.some(idx => idx.name === "idx_chunks_type");
+    assert.ok(hasTypeIndex, "Should have idx_chunks_type index after migration");
+
+    db.close();
+  });
+
+  it("fresh database (no prior version) does not trigger migration flag", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { ensureMemoryIndexSchema } = await import("../db/schema.js");
+
+    const dbPath = path.join(tempDir, "fresh-test.db");
+    const db = new DatabaseSync(dbPath);
+
+    const result = ensureMemoryIndexSchema({
+      db,
+      embeddingCacheTable: "embedding_cache",
+      ftsTable: "chunks_fts",
+      ftsEnabled: true,
+    });
+
+    // Fresh database should not report migration
+    assert.ok(!result.migrated, "Fresh database should not report migration");
+
+    // But schema should be fully set up
+    const columns = db.prepare(`PRAGMA table_info(chunks)`).all() as Array<{ name: string }>;
+    const hasTypeColumn = columns.some(c => c.name === "type");
+    assert.ok(hasTypeColumn, "Fresh database should have 'type' column");
+
+    db.close();
+  });
+
+  it("same version does not re-migrate", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { ensureMemoryIndexSchema, SCHEMA_VERSION } = await import("../db/schema.js");
+
+    const dbPath = path.join(tempDir, "same-version-test.db");
+    const db = new DatabaseSync(dbPath);
+
+    // First call sets up schema
+    ensureMemoryIndexSchema({
+      db,
+      embeddingCacheTable: "embedding_cache",
+      ftsTable: "chunks_fts",
+      ftsEnabled: true,
+    });
+
+    // Insert some data
+    db.prepare(`INSERT INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)`)
+      .run("test.md", "memory", "hash", 1000, 50);
+
+    // Second call should not drop data
+    const result = ensureMemoryIndexSchema({
+      db,
+      embeddingCacheTable: "embedding_cache",
+      ftsTable: "chunks_fts",
+      ftsEnabled: true,
+    });
+
+    assert.ok(!result.migrated, "Same version should not trigger migration");
+
+    // Data should still exist
+    const fileCount = db.prepare(`SELECT COUNT(*) as count FROM files`).get() as { count: number };
+    assert.equal(fileCount.count, 1, "Files should be preserved when no migration needed");
+
+    db.close();
+  });
+});

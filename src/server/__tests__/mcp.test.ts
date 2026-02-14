@@ -12,9 +12,14 @@ const createMockMinimem = () => {
         startLine: 1,
         endLine: 5,
         score: 0.85,
-        snippet: "Test content",
+        snippet: "Test content about architecture decisions",
       },
     ]),
+    readLines: vi.fn().mockResolvedValue({
+      content: "Full test content about architecture decisions\nLine 2\nLine 3\nLine 4\nLine 5",
+      startLine: 1,
+      endLine: 5,
+    }),
   } as unknown as Minimem;
 };
 
@@ -51,7 +56,7 @@ describe("McpServer", () => {
   });
 
   describe("tools/list", () => {
-    it("returns memory_search tool", async () => {
+    it("returns memory_search and memory_get_details tools", async () => {
       const response = await server.handleRequest({
         jsonrpc: "2.0",
         id: 2,
@@ -60,8 +65,8 @@ describe("McpServer", () => {
 
       expect(response.error).toBeUndefined();
       const result = response.result as { tools: Array<{ name: string }> };
-      expect(result.tools).toHaveLength(1);
-      expect(result.tools.map((t) => t.name)).toEqual(["memory_search"]);
+      expect(result.tools).toHaveLength(2);
+      expect(result.tools.map((t) => t.name)).toEqual(["memory_search", "memory_get_details"]);
     });
 
     it("tools have valid schemas", async () => {
@@ -88,7 +93,7 @@ describe("McpServer", () => {
   });
 
   describe("tools/call", () => {
-    it("calls memory_search tool", async () => {
+    it("calls memory_search with compact detail by default", async () => {
       const response = await server.handleRequest({
         jsonrpc: "2.0",
         id: 4,
@@ -100,15 +105,78 @@ describe("McpServer", () => {
       });
 
       expect(response.error).toBeUndefined();
-      // Multi-directory search fetches ceil(maxResults * 1.5) per directory
       expect(mockMinimem.search).toHaveBeenCalledWith("test query", {
-        maxResults: 15, // ceil(10 * 1.5)
+        maxResults: 15,
         minScore: undefined,
+        type: undefined,
       });
 
       const result = response.result as { content: Array<{ type: string; text: string }> };
       expect(result.content[0].type).toBe("text");
       expect(result.content[0].text).toContain("memory/test.md");
+      // Compact format: includes hint to use memory_get_details
+      expect(result.content[0].text).toContain("memory_get_details");
+      // Compact format: short preview, not full snippet
+      expect(result.content[0].text).toContain("85%");
+    });
+
+    it("calls memory_search with full detail", async () => {
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: "full-1",
+        method: "tools/call",
+        params: {
+          name: "memory_search",
+          arguments: { query: "test query", detail: "full" },
+        },
+      });
+
+      expect(response.error).toBeUndefined();
+      const result = response.result as { content: Array<{ type: string; text: string }> };
+      // Full format: contains the full snippet text
+      expect(result.content[0].text).toContain("Test content about architecture decisions");
+      // Full format: does NOT contain the compact hint
+      expect(result.content[0].text).not.toContain("Use memory_get_details");
+    });
+
+    it("calls memory_get_details tool", async () => {
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: "details-1",
+        method: "tools/call",
+        params: {
+          name: "memory_get_details",
+          arguments: {
+            results: [{ path: "memory/test.md", startLine: 1, endLine: 5 }],
+          },
+        },
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(mockMinimem.readLines).toHaveBeenCalledWith("memory/test.md", {
+        from: 1,
+        lines: 5,
+      });
+
+      const result = response.result as { content: Array<{ type: string; text: string }> };
+      expect(result.content[0].text).toContain("Full test content about architecture decisions");
+      expect(result.content[0].text).toContain("memory/test.md:1-5");
+    });
+
+    it("memory_get_details returns error for empty results", async () => {
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: "details-2",
+        method: "tools/call",
+        params: {
+          name: "memory_get_details",
+          arguments: { results: [] },
+        },
+      });
+
+      expect(response.error).toBeUndefined();
+      const result = response.result as { content: Array<{ text: string }>; isError: boolean };
+      expect(result.isError).toBe(true);
     });
 
     it("returns error for unknown tool", async () => {
@@ -126,6 +194,88 @@ describe("McpServer", () => {
       const result = response.result as { content: Array<{ text: string }>; isError: boolean };
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("Unknown tool");
+    });
+
+    it("passes type filter via MCP to search", async () => {
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: "type-1",
+        method: "tools/call",
+        params: {
+          name: "memory_search",
+          arguments: { query: "API design", type: "decision" },
+        },
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(mockMinimem.search).toHaveBeenCalledWith("API design", {
+        maxResults: 15,
+        minScore: undefined,
+        type: "decision",
+      });
+    });
+
+    it("passes detail and type together", async () => {
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: "combo-1",
+        method: "tools/call",
+        params: {
+          name: "memory_search",
+          arguments: { query: "bugs", detail: "full", type: "bugfix" },
+        },
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(mockMinimem.search).toHaveBeenCalledWith("bugs", {
+        maxResults: 15,
+        minScore: undefined,
+        type: "bugfix",
+      });
+      const result = response.result as { content: Array<{ text: string }> };
+      // Full mode — should have the snippet, not the hint
+      expect(result.content[0].text).toContain("Test content about architecture decisions");
+      expect(result.content[0].text).not.toContain("Use memory_get_details");
+    });
+
+    it("memory_get_details handles file not found gracefully", async () => {
+      // Override readLines to return null
+      mockMinimem.readLines = vi.fn().mockResolvedValue(null);
+
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: "details-notfound",
+        method: "tools/call",
+        params: {
+          name: "memory_get_details",
+          arguments: {
+            results: [{ path: "memory/missing.md", startLine: 1, endLine: 5 }],
+          },
+        },
+      });
+
+      expect(response.error).toBeUndefined();
+      const result = response.result as { content: Array<{ text: string }> };
+      expect(result.content[0].text).toContain("(not found)");
+      expect(result.content[0].text).toContain("memory/missing.md:1-5");
+    });
+
+    it("memory_search returns no results message", async () => {
+      mockMinimem.search = vi.fn().mockResolvedValue([]);
+
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: "empty-1",
+        method: "tools/call",
+        params: {
+          name: "memory_search",
+          arguments: { query: "something that does not exist" },
+        },
+      });
+
+      expect(response.error).toBeUndefined();
+      const result = response.result as { content: Array<{ text: string }> };
+      expect(result.content[0].text).toBe("No results found.");
     });
 
     it("returns error when tool name missing", async () => {

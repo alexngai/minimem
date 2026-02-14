@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   chunkMarkdown,
+  stripPrivateContent,
+  extractChunkMetadata,
   hashText,
   buildFileEntry,
   listMemoryFiles,
@@ -61,6 +63,164 @@ describe("chunkMarkdown", () => {
       expect(chunk.hash).toBeDefined();
       expect(chunk.hash.length).toBe(64); // SHA256 hex length
     }
+  });
+});
+
+describe("stripPrivateContent", () => {
+  it("strips single-line private block", () => {
+    const input = "public\n<private>secret</private>\nmore public";
+    const result = stripPrivateContent(input);
+    expect(result).toBe("public\n\nmore public");
+  });
+
+  it("strips multi-line private block preserving line count", () => {
+    const input = "line1\n<private>\nsecret1\nsecret2\n</private>\nline6";
+    const result = stripPrivateContent(input);
+    const lines = result.split("\n");
+    // Original has 6 lines, result should too
+    expect(lines.length).toBe(6);
+    expect(lines[0]).toBe("line1");
+    expect(lines[5]).toBe("line6");
+    // Middle lines should be empty
+    expect(lines[1]).toBe("");
+    expect(lines[2]).toBe("");
+    expect(lines[3]).toBe("");
+    expect(lines[4]).toBe("");
+  });
+
+  it("strips multiple private blocks", () => {
+    const input = "a\n<private>x</private>\nb\n<private>y</private>\nc";
+    const result = stripPrivateContent(input);
+    expect(result).toBe("a\n\nb\n\nc");
+  });
+
+  it("is case-insensitive", () => {
+    const input = "a\n<PRIVATE>secret</PRIVATE>\nb";
+    const result = stripPrivateContent(input);
+    expect(result).toBe("a\n\nb");
+  });
+
+  it("returns content unchanged when no private tags", () => {
+    const input = "no secrets here\njust plain text";
+    expect(stripPrivateContent(input)).toBe(input);
+  });
+
+  it("handles empty content", () => {
+    expect(stripPrivateContent("")).toBe("");
+  });
+
+  it("leaves unclosed private tag unchanged", () => {
+    const input = "text\n<private>no closing tag here\nmore text";
+    expect(stripPrivateContent(input)).toBe(input);
+  });
+
+  it("leaves orphaned closing tag unchanged", () => {
+    const input = "text\n</private>\nmore text";
+    expect(stripPrivateContent(input)).toBe(input);
+  });
+
+  it("handles mixed case tags", () => {
+    expect(stripPrivateContent("a\n<Private>x</Private>\nb")).toBe("a\n\nb");
+    expect(stripPrivateContent("a\n<pRiVaTe>x</pRiVaTe>\nb")).toBe("a\n\nb");
+  });
+
+  it("handles private block with only newlines inside", () => {
+    const input = "a\n<private>\n\n\n</private>\nb";
+    const result = stripPrivateContent(input);
+    expect(result.split("\n").length).toBe(input.split("\n").length);
+    expect(result).not.toContain("<private>");
+  });
+
+  it("handles adjacent private blocks", () => {
+    const input = "<private>a</private><private>b</private>";
+    const result = stripPrivateContent(input);
+    expect(result).not.toContain("a");
+    expect(result).not.toContain("b");
+    expect(result).not.toContain("<private>");
+  });
+});
+
+describe("chunkMarkdown with private content", () => {
+  it("excludes private content from chunks", () => {
+    const content = "public info\n<private>API_KEY=sk-123</private>\nmore public";
+    const chunks = chunkMarkdown(content, { tokens: 256, overlap: 0 });
+    for (const chunk of chunks) {
+      expect(chunk.text).not.toContain("API_KEY");
+      expect(chunk.text).not.toContain("sk-123");
+      expect(chunk.text).not.toContain("<private>");
+    }
+  });
+
+  it("preserves line numbers when private content is stripped", () => {
+    const content = "line1\n<private>\nsecret\n</private>\nline5";
+    const chunks = chunkMarkdown(content, { tokens: 256, overlap: 0 });
+    // line5 is on line 5 in the original, should stay on line 5
+    const allText = chunks.map((c) => c.text).join("\n");
+    expect(allText).toContain("line1");
+    expect(allText).toContain("line5");
+    expect(allText).not.toContain("secret");
+  });
+});
+
+describe("extractChunkMetadata", () => {
+  it("extracts type from HTML comment", () => {
+    const text = "### 2026-02-13 14:30\n<!-- type: decision -->\nDecided to use BM25";
+    expect(extractChunkMetadata(text)).toEqual({ type: "decision" });
+  });
+
+  it("is case-insensitive", () => {
+    const text = "<!-- Type: BugFix -->\nFixed off-by-one error";
+    expect(extractChunkMetadata(text)).toEqual({ type: "bugfix" });
+  });
+
+  it("returns empty object when no type comment", () => {
+    const text = "Just plain text with no metadata";
+    expect(extractChunkMetadata(text)).toEqual({});
+  });
+
+  it("extracts first type when multiple present", () => {
+    const text = "<!-- type: feature -->\n<!-- type: discovery -->\nSome text";
+    expect(extractChunkMetadata(text)).toEqual({ type: "feature" });
+  });
+
+  it("handles various type values", () => {
+    expect(extractChunkMetadata("<!-- type: discovery -->")).toEqual({ type: "discovery" });
+    expect(extractChunkMetadata("<!-- type: context -->")).toEqual({ type: "context" });
+    expect(extractChunkMetadata("<!-- type: note -->")).toEqual({ type: "note" });
+  });
+
+  it("handles hyphenated type values", () => {
+    expect(extractChunkMetadata("<!-- type: bug-fix -->")).toEqual({ type: "bug-fix" });
+    expect(extractChunkMetadata("<!-- type: api-change -->")).toEqual({ type: "api-change" });
+  });
+
+  it("handles underscored type values", () => {
+    expect(extractChunkMetadata("<!-- type: feature_flag -->")).toEqual({ type: "feature_flag" });
+  });
+
+  it("handles whitespace variations in comment", () => {
+    expect(extractChunkMetadata("<!--type:decision-->")).toEqual({ type: "decision" });
+    expect(extractChunkMetadata("<!--  type:  decision  -->")).toEqual({ type: "decision" });
+    expect(extractChunkMetadata("<!-- type:decision -->")).toEqual({ type: "decision" });
+  });
+
+  it("does not match empty type value", () => {
+    expect(extractChunkMetadata("<!-- type: -->")).toEqual({});
+    expect(extractChunkMetadata("<!-- type:  -->")).toEqual({});
+  });
+
+  it("does not match unclosed comment", () => {
+    expect(extractChunkMetadata("<!-- type: decision")).toEqual({});
+  });
+
+  it("does not match partial comment syntax", () => {
+    expect(extractChunkMetadata("type: decision")).toEqual({});
+    expect(extractChunkMetadata("// type: decision")).toEqual({});
+  });
+
+  it("normalizes mixed case type to lowercase", () => {
+    expect(extractChunkMetadata("<!-- type: DeciSion -->")).toEqual({ type: "decision" });
+    expect(extractChunkMetadata("<!-- type: BUGFIX -->")).toEqual({ type: "bugfix" });
   });
 });
 

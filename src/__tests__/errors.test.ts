@@ -32,6 +32,17 @@ describe("Error path: listMemoryFiles", () => {
     await fs.writeFile(path.join(tempDir, "MEMORY.md"), "# Upper");
     await fs.writeFile(path.join(tempDir, "memory.md"), "# Lower");
 
+    // On case-insensitive filesystems (macOS HFS+/APFS), both names resolve
+    // to the same file, so the error won't be thrown. Skip in that case.
+    const upperReal = await fs.realpath(path.join(tempDir, "MEMORY.md"));
+    const lowerReal = await fs.realpath(path.join(tempDir, "memory.md"));
+    if (upperReal === lowerReal) {
+      // Case-insensitive FS — can't have two distinct files
+      const files = await listMemoryFiles(tempDir);
+      expect(files).toHaveLength(1);
+      return;
+    }
+
     await expect(listMemoryFiles(tempDir)).rejects.toThrow(
       /Both MEMORY\.md and memory\.md exist/,
     );

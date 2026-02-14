@@ -87,6 +87,12 @@ export type CliConfig = {
     /** Overlap tokens between chunks */
     overlap?: number;
   };
+  hooks?: {
+    /** Enable session-start hook (injects recent memories). Defaults to false. */
+    sessionStart?: boolean;
+    /** Enable session-end hook (appends session summary). Defaults to false. */
+    sessionEnd?: boolean;
+  };
   /** Sync configuration (for git-based syncing) */
   sync?: {
     /** Enable sync for this directory */
@@ -326,6 +332,10 @@ function deepMergeConfig(target: CliConfig, source: CliConfig): CliConfig {
 
   if (source.chunking) {
     result.chunking = { ...target.chunking, ...source.chunking };
+  }
+
+  if (source.hooks) {
+    result.hooks = { ...target.hooks, ...source.hooks };
   }
 
   if (source.sync) {

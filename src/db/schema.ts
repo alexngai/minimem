@@ -6,8 +6,9 @@ import type { DatabaseSync } from "node:sqlite";
  * Version history:
  * - 1: Initial schema (meta, files, chunks, embedding_cache, FTS5)
  * - 2: Added source column to files and chunks tables
+ * - 3: Added type column to chunks table for observation type metadata
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function ensureMemoryIndexSchema(params: {
   db: DatabaseSync;
@@ -90,8 +91,10 @@ export function ensureMemoryIndexSchema(params: {
 
   ensureColumn(params.db, "files", "source", "TEXT NOT NULL DEFAULT 'memory'");
   ensureColumn(params.db, "chunks", "source", "TEXT NOT NULL DEFAULT 'memory'");
+  ensureColumn(params.db, "chunks", "type", "TEXT");
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);`);
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);`);
+  params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(type);`);
 
   // Store current schema version
   params.db.prepare(
