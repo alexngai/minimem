@@ -608,6 +608,73 @@ This is an urgent bug fix needed.
     });
   });
 
+  describe("hooks config", () => {
+    beforeEach(async () => {
+      await init(tempDir, { global: false, force: false });
+    });
+
+    it("should set hooks.sessionStart via config command", async () => {
+      const capture = captureConsole();
+
+      try {
+        await config({ dir: tempDir, set: "hooks.sessionStart=true" });
+      } finally {
+        capture.restore();
+      }
+
+      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+      assert.strictEqual(savedConfig.hooks?.sessionStart, true);
+    });
+
+    it("should set hooks.sessionEnd via config command", async () => {
+      const capture = captureConsole();
+
+      try {
+        await config({ dir: tempDir, set: "hooks.sessionEnd=true" });
+      } finally {
+        capture.restore();
+      }
+
+      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+      assert.strictEqual(savedConfig.hooks?.sessionEnd, true);
+    });
+
+    it("should disable hooks via config command", async () => {
+      // First enable
+      await config({ dir: tempDir, set: "hooks.sessionStart=true" });
+
+      const capture = captureConsole();
+
+      try {
+        await config({ dir: tempDir, set: "hooks.sessionStart=false" });
+      } finally {
+        capture.restore();
+      }
+
+      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+      assert.strictEqual(savedConfig.hooks?.sessionStart, false);
+    });
+
+    it("should set both hooks independently", async () => {
+      const capture = captureConsole();
+
+      try {
+        await config({ dir: tempDir, set: "hooks.sessionStart=true" });
+        await config({ dir: tempDir, set: "hooks.sessionEnd=false" });
+      } finally {
+        capture.restore();
+      }
+
+      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+      assert.strictEqual(savedConfig.hooks?.sessionStart, true);
+      assert.strictEqual(savedConfig.hooks?.sessionEnd, false);
+    });
+  });
+
   describe("sync config", () => {
     beforeEach(async () => {
       await init(tempDir, { global: false, force: false });

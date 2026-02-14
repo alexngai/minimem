@@ -165,11 +165,23 @@ export async function buildFileEntry(
   };
 }
 
+/**
+ * Strip content between <private>...</private> tags.
+ * Replaces private blocks with the same number of empty lines to preserve line numbering.
+ */
+export function stripPrivateContent(content: string): string {
+  return content.replace(/<private>[\s\S]*?<\/private>/gi, (match) => {
+    const lineCount = match.split("\n").length;
+    return "\n".repeat(lineCount - 1);
+  });
+}
+
 export function chunkMarkdown(
   content: string,
   chunking: { tokens: number; overlap: number },
 ): MemoryChunk[] {
-  const lines = content.split("\n");
+  const stripped = stripPrivateContent(content);
+  const lines = stripped.split("\n");
   if (lines.length === 0) return [];
   const maxChars = Math.max(32, chunking.tokens * 4);
   const overlapChars = Math.max(0, chunking.overlap * 4);
@@ -236,6 +248,15 @@ export function chunkMarkdown(
   }
   flush();
   return chunks;
+}
+
+/**
+ * Extract metadata from a chunk's text content.
+ * Looks for HTML comments like <!-- type: decision --> in the chunk.
+ */
+export function extractChunkMetadata(text: string): { type?: string } {
+  const typeMatch = text.match(/<!--\s*type:\s*([\w-]+)\s*-->/i);
+  return typeMatch ? { type: typeMatch[1].toLowerCase() } : {};
 }
 
 export function parseEmbedding(raw: string): number[] {

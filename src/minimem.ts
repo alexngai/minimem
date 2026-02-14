@@ -8,6 +8,7 @@ import {
   buildFileEntry,
   chunkMarkdown,
   ensureDir,
+  extractChunkMetadata,
   hashText,
   listMemoryFiles,
   logError,
@@ -385,7 +386,7 @@ export class Minimem {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number },
+    opts?: { maxResults?: number; minScore?: number; type?: string },
   ): Promise<MinimemSearchResult[]> {
     // Check staleness: use dirty flag if watcher is on, otherwise check mtimes
     if (this.dirty || (!this.watchConfig.enabled && (await this.isStale()))) {
@@ -434,8 +435,20 @@ export class Minimem {
         }).catch(() => [])
       : [];
 
+    // Apply type filter if specified
+    const typeFilterFn = opts?.type
+      ? (id: string) => {
+          const row = this.db
+            .prepare(`SELECT type FROM chunks WHERE id = ?`)
+            .get(id) as { type: string | null } | undefined;
+          return row?.type === opts.type;
+        }
+      : undefined;
+
     if (!this.hybrid.enabled) {
-      return vectorResults
+      let results = vectorResults;
+      if (typeFilterFn) results = results.filter((r) => typeFilterFn(r.id));
+      return results
         .filter((entry) => entry.score >= minScore)
         .slice(0, maxResults)
         .map((r) => ({
@@ -447,8 +460,15 @@ export class Minimem {
         }));
     }
 
+    let filteredVector = vectorResults;
+    let filteredKeyword = keywordResults;
+    if (typeFilterFn) {
+      filteredVector = vectorResults.filter((r) => typeFilterFn(r.id));
+      filteredKeyword = keywordResults.filter((r) => typeFilterFn(r.id));
+    }
+
     const merged = mergeHybridResults({
-      vector: vectorResults.map((r) => ({
+      vector: filteredVector.map((r) => ({
         id: r.id,
         path: r.path,
         startLine: r.startLine,
@@ -457,7 +477,7 @@ export class Minimem {
         snippet: r.snippet,
         vectorScore: r.score,
       })),
-      keyword: keywordResults.map((r) => ({
+      keyword: filteredKeyword.map((r) => ({
         id: r.id,
         path: r.path,
         startLine: r.startLine,
@@ -625,11 +645,12 @@ export class Minimem {
       const chunk = chunks[i];
       const embedding = embeddings[i] ?? [];
       const chunkId = randomUUID();
+      const meta = extractChunkMetadata(chunk.text);
 
       this.db
         .prepare(
-          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           chunkId,
@@ -642,6 +663,7 @@ export class Minimem {
           chunk.text,
           JSON.stringify(embedding),
           now,
+          meta.type ?? null,
         );
 
       // Insert into vector table if available

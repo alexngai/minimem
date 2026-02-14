@@ -19,6 +19,8 @@ export {
 // Utilities
 export {
   chunkMarkdown,
+  stripPrivateContent,
+  extractChunkMetadata,
   hashText,
   listMemoryFiles,
   buildFileEntry,
@@ -43,10 +45,12 @@ export {
   MemoryToolExecutor,
   MEMORY_TOOLS,
   MEMORY_SEARCH_TOOL,
+  MEMORY_GET_DETAILS_TOOL,
   type ToolDefinition,
   type ToolInputSchema,
   type ToolResult,
   type MemorySearchParams,
+  type MemoryGetDetailsParams,
   type MemoryInstance,
 } from "./server/tools.js";
 
