@@ -70,6 +70,41 @@ export type MemoryGetDetailsParams = {
 };
 
 /**
+ * Knowledge search tool parameters
+ */
+export type KnowledgeSearchParams = {
+  query: string;
+  domain?: string[];
+  entities?: string[];
+  minConfidence?: number;
+  knowledgeType?: string;
+  maxResults?: number;
+  minScore?: number;
+  directories?: string[];
+};
+
+/**
+ * Knowledge graph traversal parameters
+ */
+export type KnowledgeGraphParams = {
+  nodeId: string;
+  depth?: number;
+  relation?: string;
+  layer?: string;
+  directories?: string[];
+};
+
+/**
+ * Knowledge path parameters
+ */
+export type KnowledgePathParams = {
+  fromId: string;
+  toId: string;
+  maxDepth?: number;
+  directories?: string[];
+};
+
+/**
  * Search result with source directory
  */
 type SearchResultWithSource = MinimemSearchResult & {
@@ -149,10 +184,133 @@ export const MEMORY_GET_DETAILS_TOOL: ToolDefinition = {
   },
 };
 
+export const KNOWLEDGE_SEARCH_TOOL: ToolDefinition = {
+  name: "knowledge_search",
+  description:
+    "Search memory with knowledge metadata filters. " +
+    "Filter by domain, entities, confidence level, or knowledge type (observation, entity, domain-summary). " +
+    "Combines semantic search with structured knowledge filtering.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Natural language search query",
+      },
+      domain: {
+        type: "array",
+        items: { type: "string" },
+        description: "Filter to entries in these knowledge domains",
+      },
+      entities: {
+        type: "array",
+        items: { type: "string" },
+        description: "Filter to entries referencing these entities",
+      },
+      minConfidence: {
+        type: "number",
+        description: "Minimum confidence threshold (0-1)",
+      },
+      knowledgeType: {
+        type: "string",
+        description: "Filter by knowledge type: observation, entity, domain-summary",
+      },
+      maxResults: {
+        type: "number",
+        description: "Maximum number of results (default: 10)",
+      },
+      minScore: {
+        type: "number",
+        description: "Minimum relevance score 0-1 (default: 0.3)",
+      },
+      directories: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional: filter to specific memory directories",
+      },
+    },
+    required: ["query"],
+  },
+};
+
+export const KNOWLEDGE_GRAPH_TOOL: ToolDefinition = {
+  name: "knowledge_graph",
+  description:
+    "Traverse knowledge graph links from a note. " +
+    "Returns neighbor nodes connected by typed relationships (e.g., relates-to, supports, contradicts). " +
+    "Use depth parameter for multi-hop traversal.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      nodeId: {
+        type: "string",
+        description: "The knowledge node ID to start traversal from",
+      },
+      depth: {
+        type: "number",
+        description: "Maximum traversal depth (default: 1, max: 3)",
+        default: 1,
+      },
+      relation: {
+        type: "string",
+        description: "Optional: filter to specific relation type",
+      },
+      layer: {
+        type: "string",
+        description: "Optional: filter to specific graph layer",
+      },
+      directories: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional: filter to specific memory directories",
+      },
+    },
+    required: ["nodeId"],
+  },
+};
+
+export const KNOWLEDGE_PATH_TOOL: ToolDefinition = {
+  name: "knowledge_path",
+  description:
+    "Find the shortest path between two knowledge nodes in the graph. " +
+    "Uses BFS traversal up to a configurable max depth. " +
+    "Returns the sequence of links connecting the two nodes.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      fromId: {
+        type: "string",
+        description: "Starting knowledge node ID",
+      },
+      toId: {
+        type: "string",
+        description: "Target knowledge node ID",
+      },
+      maxDepth: {
+        type: "number",
+        description: "Maximum path length (default: 3)",
+        default: 3,
+      },
+      directories: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional: filter to specific memory directories",
+      },
+    },
+    required: ["fromId", "toId"],
+  },
+};
+
 /**
  * All available memory tools
  */
-export const MEMORY_TOOLS: ToolDefinition[] = [MEMORY_SEARCH_TOOL, MEMORY_GET_DETAILS_TOOL];
+export const MEMORY_TOOLS: ToolDefinition[] = [
+  MEMORY_SEARCH_TOOL,
+  MEMORY_GET_DETAILS_TOOL,
+  KNOWLEDGE_SEARCH_TOOL,
+  KNOWLEDGE_GRAPH_TOOL,
+  KNOWLEDGE_PATH_TOOL,
+];
 
 /**
  * Get tool definitions for use with LLM APIs
@@ -208,6 +366,12 @@ export class MemoryToolExecutor {
           return await this.memorySearch(params as MemorySearchParams);
         case "memory_get_details":
           return await this.memoryGetDetails(params as MemoryGetDetailsParams);
+        case "knowledge_search":
+          return await this.knowledgeSearch(params as KnowledgeSearchParams);
+        case "knowledge_graph":
+          return await this.knowledgeGraph(params as KnowledgeGraphParams);
+        case "knowledge_path":
+          return await this.knowledgePath(params as KnowledgePathParams);
         default:
           return {
             content: [{ type: "text", text: `Unknown tool: ${toolName}` }],
@@ -394,6 +558,135 @@ export class MemoryToolExecutor {
 
     return {
       content: [{ type: "text", text: details.join("\n\n") }],
+    };
+  }
+
+  private async knowledgeSearch(params: KnowledgeSearchParams): Promise<ToolResult> {
+    const instancesToSearch = this.filterInstances(params.directories);
+    if (!instancesToSearch) {
+      const available = this.getDirectories().join(", ");
+      return {
+        content: [{ type: "text", text: `No matching directories found. Available: ${available}` }],
+        isError: true,
+      };
+    }
+
+    const maxResults = params.maxResults ?? 10;
+    const allResults: SearchResultWithSource[] = [];
+
+    for (const instance of instancesToSearch) {
+      const results = await instance.minimem.knowledgeSearch(params.query, {
+        maxResults: Math.ceil(maxResults * 1.5),
+        minScore: params.minScore,
+        domain: params.domain,
+        entities: params.entities,
+        minConfidence: params.minConfidence,
+        knowledgeType: params.knowledgeType,
+      });
+
+      for (const result of results) {
+        allResults.push({
+          ...result,
+          memoryDir: instance.name ?? instance.memoryDir,
+        });
+      }
+    }
+
+    allResults.sort((a, b) => b.score - a.score);
+    const topResults = allResults.slice(0, maxResults);
+
+    if (topResults.length === 0) {
+      return { content: [{ type: "text", text: "No knowledge results found." }] };
+    }
+
+    const formatted = topResults
+      .map((r, i) => {
+        const location = `${r.path}:${r.startLine}-${r.endLine}`;
+        const score = (r.score * 100).toFixed(0);
+        const preview = compactPreview(r.snippet);
+        return `[${i}] ${location} (${score}%) — ${preview}`;
+      })
+      .join("\n");
+
+    return { content: [{ type: "text", text: formatted }] };
+  }
+
+  private async knowledgeGraph(params: KnowledgeGraphParams): Promise<ToolResult> {
+    const instancesToSearch = this.filterInstances(params.directories);
+    if (!instancesToSearch) {
+      const available = this.getDirectories().join(", ");
+      return {
+        content: [{ type: "text", text: `No matching directories found. Available: ${available}` }],
+        isError: true,
+      };
+    }
+
+    const depth = Math.min(params.depth ?? 1, 3);
+    const allNeighbors: Array<{ id: string; depth: number; relation: string; layer: string | null; memoryDir: string }> = [];
+
+    for (const instance of instancesToSearch) {
+      const neighbors = instance.minimem.getGraphNeighbors(params.nodeId, depth, {
+        relation: params.relation,
+        layer: params.layer,
+      });
+
+      for (const n of neighbors) {
+        allNeighbors.push({
+          id: n.id,
+          depth: n.depth,
+          relation: n.link.relation,
+          layer: n.link.layer,
+          memoryDir: instance.name ?? instance.memoryDir,
+        });
+      }
+    }
+
+    if (allNeighbors.length === 0) {
+      return { content: [{ type: "text", text: `No neighbors found for node "${params.nodeId}".` }] };
+    }
+
+    const formatted = allNeighbors
+      .map((n) => `  [depth=${n.depth}] ${n.id} —(${n.relation})${n.layer ? ` [${n.layer}]` : ""}`)
+      .join("\n");
+
+    return {
+      content: [{ type: "text", text: `Neighbors of "${params.nodeId}":\n${formatted}` }],
+    };
+  }
+
+  private async knowledgePath(params: KnowledgePathParams): Promise<ToolResult> {
+    const instancesToSearch = this.filterInstances(params.directories);
+    if (!instancesToSearch) {
+      const available = this.getDirectories().join(", ");
+      return {
+        content: [{ type: "text", text: `No matching directories found. Available: ${available}` }],
+        isError: true,
+      };
+    }
+
+    const maxDepth = Math.min(params.maxDepth ?? 3, 5);
+
+    // Try each instance until a path is found
+    for (const instance of instancesToSearch) {
+      const path = instance.minimem.getGraphPath(params.fromId, params.toId, maxDepth);
+      if (path.length > 0) {
+        const steps = path
+          .map((link) => `  ${link.fromId} —(${link.relation})→ ${link.toId}`)
+          .join("\n");
+        return {
+          content: [{
+            type: "text",
+            text: `Path from "${params.fromId}" to "${params.toId}" (${path.length} steps):\n${steps}`,
+          }],
+        };
+      }
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `No path found from "${params.fromId}" to "${params.toId}" within depth ${maxDepth}.`,
+      }],
     };
   }
 }

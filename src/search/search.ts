@@ -15,6 +15,61 @@ export type SearchRowResult = {
 };
 
 /**
+ * Options for filtering search results by knowledge metadata
+ */
+export type KnowledgeSearchOptions = {
+  /** Filter to chunks matching any of these domains */
+  domain?: string[];
+  /** Filter to chunks referencing any of these entities */
+  entities?: string[];
+  /** Minimum confidence threshold */
+  minConfidence?: number;
+  /** Filter to a specific knowledge type */
+  knowledgeType?: string;
+};
+
+/**
+ * Build SQL WHERE clause fragments for knowledge filters.
+ * Uses json_each() for array column filtering.
+ */
+export function buildKnowledgeFilterSql(opts: KnowledgeSearchOptions): {
+  sql: string;
+  params: (string | number)[];
+} {
+  const clauses: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (opts.knowledgeType) {
+    clauses.push(` AND c.knowledge_type = ?`);
+    params.push(opts.knowledgeType);
+  }
+
+  if (opts.minConfidence !== undefined) {
+    clauses.push(` AND c.confidence >= ?`);
+    params.push(opts.minConfidence);
+  }
+
+  if (opts.domain && opts.domain.length > 0) {
+    // At least one of the provided domains must appear in the JSON array
+    const domainPlaceholders = opts.domain.map(() => "?").join(", ");
+    clauses.push(
+      ` AND EXISTS (SELECT 1 FROM json_each(c.domains) AS d WHERE d.value IN (${domainPlaceholders}))`,
+    );
+    params.push(...opts.domain);
+  }
+
+  if (opts.entities && opts.entities.length > 0) {
+    const entityPlaceholders = opts.entities.map(() => "?").join(", ");
+    clauses.push(
+      ` AND EXISTS (SELECT 1 FROM json_each(c.entities) AS e WHERE e.value IN (${entityPlaceholders}))`,
+    );
+    params.push(...opts.entities);
+  }
+
+  return { sql: clauses.join(""), params };
+}
+
+/**
  * Perform a vector similarity search against indexed memory chunks.
  *
  * First attempts to use sqlite-vec for fast approximate nearest neighbor search.

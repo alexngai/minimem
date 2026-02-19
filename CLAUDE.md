@@ -25,14 +25,16 @@ src/
 │   ├── config.ts       # Config loading, directory resolution
 │   └── commands/       # Individual command implementations
 ├── db/                 # Database layer
-│   ├── schema.ts       # SQLite schema creation
+│   ├── schema.ts       # SQLite schema creation (v4)
 │   └── sqlite-vec.ts   # Vector extension loading
 ├── embeddings/         # Embedding providers
 │   ├── embeddings.ts   # Provider factory and interfaces
 │   ├── batch-openai.ts # OpenAI batch embedding
 │   └── batch-gemini.ts # Gemini batch embedding
 ├── search/             # Search implementation
-│   └── hybrid.ts       # Hybrid vector+FTS search, BM25
+│   ├── hybrid.ts       # Hybrid vector+FTS search, BM25
+│   ├── search.ts       # Knowledge-filtered search helpers
+│   └── graph.ts        # Knowledge graph traversal (BFS)
 └── server/             # MCP server
     ├── mcp.ts          # MCP protocol implementation
     └── tools.ts        # Tool definitions for LLM integration
@@ -42,12 +44,16 @@ src/
 
 | File | Purpose |
 |------|---------|
-| `src/minimem.ts` | Core class with search, sync, append methods |
+| `src/minimem.ts` | Core class with search, sync, append, knowledge methods |
 | `src/internal.ts` | `chunkMarkdown()`, `hashText()`, `listMemoryFiles()` |
+| `src/session.ts` | Frontmatter parsing/serialization (incl. knowledge fields) |
 | `src/cli/commands/search.ts` | Multi-directory search implementation |
 | `src/embeddings/embeddings.ts` | `createEmbeddingProvider()` factory |
 | `src/search/hybrid.ts` | `mergeHybridResults()`, BM25 scoring |
+| `src/search/search.ts` | `buildKnowledgeFilterSql()` for metadata filtering |
+| `src/search/graph.ts` | `getLinksFrom()`, `getLinksTo()`, `getNeighbors()`, `getPathBetween()` |
 | `src/server/mcp.ts` | MCP server for Claude Desktop integration |
+| `src/server/tools.ts` | MCP tool definitions (memory + knowledge) |
 
 ## Development Commands
 
@@ -65,10 +71,11 @@ npm run test:all       # All tests
 Tests are in `__tests__/` directories alongside source:
 
 - `src/__tests__/minimem.integration.test.ts` - Full E2E with mock embeddings
+- `src/__tests__/knowledge.test.ts` - Knowledge frontmatter parsing + graph traversal
 - `src/cli/__tests__/commands.test.ts` - CLI command tests
 - `src/embeddings/__tests__/` - Embedding provider tests
 - `src/search/__tests__/` - Hybrid search tests
-- `src/server/__tests__/` - MCP server tests
+- `src/server/__tests__/` - MCP server + knowledge tool tests
 
 **Mock embeddings:** Tests use deterministic embeddings based on keyword presence (no API calls needed). See `createDeterministicEmbedding()` in test files.
 
@@ -133,9 +140,10 @@ program
 
 ### Modifying the database schema
 
-1. Update `createSchema()` in `src/db/schema.ts`
+1. Update `createSchema()` in `src/db/schema.ts` (currently at SCHEMA_VERSION 4)
 2. Consider migration strategy (currently: recreate on schema change)
 3. Update relevant queries in `src/minimem.ts`
+4. If adding knowledge-related columns, update `indexKnowledgeMetadata()` in `src/minimem.ts`
 
 ## Gotchas
 
@@ -169,7 +177,17 @@ project/
 
 ## MCP Integration
 
-The MCP server exposes one tool: `memory_search`. It runs over stdio and is compatible with Claude Desktop and Cursor.
+The MCP server exposes 5 tools over stdio, compatible with Claude Desktop and Cursor:
+
+| Tool | Purpose |
+|------|---------|
+| `memory_search` | General semantic search across all memory files |
+| `memory_get_details` | Retrieve full content of a specific memory file |
+| `knowledge_search` | Search knowledge notes with domain/entity/confidence/type filters |
+| `knowledge_graph` | Traverse knowledge graph relationships from a note |
+| `knowledge_path` | Find shortest path between two knowledge notes via graph links |
+
+The 3 `knowledge_*` tools are additive — they only return results when knowledge-formatted notes (with the frontmatter convention below) are present. Without knowledge notes, they return empty results.
 
 Config location for Claude Desktop:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -202,6 +220,86 @@ claude --plugin-dir ./claude-plugin
 
 - `/minimem:remember <text>` - Store information in memory
 - `/minimem:recall <query>` - Search for stored memories
+
+## Knowledge Frontmatter Convention
+
+minimem can index structured knowledge notes produced by external systems (e.g., cognitive-core). This is a **file-format convention only** — minimem does not import or depend on any external package.
+
+When a memory file's YAML frontmatter contains knowledge-specific fields, minimem parses them and populates metadata columns in the `chunks` table and edges in the `knowledge_links` table.
+
+### Supported fields
+
+All fields are optional. If absent, the file is treated as a regular memory note.
+
+```yaml
+---
+id: k-abc123                     # Unique knowledge node ID
+type: observation                # observation | entity | domain-summary
+domain: [database, devops]       # Domain tags
+entities: [prisma, postgres]     # Referenced entities
+confidence: 0.85                 # Confidence score (0.0–1.0)
+source:                          # Provenance metadata
+  origin: extracted              # extracted | agent-authored
+  trajectories: [t-001, t-002]  # Source trajectory IDs
+  agentId: agent-v1             # Authoring agent
+links:                           # Graph edges to other knowledge nodes
+  - target: k-other
+    relation: related-to         # related-to | depends-on | supports | etc.
+    layer: semantic              # semantic | temporal | causal | entity
+  - target: k-dep
+    relation: depends-on
+created: 2025-01-15T10:00:00Z
+updated: 2025-01-15T12:00:00Z
+supersedes: k-old                # ID of note this replaces
+tags: [migration, patterns]
+---
+# Note Title
+
+Body content in Markdown.
+```
+
+### How it works
+
+1. **Indexing** (`indexFile()`): When a file is indexed, frontmatter is parsed via `parseFrontmatter()`. If `type` is present, the chunk row gets `knowledge_type`, `knowledge_id`, `domains` (JSON), `entities` (JSON), and `confidence` populated. If `links` is present, rows are upserted into `knowledge_links`.
+
+2. **Filtered search** (`knowledgeSearch()`): Accepts `domain`, `entities`, `minConfidence`, and `knowledgeType` filters. Uses `json_each()` SQL for array column matching. Falls back to regular search when no filters are provided.
+
+3. **Graph traversal** (`src/search/graph.ts`): Operates on the `knowledge_links` table. Supports outgoing/incoming edge queries, BFS neighbor discovery (configurable depth), and shortest-path finding.
+
+4. **Re-indexing**: When a file changes, old `knowledge_links` for that file are deleted before new ones are inserted, keeping the graph consistent.
+
+### Independence guarantee
+
+- minimem defines its own types (`KnowledgeSource`, `KnowledgeLink`, `MemoryFrontmatter`) locally in `src/session.ts`
+- Zero imports from cognitive-core or any external knowledge system
+- All knowledge columns are nullable — regular memory files index without them
+- The `knowledge_links` table only gets rows when frontmatter contains `links`
+- All knowledge MCP tools (`knowledge_search`, `knowledge_graph`, `knowledge_path`) are additive alongside existing tools
+
+### Database schema (v4)
+
+Knowledge-related additions to the schema:
+
+```sql
+-- Added columns on chunks table (all nullable)
+knowledge_type TEXT      -- 'observation', 'entity', 'domain-summary'
+knowledge_id TEXT        -- Note ID from frontmatter
+domains TEXT             -- JSON array of domain strings
+entities TEXT            -- JSON array of entity strings
+confidence REAL          -- 0.0–1.0
+
+-- New table for graph edges
+CREATE TABLE knowledge_links (
+  from_id TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  relation TEXT NOT NULL,
+  layer TEXT,                     -- semantic, temporal, causal, entity
+  weight REAL DEFAULT 0.5,
+  source_path TEXT,
+  created_at INTEGER DEFAULT (unixepoch()),
+  PRIMARY KEY (from_id, to_id, relation)
+);
+```
 
 ## Code Style
 

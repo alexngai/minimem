@@ -13,8 +13,14 @@ import type { Minimem } from "../../minimem.js";
 
 describe("Tool definitions", () => {
   it("exports memory_search and memory_get_details tools", () => {
-    expect(MEMORY_TOOLS).toHaveLength(2);
-    expect(MEMORY_TOOLS.map((t) => t.name)).toEqual(["memory_search", "memory_get_details"]);
+    expect(MEMORY_TOOLS).toHaveLength(5);
+    expect(MEMORY_TOOLS.map((t) => t.name)).toEqual([
+      "memory_search",
+      "memory_get_details",
+      "knowledge_search",
+      "knowledge_graph",
+      "knowledge_path",
+    ]);
   });
 
   it("getToolDefinitions returns all tools", () => {

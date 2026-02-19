@@ -7,8 +7,9 @@ import type { DatabaseSync } from "node:sqlite";
  * - 1: Initial schema (meta, files, chunks, embedding_cache, FTS5)
  * - 2: Added source column to files and chunks tables
  * - 3: Added type column to chunks table for observation type metadata
+ * - 4: Added knowledge columns to chunks + knowledge_links table
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export function ensureMemoryIndexSchema(params: {
   db: DatabaseSync;
@@ -92,9 +93,33 @@ export function ensureMemoryIndexSchema(params: {
   ensureColumn(params.db, "files", "source", "TEXT NOT NULL DEFAULT 'memory'");
   ensureColumn(params.db, "chunks", "source", "TEXT NOT NULL DEFAULT 'memory'");
   ensureColumn(params.db, "chunks", "type", "TEXT");
+  ensureColumn(params.db, "chunks", "knowledge_type", "TEXT");
+  ensureColumn(params.db, "chunks", "knowledge_id", "TEXT");
+  ensureColumn(params.db, "chunks", "domains", "TEXT");
+  ensureColumn(params.db, "chunks", "entities", "TEXT");
+  ensureColumn(params.db, "chunks", "confidence", "REAL");
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);`);
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);`);
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(type);`);
+  params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_knowledge_type ON chunks(knowledge_type);`);
+  params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_knowledge_id ON chunks(knowledge_id);`);
+
+  // Knowledge links table for graph traversal
+  params.db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_links (
+      from_id TEXT NOT NULL,
+      to_id TEXT NOT NULL,
+      relation TEXT NOT NULL,
+      layer TEXT,
+      weight REAL DEFAULT 0.5,
+      source_path TEXT,
+      created_at INTEGER,
+      PRIMARY KEY (from_id, to_id, relation)
+    );
+  `);
+  params.db.exec(`CREATE INDEX IF NOT EXISTS idx_kl_from ON knowledge_links(from_id);`);
+  params.db.exec(`CREATE INDEX IF NOT EXISTS idx_kl_to ON knowledge_links(to_id);`);
+  params.db.exec(`CREATE INDEX IF NOT EXISTS idx_kl_layer ON knowledge_links(layer);`);
 
   // Store current schema version
   params.db.prepare(
@@ -133,6 +158,7 @@ function migrateIfNeeded(db: DatabaseSync, ftsTable: string): boolean {
     // and will be reused on re-index.
     db.exec(`DROP TABLE IF EXISTS files`);
     db.exec(`DROP TABLE IF EXISTS chunks`);
+    db.exec(`DROP TABLE IF EXISTS knowledge_links`);
     db.exec(`DROP TABLE IF EXISTS ${ftsTable}`);
     // Also drop the vector table if it exists
     try {

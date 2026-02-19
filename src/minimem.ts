@@ -18,8 +18,17 @@ import {
   vectorToBlob,
 } from "./internal.js";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./search/hybrid.js";
-import { searchKeyword, searchVector } from "./search/search.js";
+import { searchKeyword, searchVector, buildKnowledgeFilterSql } from "./search/search.js";
 import { ensureMemoryIndexSchema } from "./db/schema.js";
+import { parseFrontmatter, type MemoryFrontmatter, type KnowledgeLink } from "./session.js";
+import {
+  getLinksFrom,
+  getLinksTo,
+  getNeighbors,
+  getPathBetween,
+  type GraphLink,
+  type GraphNeighbor,
+} from "./search/graph.js";
 import { loadSqliteVecExtension } from "./db/sqlite-vec.js";
 import {
   createEmbeddingProvider,
@@ -576,6 +585,7 @@ export class Minimem {
         logError("deleteStaleVectorEntries", err, this.debug);
       }
       this.db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(stale.path, "memory");
+      this.db.prepare(`DELETE FROM knowledge_links WHERE source_path = ?`).run(stale.path);
       if (this.fts.enabled && this.fts.available) {
         try {
           this.db
@@ -608,6 +618,15 @@ export class Minimem {
     const content = await fs.readFile(entry.absPath, "utf-8");
     const chunks = chunkMarkdown(content, this.chunking);
 
+    // Extract knowledge frontmatter
+    const { frontmatter } = parseFrontmatter(content);
+    const knowledgeType = frontmatter?.type ?? null;
+    const knowledgeId = frontmatter?.id ?? null;
+    const domains = frontmatter?.domain ?? null;
+    const entities = frontmatter?.entities ?? null;
+    const confidence = frontmatter?.confidence ?? null;
+    const links = frontmatter?.links ?? null;
+
     // Get embeddings
     const embeddings = await this.embedChunks(chunks);
 
@@ -639,6 +658,9 @@ export class Minimem {
       }
     }
 
+    // Delete old knowledge links for this file path on re-index
+    this.db.prepare(`DELETE FROM knowledge_links WHERE source_path = ?`).run(entry.path);
+
     // Insert new chunks
     const now = Date.now();
     for (let i = 0; i < chunks.length; i++) {
@@ -649,8 +671,8 @@ export class Minimem {
 
       this.db
         .prepare(
-          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, type)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, type, knowledge_type, knowledge_id, domains, entities, confidence)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           chunkId,
@@ -664,6 +686,11 @@ export class Minimem {
           JSON.stringify(embedding),
           now,
           meta.type ?? null,
+          knowledgeType,
+          knowledgeId,
+          domains ? JSON.stringify(domains) : null,
+          entities ? JSON.stringify(entities) : null,
+          confidence,
         );
 
       // Insert into vector table if available
@@ -701,6 +728,25 @@ export class Minimem {
         } catch (err) {
           logError("insertFtsChunk", err, this.debug);
         }
+      }
+    }
+
+    // Upsert knowledge links if present
+    if (links && knowledgeId) {
+      const upsertLink = this.db.prepare(
+        `INSERT OR REPLACE INTO knowledge_links (from_id, to_id, relation, layer, weight, source_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const link of links) {
+        upsertLink.run(
+          knowledgeId,
+          link.target,
+          link.relation,
+          link.layer ?? null,
+          0.5,
+          entry.path,
+          now,
+        );
       }
     }
   }
@@ -1098,6 +1144,113 @@ export class Minimem {
       chunkCount: chunkRow.count,
       cacheCount: cacheRow.count,
     };
+  }
+
+  /**
+   * Search with knowledge metadata filters (domain, entities, confidence, type).
+   * Runs a standard search then post-filters by knowledge columns.
+   */
+  async knowledgeSearch(
+    query: string,
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      domain?: string[];
+      entities?: string[];
+      minConfidence?: number;
+      knowledgeType?: string;
+    },
+  ): Promise<MinimemSearchResult[]> {
+    // Ensure index is up to date
+    if (this.dirty || (!this.watchConfig.enabled && (await this.isStale()))) {
+      await this.sync({ reason: "knowledgeSearch" });
+    }
+
+    const cleaned = query.trim();
+    if (!cleaned) return [];
+
+    const minScore = opts?.minScore ?? this.queryConfig.minScore;
+    const maxResults = opts?.maxResults ?? this.queryConfig.maxResults;
+
+    // Build knowledge filter SQL
+    const { sql: knowledgeWhere, params: knowledgeParams } =
+      buildKnowledgeFilterSql({
+        domain: opts?.domain,
+        entities: opts?.entities,
+        minConfidence: opts?.minConfidence,
+        knowledgeType: opts?.knowledgeType,
+      });
+
+    // If no knowledge filters, delegate to regular search
+    if (!knowledgeWhere) {
+      return this.search(query, { maxResults, minScore });
+    }
+
+    // Get all chunk IDs matching knowledge filters
+    const matchingRows = this.db
+      .prepare(
+        `SELECT id FROM chunks c WHERE c.model = ? AND c.source = 'memory'${knowledgeWhere}`,
+      )
+      .all(this.provider.model, ...knowledgeParams) as Array<{ id: string }>;
+
+    const matchingIds = new Set(matchingRows.map((r) => r.id));
+
+    if (matchingIds.size === 0) return [];
+
+    // Run standard search with extra candidates to compensate for filtering
+    const overFetch = Math.max(maxResults * 3, 30);
+    const results = await this.search(query, {
+      maxResults: overFetch,
+      minScore,
+    });
+
+    // Post-filter: look up chunk IDs for each result and keep only matching ones
+    const filtered: MinimemSearchResult[] = [];
+    for (const r of results) {
+      const row = this.db
+        .prepare(
+          `SELECT id FROM chunks WHERE path = ? AND start_line = ? AND end_line = ? AND model = ?`,
+        )
+        .get(r.path, r.startLine, r.endLine, this.provider.model) as { id: string } | undefined;
+      if (row && matchingIds.has(row.id)) {
+        filtered.push(r);
+        if (filtered.length >= maxResults) break;
+      }
+    }
+
+    return filtered;
+  }
+
+  /**
+   * Get knowledge graph links from or to a node.
+   */
+  getLinks(
+    nodeId: string,
+    direction: "from" | "to" = "from",
+    opts?: { relation?: string; layer?: string },
+  ): GraphLink[] {
+    if (direction === "from") {
+      return getLinksFrom(this.db, nodeId, opts);
+    }
+    return getLinksTo(this.db, nodeId, opts);
+  }
+
+  /**
+   * Get neighbor nodes via BFS traversal.
+   */
+  getGraphNeighbors(
+    nodeId: string,
+    depth: number = 1,
+    opts?: { relation?: string; layer?: string },
+  ): GraphNeighbor[] {
+    return getNeighbors(this.db, nodeId, depth, opts);
+  }
+
+  /**
+   * Find shortest path between two knowledge nodes.
+   */
+  getGraphPath(fromId: string, toId: string, maxDepth: number = 3): GraphLink[] {
+    return getPathBetween(this.db, fromId, toId, maxDepth);
   }
 
   close(): void {

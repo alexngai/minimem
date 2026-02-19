@@ -46,11 +46,17 @@ export {
   MEMORY_TOOLS,
   MEMORY_SEARCH_TOOL,
   MEMORY_GET_DETAILS_TOOL,
+  KNOWLEDGE_SEARCH_TOOL,
+  KNOWLEDGE_GRAPH_TOOL,
+  KNOWLEDGE_PATH_TOOL,
   type ToolDefinition,
   type ToolInputSchema,
   type ToolResult,
   type MemorySearchParams,
   type MemoryGetDetailsParams,
+  type KnowledgeSearchParams,
+  type KnowledgeGraphParams,
+  type KnowledgePathParams,
   type MemoryInstance,
 } from "./server/tools.js";
 
@@ -72,7 +78,24 @@ export {
   extractSession,
   type SessionContext,
   type MemoryFrontmatter,
+  type KnowledgeSource,
+  type KnowledgeLink,
 } from "./session.js";
+
+// Knowledge search and graph
+export {
+  type KnowledgeSearchOptions,
+  buildKnowledgeFilterSql,
+} from "./search/search.js";
+
+export {
+  getLinksFrom,
+  getLinksTo,
+  getNeighbors,
+  getPathBetween,
+  type GraphLink,
+  type GraphNeighbor,
+} from "./search/graph.js";
 
 // Core components (for advanced usage and custom integrations)
 export {
