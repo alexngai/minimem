@@ -1,3 +1,9 @@
+<div align="center">
+    <picture>
+        <img alt="minimem banner" src="https://raw.githubusercontent.com/alexngai/minimem/main/media/banner.png">
+    </picture>
+</div>
+
 # minimem
 
 A lightweight, file-based memory system with vector search for AI agents.
