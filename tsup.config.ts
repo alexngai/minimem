@@ -4,7 +4,7 @@ export default defineConfig([
   // Library build
   {
     entry: ["src/index.ts", "src/session.ts", "src/internal.ts"],
-    format: ["esm"],
+    format: ["esm", "cjs"],
     dts: true,
     clean: true,
     sourcemap: true,

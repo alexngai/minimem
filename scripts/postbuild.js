@@ -13,23 +13,37 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const cliPath = join(__dirname, "../dist/cli/index.js");
 
-try {
-  let content = readFileSync(cliPath, "utf-8");
+const filesToPatch = [
+  join(__dirname, "../dist/cli/index.js"),
+  join(__dirname, "../dist/index.cjs"),
+  join(__dirname, "../dist/session.cjs"),
+  join(__dirname, "../dist/internal.cjs"),
+];
 
-  // Fix sqlite import (esbuild strips the node: prefix)
-  const before = content;
-  content = content.replace(/from "sqlite"/g, 'from "node:sqlite"');
-  content = content.replace(/from 'sqlite'/g, "from 'node:sqlite'");
+for (const filePath of filesToPatch) {
+  try {
+    let content = readFileSync(filePath, "utf-8");
 
-  if (content !== before) {
-    writeFileSync(cliPath, content);
-    console.log("✓ Fixed node:sqlite import in dist/cli/index.js");
-  } else {
-    console.log("✓ No sqlite import fixes needed");
+    // Fix sqlite import (esbuild strips the node: prefix)
+    const before = content;
+    content = content.replace(/from "sqlite"/g, 'from "node:sqlite"');
+    content = content.replace(/from 'sqlite'/g, "from 'node:sqlite'");
+    content = content.replace(/require\("sqlite"\)/g, 'require("node:sqlite")');
+    content = content.replace(/require\('sqlite'\)/g, "require('node:sqlite')");
+
+    if (content !== before) {
+      writeFileSync(filePath, content);
+      console.log(`✓ Fixed node:sqlite import in ${filePath}`);
+    } else {
+      console.log(`✓ No sqlite import fixes needed in ${filePath}`);
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.log(`⊘ Skipped ${filePath} (not found)`);
+    } else {
+      console.error(`Error patching ${filePath}:`, error.message);
+      process.exit(1);
+    }
   }
-} catch (error) {
-  console.error("Error running postbuild:", error.message);
-  process.exit(1);
 }
