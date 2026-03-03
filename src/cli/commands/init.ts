@@ -7,6 +7,7 @@ import path from "node:path";
 
 import {
   resolveMemoryDir,
+  resolveInitConfigSubdir,
   saveConfig,
   getInitConfig,
   isInitialized,
@@ -48,10 +49,13 @@ export async function init(
 
   console.log(`Initializing minimem in ${displayPath}...`);
 
+  // Determine config subdirectory (env var override or default .minimem)
+  const configSubdir = resolveInitConfigSubdir(memoryDir);
+
   // Create directories
   await fs.mkdir(memoryDir, { recursive: true });
   await fs.mkdir(path.join(memoryDir, "memory"), { recursive: true });
-  await fs.mkdir(path.join(memoryDir, ".minimem"), { recursive: true });
+  await fs.mkdir(path.join(memoryDir, configSubdir), { recursive: true });
 
   // Create MEMORY.md if it doesn't exist
   const memoryFilePath = path.join(memoryDir, "MEMORY.md");
@@ -66,12 +70,12 @@ export async function init(
   // Create config
   const config = getInitConfig();
   await saveConfig(memoryDir, config);
-  console.log("  Created .minimem/config.json");
+  console.log(`  Created ${configSubdir}/config.json`);
 
-  // Create .gitignore for .minimem directory
-  const gitignorePath = path.join(memoryDir, ".minimem", ".gitignore");
+  // Create .gitignore for config directory
+  const gitignorePath = path.join(memoryDir, configSubdir, ".gitignore");
   await fs.writeFile(gitignorePath, "index.db\nindex.db-*\n", "utf-8");
-  console.log("  Created .minimem/.gitignore");
+  console.log(`  Created ${configSubdir}/.gitignore`);
 
   console.log();
   console.log("Done! Your memory directory is ready.");

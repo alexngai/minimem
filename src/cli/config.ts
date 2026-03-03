@@ -9,6 +9,7 @@
  */
 
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
@@ -32,6 +33,7 @@ export {
 const CONFIG_FILENAME = "config.json";
 const CONFIG_DIR = ".minimem";
 const GLOBAL_DIR = ".minimem";
+
 // XDG-style global config directory for sync settings
 const XDG_CONFIG_DIR = ".config/minimem";
 
@@ -156,10 +158,33 @@ export function getGlobalConfigPath(): string {
 }
 
 /**
- * Get the config file path for a memory directory
+ * Resolve which config subdirectory to use for a memory directory.
+ * Priority: MINIMEM_CONFIG_DIR env var > .swarm/minimem > .minimem
+ */
+export function resolveConfigSubdir(memoryDir: string): string {
+  const envDir = process.env.MINIMEM_CONFIG_DIR;
+  if (envDir) return envDir;
+  const swarmDir = path.join(memoryDir, ".swarm", "minimem");
+  if (fsSync.existsSync(swarmDir)) return path.join(".swarm", "minimem");
+  return CONFIG_DIR;
+}
+
+/**
+ * Resolve where to create a new config directory.
+ * MINIMEM_CONFIG_DIR env var overrides the default .minimem location.
+ */
+export function resolveInitConfigSubdir(_memoryDir: string): string {
+  const envDir = process.env.MINIMEM_CONFIG_DIR;
+  if (envDir) return envDir;
+  return CONFIG_DIR;
+}
+
+/**
+ * Get the config file path for a memory directory.
+ * Checks .swarm/minimem first, then falls back to .minimem.
  */
 export function getConfigPath(memoryDir: string): string {
-  return path.join(memoryDir, CONFIG_DIR, CONFIG_FILENAME);
+  return path.join(memoryDir, resolveConfigSubdir(memoryDir), CONFIG_FILENAME);
 }
 
 /**
@@ -359,8 +384,8 @@ export async function saveConfig(
   memoryDir: string,
   config: CliConfig,
 ): Promise<void> {
-  const configDir = path.join(memoryDir, CONFIG_DIR);
   const configPath = getConfigPath(memoryDir);
+  const configDir = path.dirname(configPath);
 
   await fs.mkdir(configDir, { recursive: true });
   await fs.writeFile(configPath, JSON.stringify(config, null, 2), "utf-8");

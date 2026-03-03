@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import chokidar, { type FSWatcher } from "chokidar";
@@ -39,6 +40,18 @@ import {
 } from "./embeddings/embeddings.js";
 import { runOpenAiEmbeddingBatches, type OpenAiBatchRequest, OPENAI_BATCH_ENDPOINT } from "./embeddings/batch-openai.js";
 import { runGeminiEmbeddingBatches, type GeminiBatchRequest } from "./embeddings/batch-gemini.js";
+
+/**
+ * Resolve which subdirectory holds minimem config/data.
+ * Priority: MINIMEM_CONFIG_DIR env var > .swarm/minimem > .minimem
+ */
+function resolveMinimemSubdir(memoryDir: string): string {
+  const envDir = process.env.MINIMEM_CONFIG_DIR;
+  if (envDir) return envDir;
+  const swarmDir = path.join(memoryDir, ".swarm", "minimem");
+  if (fsSync.existsSync(swarmDir)) return path.join(".swarm", "minimem");
+  return ".minimem";
+}
 
 const META_KEY = "memory_index_meta_v1";
 const SNIPPET_MAX_CHARS = 700;
@@ -191,7 +204,7 @@ export class Minimem {
 
   private constructor(config: MinimemConfig) {
     this.memoryDir = path.resolve(config.memoryDir);
-    this.dbPath = config.dbPath ?? path.join(this.memoryDir, ".minimem", "index.db");
+    this.dbPath = config.dbPath ?? path.join(this.memoryDir, resolveMinimemSubdir(this.memoryDir), "index.db");
     this.chunking = {
       tokens: config.chunking?.tokens ?? 256,
       overlap: config.chunking?.overlap ?? 32,
