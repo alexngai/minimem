@@ -1,6 +1,6 @@
 {
   "name": "minimem",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "A lightweight file-based memory system with vector search for AI agents",
   "type": "module",
   "main": "dist/index.js",
