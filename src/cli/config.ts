@@ -159,13 +159,15 @@ export function getGlobalConfigPath(): string {
 
 /**
  * Resolve which config subdirectory to use for a memory directory.
- * Priority: MINIMEM_CONFIG_DIR env var > .swarm/minimem > .minimem
+ * Priority: MINIMEM_CONFIG_DIR env var > contained (config.json at root) > .swarm/minimem > .minimem
  */
 export function resolveConfigSubdir(memoryDir: string): string {
   const envDir = process.env.MINIMEM_CONFIG_DIR;
   if (envDir) return envDir;
+  // Contained layout: config.json directly in memoryDir (no subdir)
+  if (fsSync.existsSync(path.join(memoryDir, CONFIG_FILENAME))) return ".";
   const swarmDir = path.join(memoryDir, ".swarm", "minimem");
-  if (fsSync.existsSync(swarmDir)) return path.join(".swarm", "minimem");
+  if (fsSync.existsSync(path.join(swarmDir, CONFIG_FILENAME))) return path.join(".swarm", "minimem");
   return CONFIG_DIR;
 }
 

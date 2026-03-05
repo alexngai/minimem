@@ -19,7 +19,6 @@ import {
   isInitialized,
   formatPath,
   getInitConfig,
-  saveConfig,
   exitWithError,
   warn,
   note,
@@ -143,10 +142,9 @@ export async function mcp(options: McpOptions): Promise<void> {
 export async function ensureGlobalInitialized(globalDir: string): Promise<void> {
   console.error(`Auto-initializing global memory directory (~/.minimem)...`);
 
-  // Create directories
+  // Create directories (contained layout: everything in globalDir)
   await fs.mkdir(globalDir, { recursive: true });
   await fs.mkdir(path.join(globalDir, "memory"), { recursive: true });
-  await fs.mkdir(path.join(globalDir, ".minimem"), { recursive: true });
 
   // Create MEMORY.md
   const memoryFilePath = path.join(globalDir, "MEMORY.md");
@@ -165,12 +163,13 @@ Notes stored here are available across all projects.
     await fs.writeFile(memoryFilePath, template, "utf-8");
   }
 
-  // Create config
+  // Create config.json directly in globalDir (contained layout)
   const config = getInitConfig();
-  await saveConfig(globalDir, config);
+  const configPath = path.join(globalDir, "config.json");
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2), "utf-8");
 
   // Create .gitignore
-  const gitignorePath = path.join(globalDir, ".minimem", ".gitignore");
+  const gitignorePath = path.join(globalDir, ".gitignore");
   await fs.writeFile(gitignorePath, "index.db\nindex.db-*\n", "utf-8");
 
   console.error(`  Created ~/.minimem with default configuration.`);

@@ -43,13 +43,15 @@ import { runGeminiEmbeddingBatches, type GeminiBatchRequest } from "./embeddings
 
 /**
  * Resolve which subdirectory holds minimem config/data.
- * Priority: MINIMEM_CONFIG_DIR env var > .swarm/minimem > .minimem
+ * Priority: MINIMEM_CONFIG_DIR env var > contained (config.json at root) > .swarm/minimem > .minimem
  */
 function resolveMinimemSubdir(memoryDir: string): string {
   const envDir = process.env.MINIMEM_CONFIG_DIR;
   if (envDir) return envDir;
+  // Contained layout: config.json directly in memoryDir (no subdir)
+  if (fsSync.existsSync(path.join(memoryDir, "config.json"))) return ".";
   const swarmDir = path.join(memoryDir, ".swarm", "minimem");
-  if (fsSync.existsSync(swarmDir)) return path.join(".swarm", "minimem");
+  if (fsSync.existsSync(path.join(swarmDir, "config.json"))) return path.join(".swarm", "minimem");
   return ".minimem";
 }
 

@@ -92,7 +92,8 @@ describe("CLI Commands", () => {
       const memoryMd = await fs.readFile(path.join(tempDir, "MEMORY.md"), "utf-8");
       assert.ok(memoryMd.includes("# Memory"), "MEMORY.md should have header");
 
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      // Contained layout: config.json at root of target dir
+      const configPath = path.join(tempDir, "config.json");
       const config = JSON.parse(await fs.readFile(configPath, "utf-8"));
       assert.strictEqual(config.embedding.provider, "auto");
 
@@ -528,14 +529,14 @@ This is an urgent bug fix needed.
         const memoryMd = await fs.readFile(path.join(fakeGlobalDir, "MEMORY.md"), "utf-8");
         assert.ok(memoryMd.includes("Global Memory"), "Should have global template");
 
-        // Check config exists
-        const configPath = path.join(fakeGlobalDir, ".minimem", "config.json");
+        // Check config exists (contained layout: config.json at root)
+        const configPath = path.join(fakeGlobalDir, "config.json");
         const configData = JSON.parse(await fs.readFile(configPath, "utf-8"));
         assert.strictEqual(configData.embedding.provider, "auto");
 
-        // Check .gitignore exists
+        // Check .gitignore exists (contained layout: at root)
         const gitignore = await fs.readFile(
-          path.join(fakeGlobalDir, ".minimem", ".gitignore"),
+          path.join(fakeGlobalDir, ".gitignore"),
           "utf-8"
         );
         assert.ok(gitignore.includes("index.db"));
@@ -622,7 +623,7 @@ This is an urgent bug fix needed.
         capture.restore();
       }
 
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const configPath = path.join(tempDir, "config.json");
       const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
       assert.strictEqual(savedConfig.hooks?.sessionStart, true);
     });
@@ -636,7 +637,7 @@ This is an urgent bug fix needed.
         capture.restore();
       }
 
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const configPath = path.join(tempDir, "config.json");
       const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
       assert.strictEqual(savedConfig.hooks?.sessionEnd, true);
     });
@@ -653,7 +654,7 @@ This is an urgent bug fix needed.
         capture.restore();
       }
 
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const configPath = path.join(tempDir, "config.json");
       const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
       assert.strictEqual(savedConfig.hooks?.sessionStart, false);
     });
@@ -668,7 +669,7 @@ This is an urgent bug fix needed.
         capture.restore();
       }
 
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const configPath = path.join(tempDir, "config.json");
       const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
       assert.strictEqual(savedConfig.hooks?.sessionStart, true);
       assert.strictEqual(savedConfig.hooks?.sessionEnd, false);
@@ -690,7 +691,7 @@ This is an urgent bug fix needed.
       }
 
       // Verify the config was set
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const configPath = path.join(tempDir, "config.json");
       const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
       assert.strictEqual(savedConfig.sync?.enabled, true);
     });
@@ -704,7 +705,7 @@ This is an urgent bug fix needed.
         capture.restore();
       }
 
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const configPath = path.join(tempDir, "config.json");
       const savedConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
       assert.strictEqual(savedConfig.sync?.path, "myproject/");
     });
@@ -721,7 +722,7 @@ This is an urgent bug fix needed.
 
     it("should merge local sync config with defaults", async () => {
       // Set some local config
-      const configPath = path.join(tempDir, ".minimem", "config.json");
+      const configPath = path.join(tempDir, "config.json");
       const localConfig = {
         embedding: { provider: "auto" },
         sync: {

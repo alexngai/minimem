@@ -8,7 +8,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { getSyncConfig } from "../config.js";
+import { getSyncConfig, resolveConfigSubdir } from "../config.js";
 import {
   listSyncableFiles,
   getFileHashInfo,
@@ -54,7 +54,8 @@ export type ConflictDetectionResult = ChangeDetectionResult;
  * Get the conflicts directory path (for quarantined files)
  */
 export function getConflictsDir(memoryDir: string): string {
-  return path.join(memoryDir, ".minimem", CONFLICTS_DIR);
+  const subdir = resolveConfigSubdir(memoryDir);
+  return path.join(memoryDir, subdir, CONFLICTS_DIR);
 }
 
 /**

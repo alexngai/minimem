@@ -14,8 +14,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { minimatch } from "minimatch";
 
+import { resolveConfigSubdir } from "../config.js";
+
 const STATE_FILENAME = "sync-state.json";
-const STATE_DIR = ".minimem";
 
 export type FileHashInfo = {
   /** SHA-256 hash of local file content */
@@ -41,7 +42,8 @@ export type SyncState = {
  * Get the sync state file path for a directory
  */
 export function getSyncStatePath(dir: string): string {
-  return path.join(dir, STATE_DIR, STATE_FILENAME);
+  const subdir = resolveConfigSubdir(dir);
+  return path.join(dir, subdir, STATE_FILENAME);
 }
 
 /**
@@ -149,8 +151,9 @@ export async function listSyncableFiles(
       const entryPath = path.join(currentDir, entry.name);
       const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
 
-      // Skip .minimem directory
-      if (entry.name === ".minimem") continue;
+      // Skip config/infra directories and database files
+      if (entry.name === ".minimem" || entry.name === ".swarm") continue;
+      if (entry.name === "index.db" || entry.name.startsWith("index.db-")) continue;
 
       if (entry.isDirectory()) {
         await walkDir(entryPath, relPath);

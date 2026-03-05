@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 
 import {
   resolveMemoryDir,
+  resolveConfigSubdir,
   isInitialized,
   formatPath,
   getSyncConfig,
@@ -288,7 +289,8 @@ export type SyncLogEntry = {
  * Get sync log path
  */
 export function getSyncLogPath(memoryDir: string): string {
-  return path.join(memoryDir, ".minimem", SYNC_LOG_FILE);
+  const subdir = resolveConfigSubdir(memoryDir);
+  return path.join(memoryDir, subdir, SYNC_LOG_FILE);
 }
 
 /**

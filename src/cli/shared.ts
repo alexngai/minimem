@@ -5,6 +5,7 @@
  * and other cross-cutting concerns used by all CLI commands.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
@@ -17,13 +18,40 @@ export type DirOptions = {
 };
 
 /**
+ * Discover the memory directory from a base directory.
+ *
+ * Checks for contained layouts where MEMORY.md lives inside
+ * .swarm/minimem/ or .minimem/ rather than at the project root.
+ *
+ * Priority:
+ * 1. base has MEMORY.md → base (classic layout)
+ * 2. base/.swarm/minimem/ has config.json → contained under .swarm
+ * 3. base/.minimem/ has config.json → contained under .minimem
+ * 4. base (fallback)
+ */
+export function discoverMemoryDir(base: string): string {
+  // Classic layout: MEMORY.md at project root
+  if (fs.existsSync(path.join(base, "MEMORY.md"))) return base;
+
+  // Contained under .swarm/minimem/
+  const swarmDir = path.join(base, ".swarm", "minimem");
+  if (fs.existsSync(path.join(swarmDir, "config.json"))) return swarmDir;
+
+  // Contained under .minimem/
+  const minimemDir = path.join(base, ".minimem");
+  if (fs.existsSync(path.join(minimemDir, "config.json"))) return minimemDir;
+
+  return base;
+}
+
+/**
  * Resolve a single memory directory from options.
  *
  * Priority:
  * 1. --dir flag (first element if array)
  * 2. MEMORY_DIR environment variable
  * 3. --global flag → ~/.minimem
- * 4. Current working directory
+ * 4. Auto-discover from current working directory
  *
  * Use this for commands that operate on a single directory.
  */
@@ -45,8 +73,8 @@ export function resolveMemoryDir(options: DirOptions): string {
     return path.join(os.homedir(), ".minimem");
   }
 
-  // Default to current working directory
-  return process.cwd();
+  // Auto-discover from cwd (handles contained layouts)
+  return discoverMemoryDir(process.cwd());
 }
 
 /**
@@ -79,9 +107,9 @@ export function resolveMemoryDirs(options: DirOptions): string[] {
     }
   }
 
-  // Default to current directory if nothing specified
+  // Default: auto-discover from cwd (handles contained layouts)
   if (dirs.length === 0) {
-    dirs.push(process.cwd());
+    dirs.push(discoverMemoryDir(process.cwd()));
   }
 
   // Deduplicate

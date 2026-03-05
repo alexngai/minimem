@@ -65,8 +65,14 @@ describe("McpServer", () => {
 
       expect(response.error).toBeUndefined();
       const result = response.result as { tools: Array<{ name: string }> };
-      expect(result.tools).toHaveLength(2);
-      expect(result.tools.map((t) => t.name)).toEqual(["memory_search", "memory_get_details"]);
+      expect(result.tools).toHaveLength(5);
+      expect(result.tools.map((t) => t.name)).toEqual([
+        "memory_search",
+        "memory_get_details",
+        "knowledge_search",
+        "knowledge_graph",
+        "knowledge_path",
+      ]);
     });
 
     it("tools have valid schemas", async () => {

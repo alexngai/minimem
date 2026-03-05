@@ -43,7 +43,7 @@ const DEFAULT_DEBOUNCE_MS = 2000;
 const DEFAULT_POLL_INTERVAL = 1000;
 
 const DEFAULT_INCLUDE = ["MEMORY.md", "memory/**/*.md"];
-const DEFAULT_EXCLUDE = [".minimem/**", "node_modules/**", ".git/**"];
+const DEFAULT_EXCLUDE = [".minimem/**", "index.db", "index.db-*", "node_modules/**", ".git/**"];
 
 /**
  * Create a file watcher for a memory directory
@@ -93,8 +93,11 @@ export function createFileWatcher(
     // Get relative path
     const relativePath = path.relative(memoryDir, filePath);
 
-    // Skip files in .minimem
-    if (relativePath.startsWith(".minimem")) {
+    // Skip config/infra directories and database files
+    if (relativePath.startsWith(".minimem") || relativePath.startsWith(".swarm")) {
+      return;
+    }
+    if (relativePath === "index.db" || relativePath.startsWith("index.db-")) {
       return;
     }
 
