@@ -147,7 +147,7 @@ describe("contained layout", () => {
 
   describe("init creates contained layout", () => {
     it("creates config.json at target root (not nested)", async () => {
-      await init(tempDir, { force: false });
+      await init(tempDir, { force: false, skipSync: true });
 
       expect(fsSync.existsSync(path.join(tempDir, "config.json"))).toBe(true);
       expect(fsSync.existsSync(path.join(tempDir, "MEMORY.md"))).toBe(true);
@@ -156,19 +156,19 @@ describe("contained layout", () => {
     });
 
     it("does not create a nested .minimem/ subdirectory", async () => {
-      await init(tempDir, { force: false });
+      await init(tempDir, { force: false, skipSync: true });
 
       expect(fsSync.existsSync(path.join(tempDir, ".minimem"))).toBe(false);
     });
 
     it("is detected as initialized by isInitialized", async () => {
-      await init(tempDir, { force: false });
+      await init(tempDir, { force: false, skipSync: true });
 
       expect(await isInitialized(tempDir)).toBe(true);
     });
 
     it("config has correct default values", async () => {
-      await init(tempDir, { force: false });
+      await init(tempDir, { force: false, skipSync: true });
 
       const config = JSON.parse(
         fsSync.readFileSync(path.join(tempDir, "config.json"), "utf-8"),
@@ -258,7 +258,7 @@ describe("contained layout", () => {
       await fs.mkdir(projectDir, { recursive: true });
 
       // Init inside .minimem/ (like swarmkit would)
-      await init(minimemDir, { force: false });
+      await init(minimemDir, { force: false, skipSync: true });
 
       // Discovery from project root should find it
       expect(discoverMemoryDir(projectDir)).toBe(minimemDir);
@@ -270,14 +270,14 @@ describe("contained layout", () => {
       await fs.mkdir(projectDir, { recursive: true });
 
       // Init inside .swarm/minimem/ (like swarmkit with prefix)
-      await init(swarmDir, { force: false });
+      await init(swarmDir, { force: false, skipSync: true });
 
       // Discovery from project root should find it
       expect(discoverMemoryDir(projectDir)).toBe(swarmDir);
     });
 
     it("init creates structure detected by resolveConfigSubdir as contained", async () => {
-      await init(tempDir, { force: false });
+      await init(tempDir, { force: false, skipSync: true });
 
       // resolveConfigSubdir should return "." (contained)
       expect(resolveConfigSubdir(tempDir)).toBe(".");
