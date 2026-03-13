@@ -11,6 +11,13 @@ import {
   isInitialized,
   formatPath,
 } from "../config.js";
+import {
+  loadManifest,
+  resolveStoreName,
+  getLinkedStoreNames,
+  resolveStore,
+} from "../../store/manifest.js";
+import { materializeStore } from "../../store/materialize.js";
 
 const MEMORY_TEMPLATE = `# Memory
 
@@ -72,6 +79,9 @@ export async function init(
   await fs.writeFile(gitignorePath, "index.db\nindex.db-*\n", "utf-8");
   console.log("  Created .gitignore");
 
+  // Materialize linked stores if this directory is registered in the manifest
+  await materializeLinkedStores(memoryDir);
+
   console.log();
   console.log("Done! Your memory directory is ready.");
   console.log();
@@ -84,4 +94,43 @@ export async function init(
   console.log();
   console.log(`  3. Search your memories:`);
   console.log(`     minimem search "your query"${dir ? ` --dir ${dir}` : ""}`);
+}
+
+/**
+ * Materialize all linked stores for a directory.
+ * Ensures remote-backed linked stores are cloned into the cache
+ * so they're ready for search without a first-use delay.
+ */
+async function materializeLinkedStores(memoryDir: string): Promise<void> {
+  try {
+    const manifest = await loadManifest();
+    if (Object.keys(manifest.stores).length === 0) return;
+
+    const storeName = resolveStoreName(manifest, memoryDir);
+    if (!storeName) return;
+
+    const linkedNames = await getLinkedStoreNames(manifest, storeName);
+    if (linkedNames.length === 0) return;
+
+    let materialized = 0;
+    for (const linkedName of linkedNames) {
+      const linkedDef = resolveStore(manifest, linkedName);
+      if (!linkedDef) continue;
+
+      const result = await materializeStore(linkedName, linkedDef);
+      if (result) {
+        if (result.strategy === "remote") {
+          console.log(`  Materialized linked store "${linkedName}" from remote`);
+        }
+        await result.cleanup();
+        materialized++;
+      }
+    }
+
+    if (materialized > 0) {
+      console.log(`  ${materialized} linked store(s) ready`);
+    }
+  } catch {
+    // Non-fatal — init succeeds even if linked store materialization fails
+  }
 }

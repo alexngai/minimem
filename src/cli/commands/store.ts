@@ -19,6 +19,7 @@ import {
   getManifestPath,
   type StoreDefinition,
 } from "../../store/manifest.js";
+import { materializeStore } from "../../store/materialize.js";
 import { exitWithError, formatPath } from "../config.js";
 
 export type StoreListOptions = {
@@ -97,6 +98,17 @@ export async function storeAdd(
   console.log(`Registered store "${name}" at ${formatPath(absPath)}`);
   if (options.remote) {
     console.log(`  remote: ${options.remote}`);
+  }
+
+  // Materialize the store (clone remote if local path doesn't exist)
+  const result = await materializeStore(name, def);
+  if (result) {
+    if (result.strategy === "remote") {
+      console.log(`  Cloned remote into ${formatPath(result.path)}`);
+    }
+    await result.cleanup();
+  } else if (options.remote) {
+    console.log(`  Warning: could not materialize store (remote clone failed)`);
   }
 }
 
