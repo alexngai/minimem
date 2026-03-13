@@ -2,9 +2,18 @@
  * minimem search - Semantic search through memory
  *
  * Supports searching across multiple memory directories in a single query.
+ * When a directory is registered in the store manifest with linked stores,
+ * those linked stores are automatically included in the search.
  */
 
 import { Minimem, type MinimemSearchResult } from "../../minimem.js";
+import {
+  loadManifest,
+  resolveStoreName,
+  getLinkedStoreNames,
+  resolveStore,
+} from "../../store/manifest.js";
+import { materializeStore, type MaterializeResult } from "../../store/materialize.js";
 import {
   resolveMemoryDirs,
   exitWithError,
@@ -23,6 +32,8 @@ export type SearchOptions = {
   minScore?: string;
   provider?: string;
   json?: boolean;
+  /** Disable linked store resolution */
+  noLinks?: boolean;
 };
 
 type SearchResultWithSource = MinimemSearchResult & {
@@ -56,6 +67,11 @@ export async function search(
     exitWithError("No valid initialized memory directories found.");
   }
 
+  // Resolve linked stores unless disabled
+  const { dirs: allDirs, cleanups } = options.noLinks
+    ? { dirs: validDirs, cleanups: [] as Array<() => Promise<void>> }
+    : await resolveLinkedDirs(validDirs);
+
   const maxResults = options.max ? parseInt(options.max, 10) : 10;
   const minScore = options.minScore ? parseFloat(options.minScore) : undefined;
 
@@ -66,7 +82,7 @@ export async function search(
   let warnedBm25 = false;
 
   try {
-    for (const memoryDir of validDirs) {
+    for (const memoryDir of allDirs) {
       const cliConfig = await loadConfig(memoryDir);
       const config = buildMinimemConfig(memoryDir, cliConfig, {
         provider: options.provider,
@@ -114,7 +130,7 @@ export async function search(
     }
 
     // Format results for terminal
-    const showSource = validDirs.length > 1;
+    const showSource = allDirs.length > 1;
 
     for (const result of topResults) {
       const score = (result.score * 100).toFixed(1);
@@ -130,8 +146,8 @@ export async function search(
       console.log();
     }
 
-    const dirSummary = validDirs.length > 1
-      ? ` across ${validDirs.length} directories`
+    const dirSummary = allDirs.length > 1
+      ? ` across ${allDirs.length} directories`
       : "";
     console.log(`Found ${topResults.length} result${topResults.length === 1 ? "" : "s"}${dirSummary}`);
   } finally {
@@ -139,6 +155,55 @@ export async function search(
     for (const instance of instances) {
       instance.close();
     }
+    // Clean up materializations (symlinks, etc.)
+    for (const cleanup of cleanups) {
+      await cleanup().catch(() => {});
+    }
+  }
+}
+
+/**
+ * Resolve linked stores for all directories.
+ * For each directory that is registered in the store manifest,
+ * materializes its linked stores (depth 1) and adds them to the search set.
+ * Remote-backed stores are cloned/fetched into the cache automatically.
+ */
+async function resolveLinkedDirs(
+  dirs: string[],
+): Promise<{ dirs: string[]; cleanups: Array<() => Promise<void>> }> {
+  const cleanups: Array<() => Promise<void>> = [];
+  try {
+    const manifest = await loadManifest();
+    if (Object.keys(manifest.stores).length === 0) {
+      return { dirs, cleanups };
+    }
+
+    const allDirs = new Set(dirs);
+
+    for (const dir of dirs) {
+      const storeName = resolveStoreName(manifest, dir);
+      if (!storeName) continue;
+
+      const linkedNames = await getLinkedStoreNames(manifest, storeName);
+      for (const linkedName of linkedNames) {
+        const linkedDef = resolveStore(manifest, linkedName);
+        if (!linkedDef) continue;
+
+        try {
+          const result = await materializeStore(linkedName, linkedDef);
+          if (result) {
+            allDirs.add(result.path);
+            cleanups.push(result.cleanup);
+          }
+        } catch {
+          // Materialization failed — skip this linked store
+        }
+      }
+    }
+
+    return { dirs: [...allDirs], cleanups };
+  } catch {
+    return { dirs, cleanups };
   }
 }
 

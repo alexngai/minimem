@@ -18,6 +18,7 @@ import { syncInit, syncInitCentral, syncList, syncRemove } from "./commands/sync
 import { pushCommand, pullCommand, syncStatusCommand } from "./commands/push-pull.js";
 import { conflictsCommand, resolveCommand, cleanupCommand, logCommand } from "./commands/conflicts.js";
 import { daemonCommand, daemonStopCommand, daemonStatusCommand, daemonLogsCommand } from "./commands/daemon.js";
+import { storeList, storeAdd, storeRemove, storeLink, storeUnlink } from "./commands/store.js";
 import { validateRegistry, formatValidationResult } from "./sync/validation.js";
 import { VERSION } from "./version.js";
 import { exitWithError } from "./config.js";
@@ -45,6 +46,7 @@ program
   .option("-s, --min-score <number>", "Minimum score threshold 0-1 (default: 0.3)")
   .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, auto)")
   .option("--json", "Output results as JSON")
+  .option("--no-links", "Disable linked store resolution")
   .action(search);
 
 // minimem sync
@@ -259,6 +261,39 @@ program
       exitWithError(message);
     }
   });
+
+// minimem store:list
+program
+  .command("store:list")
+  .description("List all registered stores and their links")
+  .option("--json", "Output as JSON")
+  .action(storeList);
+
+// minimem store:add <name> <path>
+program
+  .command("store:add <name> <path>")
+  .description("Register a store in the global manifest")
+  .option("-r, --remote <url>", "Git remote URL for remote materialization")
+  .option("--description <text>", "Human-readable description")
+  .action(storeAdd);
+
+// minimem store:remove <name>
+program
+  .command("store:remove <name>")
+  .description("Remove a store from the global manifest")
+  .action(storeRemove);
+
+// minimem store:link <store> <target>
+program
+  .command("store:link <store> <target>")
+  .description("Link a store to another (searches include linked stores)")
+  .action(storeLink);
+
+// minimem store:unlink <store> <target>
+program
+  .command("store:unlink <store> <target>")
+  .description("Remove a link between stores")
+  .action(storeUnlink);
 
 // Parse and run
 program.parse();

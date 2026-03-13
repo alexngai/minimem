@@ -107,3 +107,26 @@ export {
   type MemoryIndexMeta,
   type SearchResult as CoreSearchResult,
 } from "./core/index.js";
+
+// Store graph (multi-store linking)
+export {
+  StoreGraph,
+  loadManifest,
+  saveManifest,
+  loadStoreLinks,
+  saveStoreLinks,
+  resolveStore,
+  resolveStoreName,
+  getLinkedStoreNames,
+  getManifestPath,
+  materializeStore,
+  getRemoteCacheDir,
+  listCachedStores,
+  clearStoreCache,
+  type StoreGraphOptions,
+  type ResolvedStore,
+  type StoreManifest,
+  type StoreDefinition,
+  type StoreLinks,
+  type MaterializeResult,
+} from "./store/index.js";

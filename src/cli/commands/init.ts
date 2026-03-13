@@ -10,7 +10,16 @@ import {
   getInitConfig,
   isInitialized,
   formatPath,
+  loadConfig,
+  buildMinimemConfig,
 } from "../config.js";
+import {
+  loadManifest,
+  resolveStoreName,
+  getLinkedStoreNames,
+  resolveStore,
+} from "../../store/manifest.js";
+import { materializeStore } from "../../store/materialize.js";
 
 const MEMORY_TEMPLATE = `# Memory
 
@@ -29,6 +38,8 @@ This is your memory file. Add notes, decisions, and context here.
 export type InitOptions = {
   global?: boolean;
   force?: boolean;
+  /** Skip initial sync (for testing or when no embedding key is available yet) */
+  skipSync?: boolean;
 };
 
 export async function init(
@@ -72,16 +83,84 @@ export async function init(
   await fs.writeFile(gitignorePath, "index.db\nindex.db-*\n", "utf-8");
   console.log("  Created .gitignore");
 
+  // Materialize linked stores if this directory is registered in the manifest
+  await materializeLinkedStores(memoryDir);
+
+  // Run initial sync to create the DB and index existing files
+  if (!options.skipSync) {
+    await initialSync(memoryDir);
+  }
+
   console.log();
   console.log("Done! Your memory directory is ready.");
+  console.log(`Search your memories with: minimem search "your query"${dir ? ` --dir ${dir}` : ""}`);
+}
+
+/**
+ * Run initial sync: create the SQLite DB and index any existing memory files.
+ */
+async function initialSync(memoryDir: string): Promise<void> {
   console.log();
-  console.log("Next steps:");
-  console.log(`  1. Set your embedding API key:`);
-  console.log(`     export OPENAI_API_KEY=your-key`);
-  console.log(`     # or: export GOOGLE_API_KEY=your-key`);
-  console.log();
-  console.log(`  2. Add some memories to MEMORY.md or memory/*.md`);
-  console.log();
-  console.log(`  3. Search your memories:`);
-  console.log(`     minimem search "your query"${dir ? ` --dir ${dir}` : ""}`);
+  console.log("Indexing memory files...");
+
+  const cliConfig = await loadConfig(memoryDir);
+  const config = buildMinimemConfig(memoryDir, cliConfig, {
+    watch: false,
+  });
+
+  // Dynamic import to avoid pulling in node:sqlite at module load time
+  const { Minimem } = await import("../../minimem.js");
+  let minimem: InstanceType<typeof Minimem> | null = null;
+
+  try {
+    minimem = await Minimem.create(config);
+    await minimem.sync({ force: false });
+
+    const status = await minimem.status();
+    console.log(`  Indexed ${status.fileCount} file(s), ${status.chunkCount} chunk(s)`);
+  } catch (err) {
+    // Non-fatal — init succeeds even if sync fails (e.g. no API key yet)
+    console.log("  Skipped indexing (set an embedding API key to enable)");
+  } finally {
+    minimem?.close();
+  }
+}
+
+/**
+ * Materialize all linked stores for a directory.
+ * Ensures remote-backed linked stores are cloned into the cache
+ * so they're ready for search without a first-use delay.
+ */
+async function materializeLinkedStores(memoryDir: string): Promise<void> {
+  try {
+    const manifest = await loadManifest();
+    if (Object.keys(manifest.stores).length === 0) return;
+
+    const storeName = resolveStoreName(manifest, memoryDir);
+    if (!storeName) return;
+
+    const linkedNames = await getLinkedStoreNames(manifest, storeName);
+    if (linkedNames.length === 0) return;
+
+    let materialized = 0;
+    for (const linkedName of linkedNames) {
+      const linkedDef = resolveStore(manifest, linkedName);
+      if (!linkedDef) continue;
+
+      const result = await materializeStore(linkedName, linkedDef);
+      if (result) {
+        if (result.strategy === "remote") {
+          console.log(`  Materialized linked store "${linkedName}" from remote`);
+        }
+        await result.cleanup();
+        materialized++;
+      }
+    }
+
+    if (materialized > 0) {
+      console.log(`  ${materialized} linked store(s) ready`);
+    }
+  } catch {
+    // Non-fatal — init succeeds even if linked store materialization fails
+  }
 }

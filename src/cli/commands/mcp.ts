@@ -10,6 +10,8 @@ import * as path from "node:path";
 import { Minimem } from "../../minimem.js";
 import { createMcpServer, runMcpServer } from "../../server/mcp.js";
 import type { MemoryInstance } from "../../server/tools.js";
+import { loadManifest, resolveStoreName, getLinkedStoreNames, resolveStore } from "../../store/manifest.js";
+import { materializeStore } from "../../store/materialize.js";
 import {
   resolveMemoryDirs,
   getGlobalMemoryDir,
@@ -48,11 +50,14 @@ export async function mcp(options: McpOptions): Promise<void> {
     await ensureGlobalInitialized(globalDir);
   }
 
+  // Resolve linked stores from manifest
+  const expandedDirs = await resolveLinkedDirsForMcp(directories);
+
   // Validate and create instances for each directory
   const instances: MemoryInstance[] = [];
   const minimemInstances: Minimem[] = [];
 
-  for (const memoryDir of directories) {
+  for (const memoryDir of expandedDirs) {
     const isGlobal = memoryDir === globalDir;
 
     if (!(await isInitialized(memoryDir))) {
@@ -173,4 +178,44 @@ Notes stored here are available across all projects.
   await fs.writeFile(gitignorePath, "index.db\nindex.db-*\n", "utf-8");
 
   console.error(`  Created ~/.minimem with default configuration.`);
+}
+
+/**
+ * Resolve linked stores from the manifest for all directories.
+ * Materializes linked stores (including remote-backed ones) and
+ * adds their paths to the directory set.
+ */
+async function resolveLinkedDirsForMcp(dirs: string[]): Promise<string[]> {
+  try {
+    const manifest = await loadManifest();
+    if (Object.keys(manifest.stores).length === 0) return dirs;
+
+    const allDirs = new Set(dirs);
+
+    for (const dir of dirs) {
+      const storeName = resolveStoreName(manifest, dir);
+      if (!storeName) continue;
+
+      const linkedNames = await getLinkedStoreNames(manifest, storeName);
+      for (const linkedName of linkedNames) {
+        const linkedDef = resolveStore(manifest, linkedName);
+        if (!linkedDef) continue;
+
+        try {
+          const result = await materializeStore(linkedName, linkedDef);
+          if (result) {
+            allDirs.add(result.path);
+            // MCP server runs long-lived — no cleanup needed per-request.
+            // Remote cache persists. Symlink cleanup happens on process exit.
+          }
+        } catch {
+          // Materialization failed — skip this linked store
+        }
+      }
+    }
+
+    return [...allDirs];
+  } catch {
+    return dirs;
+  }
 }
