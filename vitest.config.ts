@@ -15,6 +15,8 @@ export default defineConfig({
       // knowledge.test.ts uses node:sqlite for graph tests — run via test:knowledge
       // Frontmatter tests are in knowledge-frontmatter.test.ts (vitest-compatible)
       "src/__tests__/knowledge.test.ts",
+      // store-graph tests use Minimem (node:sqlite) — run via test:integration
+      "src/store/__tests__/store-graph.test.ts",
     ],
     // Run tests sequentially to avoid XDG_CONFIG_HOME conflicts
     pool: "forks",

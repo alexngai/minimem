@@ -2,9 +2,13 @@
  * minimem search - Semantic search through memory
  *
  * Supports searching across multiple memory directories in a single query.
+ * When a directory is registered in the store manifest with linked stores,
+ * those linked stores are automatically included in the search.
  */
 
 import { Minimem, type MinimemSearchResult } from "../../minimem.js";
+import { StoreGraph } from "../../store/store-graph.js";
+import { loadManifest, resolveStoreName } from "../../store/manifest.js";
 import {
   resolveMemoryDirs,
   exitWithError,
@@ -23,6 +27,8 @@ export type SearchOptions = {
   minScore?: string;
   provider?: string;
   json?: boolean;
+  /** Disable linked store resolution */
+  noLinks?: boolean;
 };
 
 type SearchResultWithSource = MinimemSearchResult & {
@@ -56,6 +62,11 @@ export async function search(
     exitWithError("No valid initialized memory directories found.");
   }
 
+  // Resolve linked stores unless disabled
+  const allDirs = options.noLinks
+    ? validDirs
+    : await resolveLinkedDirs(validDirs);
+
   const maxResults = options.max ? parseInt(options.max, 10) : 10;
   const minScore = options.minScore ? parseFloat(options.minScore) : undefined;
 
@@ -66,7 +77,7 @@ export async function search(
   let warnedBm25 = false;
 
   try {
-    for (const memoryDir of validDirs) {
+    for (const memoryDir of allDirs) {
       const cliConfig = await loadConfig(memoryDir);
       const config = buildMinimemConfig(memoryDir, cliConfig, {
         provider: options.provider,
@@ -114,7 +125,7 @@ export async function search(
     }
 
     // Format results for terminal
-    const showSource = validDirs.length > 1;
+    const showSource = allDirs.length > 1;
 
     for (const result of topResults) {
       const score = (result.score * 100).toFixed(1);
@@ -130,8 +141,8 @@ export async function search(
       console.log();
     }
 
-    const dirSummary = validDirs.length > 1
-      ? ` across ${validDirs.length} directories`
+    const dirSummary = allDirs.length > 1
+      ? ` across ${allDirs.length} directories`
       : "";
     console.log(`Found ${topResults.length} result${topResults.length === 1 ? "" : "s"}${dirSummary}`);
   } finally {
@@ -139,6 +150,42 @@ export async function search(
     for (const instance of instances) {
       instance.close();
     }
+  }
+}
+
+/**
+ * Resolve linked stores for all directories.
+ * For each directory that is registered in the store manifest,
+ * adds its linked stores (depth 1) to the search set.
+ */
+async function resolveLinkedDirs(dirs: string[]): Promise<string[]> {
+  try {
+    const manifest = await loadManifest();
+    if (Object.keys(manifest.stores).length === 0) return dirs;
+
+    const graph = StoreGraph.fromManifest(manifest);
+    const allDirs = new Set(dirs);
+
+    for (const dir of dirs) {
+      const storeName = resolveStoreName(manifest, dir);
+      if (!storeName) continue;
+
+      try {
+        const instances = await graph.resolve(storeName);
+        for (const inst of instances) {
+          allDirs.add(inst.memoryDir);
+        }
+        // Close the instances — we just needed the paths.
+        // The search loop will create its own instances.
+        await graph.close();
+      } catch {
+        // Linked store resolution failed gracefully — just search the original dirs
+      }
+    }
+
+    return [...allDirs];
+  } catch {
+    return dirs;
   }
 }
 
