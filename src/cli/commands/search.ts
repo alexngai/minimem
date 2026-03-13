@@ -7,8 +7,13 @@
  */
 
 import { Minimem, type MinimemSearchResult } from "../../minimem.js";
-import { StoreGraph } from "../../store/store-graph.js";
-import { loadManifest, resolveStoreName } from "../../store/manifest.js";
+import {
+  loadManifest,
+  resolveStoreName,
+  getLinkedStoreNames,
+  resolveStore,
+} from "../../store/manifest.js";
+import { materializeStore, type MaterializeResult } from "../../store/materialize.js";
 import {
   resolveMemoryDirs,
   exitWithError,
@@ -63,8 +68,8 @@ export async function search(
   }
 
   // Resolve linked stores unless disabled
-  const allDirs = options.noLinks
-    ? validDirs
+  const { dirs: allDirs, cleanups } = options.noLinks
+    ? { dirs: validDirs, cleanups: [] as Array<() => Promise<void>> }
     : await resolveLinkedDirs(validDirs);
 
   const maxResults = options.max ? parseInt(options.max, 10) : 10;
@@ -150,42 +155,55 @@ export async function search(
     for (const instance of instances) {
       instance.close();
     }
+    // Clean up materializations (symlinks, etc.)
+    for (const cleanup of cleanups) {
+      await cleanup().catch(() => {});
+    }
   }
 }
 
 /**
  * Resolve linked stores for all directories.
  * For each directory that is registered in the store manifest,
- * adds its linked stores (depth 1) to the search set.
+ * materializes its linked stores (depth 1) and adds them to the search set.
+ * Remote-backed stores are cloned/fetched into the cache automatically.
  */
-async function resolveLinkedDirs(dirs: string[]): Promise<string[]> {
+async function resolveLinkedDirs(
+  dirs: string[],
+): Promise<{ dirs: string[]; cleanups: Array<() => Promise<void>> }> {
+  const cleanups: Array<() => Promise<void>> = [];
   try {
     const manifest = await loadManifest();
-    if (Object.keys(manifest.stores).length === 0) return dirs;
+    if (Object.keys(manifest.stores).length === 0) {
+      return { dirs, cleanups };
+    }
 
-    const graph = StoreGraph.fromManifest(manifest);
     const allDirs = new Set(dirs);
 
     for (const dir of dirs) {
       const storeName = resolveStoreName(manifest, dir);
       if (!storeName) continue;
 
-      try {
-        const instances = await graph.resolve(storeName);
-        for (const inst of instances) {
-          allDirs.add(inst.memoryDir);
+      const linkedNames = await getLinkedStoreNames(manifest, storeName);
+      for (const linkedName of linkedNames) {
+        const linkedDef = resolveStore(manifest, linkedName);
+        if (!linkedDef) continue;
+
+        try {
+          const result = await materializeStore(linkedName, linkedDef);
+          if (result) {
+            allDirs.add(result.path);
+            cleanups.push(result.cleanup);
+          }
+        } catch {
+          // Materialization failed — skip this linked store
         }
-        // Close the instances — we just needed the paths.
-        // The search loop will create its own instances.
-        await graph.close();
-      } catch {
-        // Linked store resolution failed gracefully — just search the original dirs
       }
     }
 
-    return [...allDirs];
+    return { dirs: [...allDirs], cleanups };
   } catch {
-    return dirs;
+    return { dirs, cleanups };
   }
 }
 

@@ -11,6 +11,7 @@ import { Minimem } from "../../minimem.js";
 import { createMcpServer, runMcpServer } from "../../server/mcp.js";
 import type { MemoryInstance } from "../../server/tools.js";
 import { loadManifest, resolveStoreName, getLinkedStoreNames, resolveStore } from "../../store/manifest.js";
+import { materializeStore } from "../../store/materialize.js";
 import {
   resolveMemoryDirs,
   getGlobalMemoryDir,
@@ -181,7 +182,8 @@ Notes stored here are available across all projects.
 
 /**
  * Resolve linked stores from the manifest for all directories.
- * Adds linked store paths (depth 1) to the directory set.
+ * Materializes linked stores (including remote-backed ones) and
+ * adds their paths to the directory set.
  */
 async function resolveLinkedDirsForMcp(dirs: string[]): Promise<string[]> {
   try {
@@ -197,8 +199,17 @@ async function resolveLinkedDirsForMcp(dirs: string[]): Promise<string[]> {
       const linkedNames = await getLinkedStoreNames(manifest, storeName);
       for (const linkedName of linkedNames) {
         const linkedDef = resolveStore(manifest, linkedName);
-        if (linkedDef) {
-          allDirs.add(linkedDef.path);
+        if (!linkedDef) continue;
+
+        try {
+          const result = await materializeStore(linkedName, linkedDef);
+          if (result) {
+            allDirs.add(result.path);
+            // MCP server runs long-lived — no cleanup needed per-request.
+            // Remote cache persists. Symlink cleanup happens on process exit.
+          }
+        } catch {
+          // Materialization failed — skip this linked store
         }
       }
     }
