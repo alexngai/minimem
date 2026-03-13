@@ -39,12 +39,12 @@ Requires Node.js 22+ (uses experimental `node:sqlite`).
 ### CLI Usage
 
 ```bash
-# Initialize a memory directory
-minimem init ~/memories
-
 # Set your embedding API key
 export OPENAI_API_KEY=your-key
 # or: export GOOGLE_API_KEY=your-key
+
+# Initialize a memory directory (creates files, DB, and indexes in one step)
+minimem init ~/memories
 
 # Add some memories
 minimem append "Decided to use PostgreSQL for the main database" --dir ~/memories
@@ -88,13 +88,16 @@ mem.close();
 
 | Command | Description |
 |---------|-------------|
-| `minimem init [dir]` | Initialize a memory directory |
+| `minimem init [dir]` | Initialize a memory directory (creates files, DB, and indexes) |
 | `minimem search <query>` | Semantic search through memories |
 | `minimem sync` | Force re-index memory files |
 | `minimem status` | Show index stats and provider info |
 | `minimem append <text>` | Append to today's daily log |
 | `minimem upsert <file> [content]` | Create or update a memory file |
 | `minimem mcp` | Run as MCP server (stdio) |
+| `minimem store:add <name> <path>` | Register a store in the global manifest |
+| `minimem store:list` | List all registered stores and their links |
+| `minimem store:link <store> <target>` | Link a store to another for cross-store search |
 
 ### Common Options
 

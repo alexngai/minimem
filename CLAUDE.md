@@ -48,6 +48,10 @@ src/
 | `src/internal.ts` | `chunkMarkdown()`, `hashText()`, `listMemoryFiles()` |
 | `src/session.ts` | Frontmatter parsing/serialization (incl. knowledge fields) |
 | `src/cli/commands/search.ts` | Multi-directory search implementation |
+| `src/cli/commands/init.ts` | Init command: scaffolds dir, materializes stores, runs initial sync |
+| `src/cli/commands/store.ts` | Store commands: add, remove, link, unlink (materializes on add) |
+| `src/store/manifest.ts` | Store manifest: registration, linking, resolution |
+| `src/store/materialize.ts` | Store materialization: local symlink or remote git clone |
 | `src/embeddings/embeddings.ts` | `createEmbeddingProvider()` factory |
 | `src/search/hybrid.ts` | `mergeHybridResults()`, BM25 scoring |
 | `src/search/search.ts` | `buildKnowledgeFilterSql()` for metadata filtering |
@@ -103,6 +107,21 @@ The search command can query multiple directories:
 minimem search "query" --dir ~/a --dir ~/b --global
 ```
 Results are merged and sorted by score.
+
+### Init Lifecycle
+`minimem init` does three things in order:
+1. **Scaffold** — creates `MEMORY.md`, `config.json`, `.gitignore`, `memory/` dir
+2. **Materialize linked stores** — if this directory is registered in the store manifest with links, materializes them (clones remotes into `~/.cache/minimem/stores/`)
+3. **Initial sync** — creates the SQLite DB and indexes existing memory files (non-fatal if no API key is set)
+
+### Store Materialization
+Stores are materialized eagerly in two places:
+- **`init`** — materializes all linked stores after scaffolding
+- **`store:add`** — materializes the store immediately after registration (clones remote if local path doesn't exist)
+
+Materialization strategies:
+- **Local** — store path exists on disk → use directly
+- **Remote** — clone/fetch git remote into `~/.cache/minimem/stores/<name>/`
 
 ## Common Tasks
 
