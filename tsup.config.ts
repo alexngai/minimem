@@ -9,7 +9,7 @@ export default defineConfig([
     clean: true,
     sourcemap: true,
     target: "node22",
-    external: ["node-llama-cpp"],
+    external: ["node-llama-cpp", "node:sqlite"],
   },
   // CLI build - bundle everything into single file
   {
@@ -18,7 +18,7 @@ export default defineConfig([
     outDir: "dist/cli",
     sourcemap: true,
     target: "node22",
-    external: ["node-llama-cpp", "commander"],
+    external: ["node-llama-cpp", "commander", "node:sqlite"],
     banner: {
       js: "#!/usr/bin/env node",
     },

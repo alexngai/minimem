@@ -8,14 +8,24 @@
  * but node:sqlite requires it.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Include CLI chunk files (tsup code-splits into chunk-*.js)
+const cliDir = join(__dirname, "../dist/cli");
+let cliChunks = [];
+try {
+  cliChunks = readdirSync(cliDir)
+    .filter((f) => f.startsWith("chunk-") && f.endsWith(".js"))
+    .map((f) => join(cliDir, f));
+} catch {}
+
 const filesToPatch = [
   join(__dirname, "../dist/cli/index.js"),
+  ...cliChunks,
   join(__dirname, "../dist/index.cjs"),
   join(__dirname, "../dist/session.cjs"),
   join(__dirname, "../dist/internal.cjs"),
