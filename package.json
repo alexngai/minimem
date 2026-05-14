@@ -35,7 +35,7 @@
     "test:cli": "npx tsx --test src/cli/__tests__/commands.test.ts",
     "test:knowledge": "npx tsx --test src/__tests__/knowledge.test.ts",
     "test:all": "npm run test && npm run test:integration && npm run test:cli && npm run test:knowledge",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "npm run build && publint",
     "version:patch": "npm version patch && git push && git push --tags",
     "version:minor": "npm version minor && git push && git push --tags",
     "version:major": "npm version major && git push && git push --tags",
@@ -69,6 +69,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "publint": "^0.3.21",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
