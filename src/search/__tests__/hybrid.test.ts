@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "../hybrid.js";
 
 describe("buildFtsQuery", () => {
-  it("tokenizes and AND-joins", () => {
-    expect(buildFtsQuery("hello world")).toBe('"hello" AND "world"');
-    expect(buildFtsQuery("FOO_bar baz-1")).toBe('"FOO_bar" AND "baz" AND "1"');
+  it("tokenizes and OR-joins by default", () => {
+    expect(buildFtsQuery("hello world")).toBe('"hello" OR "world"');
+    expect(buildFtsQuery("FOO_bar baz-1")).toBe('"FOO_bar" OR "baz" OR "1"');
   });
 
   it("returns null for empty/whitespace input", () => {
@@ -14,7 +14,7 @@ describe("buildFtsQuery", () => {
   });
 
   it("strips quotes from tokens", () => {
-    expect(buildFtsQuery('hello "world')).toBe('"hello" AND "world"');
+    expect(buildFtsQuery('hello "world')).toBe('"hello" OR "world"');
   });
 
   it("handles single token", () => {
@@ -22,17 +22,18 @@ describe("buildFtsQuery", () => {
   });
 
   it("handles special characters", () => {
-    expect(buildFtsQuery("hello@world.com")).toBe('"hello" AND "world" AND "com"');
+    expect(buildFtsQuery("hello@world.com")).toBe('"hello" OR "world" OR "com"');
   });
 
-  it("OR-joins when mode is 'or'", () => {
+  it("AND-joins when mode is 'and'", () => {
+    expect(buildFtsQuery("hello world", "and")).toBe('"hello" AND "world"');
+    expect(buildFtsQuery("FOO_bar baz-1", "and")).toBe('"FOO_bar" AND "baz" AND "1"');
+  });
+
+  it("explicit 'or' matches the default", () => {
     expect(buildFtsQuery("hello world", "or")).toBe('"hello" OR "world"');
-    expect(buildFtsQuery("FOO_bar baz-1", "or")).toBe('"FOO_bar" OR "baz" OR "1"');
     expect(buildFtsQuery("solo", "or")).toBe('"solo"');
-  });
-
-  it("defaults to AND when mode omitted", () => {
-    expect(buildFtsQuery("hello world", "and")).toBe(buildFtsQuery("hello world"));
+    expect(buildFtsQuery("hello world", "or")).toBe(buildFtsQuery("hello world"));
   });
 });
 

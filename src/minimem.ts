@@ -101,7 +101,9 @@ export type MinimemConfig = {
     textWeight?: number;
     /** Candidate multiplier for search (default: 2.0) */
     candidateMultiplier?: number;
-    /** FTS query mode: "and" (default, all terms required) or "or" (any term) */
+    /** FTS query mode: "or" (default, any term) or "and" (all terms required).
+     *  AND collapses to near-zero recall on multi-term/natural-language queries
+     *  (BEIR ArguAna nDCG@10: AND 0.000 vs OR 0.356), so OR is the default. */
     ftsQueryMode?: "and" | "or";
     /** Fusion strategy: "weighted" (default) or "rrf" (reciprocal rank fusion) */
     fusion?: "weighted" | "rrf";
@@ -229,7 +231,7 @@ export class Minimem {
       vectorWeight: config.hybrid?.vectorWeight ?? 0.7,
       textWeight: config.hybrid?.textWeight ?? 0.3,
       candidateMultiplier: config.hybrid?.candidateMultiplier ?? 2.0,
-      ftsQueryMode: config.hybrid?.ftsQueryMode ?? "and",
+      ftsQueryMode: config.hybrid?.ftsQueryMode ?? "or",
       fusion: config.hybrid?.fusion ?? "weighted",
       rrfK: config.hybrid?.rrfK ?? 60,
     };

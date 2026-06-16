@@ -22,7 +22,7 @@ export type HybridKeywordResult = {
 
 export type FtsQueryMode = "and" | "or";
 
-export function buildFtsQuery(raw: string, mode: FtsQueryMode = "and"): string | null {
+export function buildFtsQuery(raw: string, mode: FtsQueryMode = "or"): string | null {
   const tokens =
     raw
       .match(/[A-Za-z0-9_]+/g)
