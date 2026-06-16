@@ -101,6 +101,12 @@ export type MinimemConfig = {
     textWeight?: number;
     /** Candidate multiplier for search (default: 2.0) */
     candidateMultiplier?: number;
+    /** FTS query mode: "and" (default, all terms required) or "or" (any term) */
+    ftsQueryMode?: "and" | "or";
+    /** Fusion strategy: "weighted" (default) or "rrf" (reciprocal rank fusion) */
+    fusion?: "weighted" | "rrf";
+    /** RRF rank constant (default: 60). Only used when fusion === "rrf". */
+    rrfK?: number;
   };
   /** Query configuration */
   query?: {
@@ -162,6 +168,9 @@ export class Minimem {
     vectorWeight: number;
     textWeight: number;
     candidateMultiplier: number;
+    ftsQueryMode: "and" | "or";
+    fusion: "weighted" | "rrf";
+    rrfK: number;
   };
   private readonly queryConfig: { maxResults: number; minScore: number };
   private readonly watchConfig: { enabled: boolean; debounceMs: number };
@@ -220,6 +229,9 @@ export class Minimem {
       vectorWeight: config.hybrid?.vectorWeight ?? 0.7,
       textWeight: config.hybrid?.textWeight ?? 0.3,
       candidateMultiplier: config.hybrid?.candidateMultiplier ?? 2.0,
+      ftsQueryMode: config.hybrid?.ftsQueryMode ?? "and",
+      fusion: config.hybrid?.fusion ?? "weighted",
+      rrfK: config.hybrid?.rrfK ?? 60,
     };
     this.queryConfig = {
       maxResults: config.query?.maxResults ?? 10,
@@ -410,10 +422,27 @@ export class Minimem {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; type?: string },
+    opts?: { maxResults?: number; minScore?: number; type?: string; skipStaleCheck?: boolean },
   ): Promise<MinimemSearchResult[]> {
-    // Check staleness: use dirty flag if watcher is on, otherwise check mtimes
-    if (this.dirty || (!this.watchConfig.enabled && (await this.isStale()))) {
+    return this.searchWithFilter(query, opts, { sql: "", params: [] });
+  }
+
+  /**
+   * Core search. `knowledgeFilter` is an optional metadata WHERE (clauses on the
+   * chunks alias `c`, from buildKnowledgeFilterSql) pushed directly into the
+   * vector and FTS SQL so filtering happens in-query rather than as a post-pass.
+   */
+  private async searchWithFilter(
+    query: string,
+    opts: { maxResults?: number; minScore?: number; type?: string; skipStaleCheck?: boolean } | undefined,
+    knowledgeFilter: { sql: string; params: (string | number)[] },
+  ): Promise<MinimemSearchResult[]> {
+    // Check staleness: use dirty flag if watcher is on, otherwise check mtimes.
+    // `skipStaleCheck` lets a caller that knows the index is current avoid the
+    // O(files) stat sweep per query (e.g. a batch eval over a static corpus);
+    // a pending write (this.dirty) still forces a sync.
+    const staleCheck = !opts?.skipStaleCheck && !this.watchConfig.enabled;
+    if (this.dirty || (staleCheck && (await this.isStale()))) {
       await this.sync({ reason: "search" });
     }
 
@@ -429,7 +458,14 @@ export class Minimem {
 
     const sourceFilter = { sql: "", params: [] as string[] };
 
-    const keywordResults = this.hybrid.enabled && this.fts.available
+    // Skip a search arm entirely when its weight is 0, so callers get clean
+    // pure-vector (textWeight: 0) or pure-BM25 (vectorWeight: 0) rankings —
+    // and BM25-only runs avoid the embedding call.
+    const runKeyword =
+      this.hybrid.enabled && this.fts.available && this.hybrid.textWeight > 0;
+    const runVector = this.hybrid.vectorWeight > 0;
+
+    const keywordResults = runKeyword
       ? await searchKeyword({
           db: this.db,
           ftsTable: FTS_TABLE,
@@ -438,12 +474,13 @@ export class Minimem {
           limit: candidates,
           snippetMaxChars: SNIPPET_MAX_CHARS,
           sourceFilter,
-          buildFtsQuery,
+          buildFtsQuery: (raw) => buildFtsQuery(raw, this.hybrid.ftsQueryMode),
           bm25RankToScore,
+          knowledgeFilter,
         }).catch(() => [])
       : [];
 
-    const queryVec = await this.embedQueryWithTimeout(cleaned);
+    const queryVec = runVector ? await this.embedQueryWithTimeout(cleaned) : [];
     const hasVector = queryVec.some((v) => v !== 0);
     const vectorResults = hasVector
       ? await searchVector({
@@ -456,6 +493,7 @@ export class Minimem {
           ensureVectorReady: (dims) => this.ensureVectorReady(dims),
           sourceFilterVec: sourceFilter,
           sourceFilterChunks: sourceFilter,
+          knowledgeFilter,
         }).catch(() => [])
       : [];
 
@@ -512,6 +550,8 @@ export class Minimem {
       })),
       vectorWeight: this.hybrid.vectorWeight,
       textWeight: this.hybrid.textWeight,
+      fusion: this.hybrid.fusion,
+      rrfK: this.hybrid.rrfK,
     });
 
     return merged
@@ -1176,64 +1216,22 @@ export class Minimem {
       knowledgeType?: string;
     },
   ): Promise<MinimemSearchResult[]> {
-    // Ensure index is up to date
-    if (this.dirty || (!this.watchConfig.enabled && (await this.isStale()))) {
-      await this.sync({ reason: "knowledgeSearch" });
-    }
-
     const cleaned = query.trim();
     if (!cleaned) return [];
 
     const minScore = opts?.minScore ?? this.queryConfig.minScore;
     const maxResults = opts?.maxResults ?? this.queryConfig.maxResults;
 
-    // Build knowledge filter SQL
-    const { sql: knowledgeWhere, params: knowledgeParams } =
-      buildKnowledgeFilterSql({
-        domain: opts?.domain,
-        entities: opts?.entities,
-        minConfidence: opts?.minConfidence,
-        knowledgeType: opts?.knowledgeType,
-      });
-
-    // If no knowledge filters, delegate to regular search
-    if (!knowledgeWhere) {
-      return this.search(query, { maxResults, minScore });
-    }
-
-    // Get all chunk IDs matching knowledge filters
-    const matchingRows = this.db
-      .prepare(
-        `SELECT id FROM chunks c WHERE c.model = ? AND c.source = 'memory'${knowledgeWhere}`,
-      )
-      .all(this.provider.model, ...knowledgeParams) as Array<{ id: string }>;
-
-    const matchingIds = new Set(matchingRows.map((r) => r.id));
-
-    if (matchingIds.size === 0) return [];
-
-    // Run standard search with extra candidates to compensate for filtering
-    const overFetch = Math.max(maxResults * 3, 30);
-    const results = await this.search(query, {
-      maxResults: overFetch,
-      minScore,
+    // Build the metadata filter and push it directly into the search SQL.
+    // An empty filter (no opts provided) makes this a regular search.
+    const knowledgeFilter = buildKnowledgeFilterSql({
+      domain: opts?.domain,
+      entities: opts?.entities,
+      minConfidence: opts?.minConfidence,
+      knowledgeType: opts?.knowledgeType,
     });
 
-    // Post-filter: look up chunk IDs for each result and keep only matching ones
-    const filtered: MinimemSearchResult[] = [];
-    for (const r of results) {
-      const row = this.db
-        .prepare(
-          `SELECT id FROM chunks WHERE path = ? AND start_line = ? AND end_line = ? AND model = ?`,
-        )
-        .get(r.path, r.startLine, r.endLine, this.provider.model) as { id: string } | undefined;
-      if (row && matchingIds.has(row.id)) {
-        filtered.push(r);
-        if (filtered.length >= maxResults) break;
-      }
-    }
-
-    return filtered;
+    return this.searchWithFilter(query, { maxResults, minScore }, knowledgeFilter);
   }
 
   /**

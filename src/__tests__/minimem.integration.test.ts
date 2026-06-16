@@ -1125,3 +1125,102 @@ describe("Minimem Schema Migration", () => {
     db.close();
   });
 });
+
+describe("Minimem knowledgeSearch filters (SQL pushdown)", () => {
+  let dir: string;
+  let mm: Minimem;
+  let origFetch: typeof fetch;
+
+  before(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-ksearch-"));
+    await fs.mkdir(path.join(dir, "memory"));
+    // Root note without "database" so it doesn't pollute the keyword query.
+    await fs.writeFile(path.join(dir, "MEMORY.md"), "# Memory\n\nProject root index.\n");
+
+    const note = (name: string, fm: string, body: string) =>
+      fs.writeFile(path.join(dir, "memory", name), `${fm}\n${body}\n`);
+
+    await note(
+      "k-a.md",
+      "---\nid: k-a\ntype: observation\ndomain: [database]\nentities: [postgres, prisma]\nconfidence: 0.9\n---",
+      "# Prisma migration\nDatabase migration with prisma and postgres requires schema push.",
+    );
+    await note(
+      "k-b.md",
+      "---\nid: k-b\ntype: entity\ndomain: [database]\nentities: [postgres]\nconfidence: 0.5\n---",
+      "# Postgres\nDatabase connection pooling in postgres.",
+    );
+    await note(
+      "k-c.md",
+      "---\nid: k-c\ntype: observation\ndomain: [api]\nentities: [rest]\nconfidence: 0.8\n---",
+      "# REST API\nDatabase access layer sits behind the api design.",
+    );
+    await note(
+      "k-d.md",
+      "---\nid: k-d\ntype: domain-summary\ndomain: [devops]\nentities: [docker]\nconfidence: 0.85\n---",
+      "# Devops\nDatabase backups run in docker for deploy config.",
+    );
+
+    origFetch = globalThis.fetch;
+    globalThis.fetch = createMockFetch() as unknown as typeof fetch;
+    process.env.OPENAI_API_KEY = "test-api-key-for-ksearch";
+
+    mm = await Minimem.create({
+      memoryDir: dir,
+      embedding: { provider: "openai", model: "text-embedding-3-small" },
+      watch: { enabled: false },
+      hybrid: { enabled: true },
+      query: { minScore: 0.0 },
+    });
+    await mm.sync();
+  });
+
+  after(async () => {
+    mm?.close();
+    globalThis.fetch = origFetch;
+    delete process.env.OPENAI_API_KEY;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const paths = (results: Array<{ path: string }>) => new Set(results.map((r) => r.path));
+
+  it("domain filter restricts results to the matching domain", async () => {
+    const p = paths(await mm.knowledgeSearch("database", { domain: ["database"], maxResults: 10 }));
+    assert.ok(p.has("memory/k-a.md"), "k-a (database) should be included");
+    assert.ok(p.has("memory/k-b.md"), "k-b (database) should be included");
+    assert.ok(!p.has("memory/k-c.md"), "k-c (api) should be excluded");
+    assert.ok(!p.has("memory/k-d.md"), "k-d (devops) should be excluded");
+  });
+
+  it("knowledgeType filter restricts to the given type", async () => {
+    const p = paths(await mm.knowledgeSearch("database", { knowledgeType: "entity", maxResults: 10 }));
+    assert.equal(p.size, 1);
+    assert.ok(p.has("memory/k-b.md"), "only the entity note should match");
+  });
+
+  it("minConfidence excludes low-confidence notes", async () => {
+    const p = paths(await mm.knowledgeSearch("database", { minConfidence: 0.85, maxResults: 10 }));
+    assert.ok(p.has("memory/k-a.md"), "0.90 >= 0.85 included");
+    assert.ok(p.has("memory/k-d.md"), "0.85 >= 0.85 included");
+    assert.ok(!p.has("memory/k-b.md"), "0.50 excluded");
+    assert.ok(!p.has("memory/k-c.md"), "0.80 excluded");
+  });
+
+  it("entities filter restricts to referencing notes", async () => {
+    const prisma = paths(await mm.knowledgeSearch("database", { entities: ["prisma"], maxResults: 10 }));
+    assert.equal(prisma.size, 1);
+    assert.ok(prisma.has("memory/k-a.md"), "only k-a references prisma");
+
+    const postgres = paths(await mm.knowledgeSearch("database", { entities: ["postgres"], maxResults: 10 }));
+    assert.ok(postgres.has("memory/k-a.md"));
+    assert.ok(postgres.has("memory/k-b.md"));
+    assert.ok(!postgres.has("memory/k-c.md"));
+  });
+
+  it("no filter behaves like a regular search", async () => {
+    const filtered = await mm.knowledgeSearch("database", { maxResults: 10 });
+    assert.ok(filtered.length > 0, "should return results");
+    const direct = await mm.search("database", { maxResults: 10 });
+    assert.deepEqual(paths(filtered), paths(direct), "no-filter knowledgeSearch === search");
+  });
+});

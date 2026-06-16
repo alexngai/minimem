@@ -24,31 +24,41 @@ describe("buildFtsQuery", () => {
   it("handles special characters", () => {
     expect(buildFtsQuery("hello@world.com")).toBe('"hello" AND "world" AND "com"');
   });
+
+  it("OR-joins when mode is 'or'", () => {
+    expect(buildFtsQuery("hello world", "or")).toBe('"hello" OR "world"');
+    expect(buildFtsQuery("FOO_bar baz-1", "or")).toBe('"FOO_bar" OR "baz" OR "1"');
+    expect(buildFtsQuery("solo", "or")).toBe('"solo"');
+  });
+
+  it("defaults to AND when mode omitted", () => {
+    expect(buildFtsQuery("hello world", "and")).toBe(buildFtsQuery("hello world"));
+  });
 });
 
 describe("bm25RankToScore", () => {
-  it("returns 1 for rank 0", () => {
-    expect(bm25RankToScore(0)).toBeCloseTo(1);
+  it("returns 0 for rank 0 (no relevance signal)", () => {
+    expect(bm25RankToScore(0)).toBeCloseTo(0);
   });
 
   it("returns 0.5 for rank 1 or -1", () => {
-    // Both positive and negative 1 give same result (absolute value)
+    // Both positive and negative 1 give same result (absolute value): 1/(1+1)
     expect(bm25RankToScore(1)).toBeCloseTo(0.5);
     expect(bm25RankToScore(-1)).toBeCloseTo(0.5);
   });
 
-  it("is monotonically decreasing with absolute value", () => {
-    // Higher magnitude = lower score
-    expect(bm25RankToScore(10)).toBeLessThan(bm25RankToScore(1));
-    expect(bm25RankToScore(100)).toBeLessThan(bm25RankToScore(10));
+  it("is monotonically increasing with match strength (|rank|)", () => {
+    // Stronger match (larger |rank|) = higher score, so it sorts best-first.
+    expect(bm25RankToScore(10)).toBeGreaterThan(bm25RankToScore(1));
+    expect(bm25RankToScore(100)).toBeGreaterThan(bm25RankToScore(10));
   });
 
   it("treats negative ranks same as positive (uses absolute value)", () => {
     // FTS5 BM25 ranks are negative, so -10 should give same score as 10
     expect(bm25RankToScore(-10)).toBeCloseTo(bm25RankToScore(10));
     expect(bm25RankToScore(-100)).toBeCloseTo(bm25RankToScore(100));
-    // -100 → abs = 100 → score = 1/101 ≈ 0.0099
-    expect(bm25RankToScore(-100)).toBeCloseTo(1 / 101);
+    // -100 → abs = 100 → score = 100/101 ≈ 0.9901
+    expect(bm25RankToScore(-100)).toBeCloseTo(100 / 101);
   });
 
   it("handles infinity by returning 0", () => {
@@ -243,5 +253,59 @@ describe("mergeHybridResults", () => {
       source: "sessions",
       snippet: "test snippet",
     });
+  });
+});
+
+describe("mergeHybridResults — RRF fusion", () => {
+  it("fuses by rank and ranks items in both lists highest", () => {
+    const merged = mergeHybridResults({
+      vectorWeight: 0.7,
+      textWeight: 0.3,
+      fusion: "rrf",
+      vector: [
+        { id: "a", path: "memory/a.md", startLine: 1, endLine: 1, source: "memory", snippet: "a", vectorScore: 0.9 },
+        { id: "b", path: "memory/b.md", startLine: 1, endLine: 1, source: "memory", snippet: "b", vectorScore: 0.5 },
+      ],
+      keyword: [
+        { id: "b", path: "memory/b.md", startLine: 1, endLine: 1, source: "memory", snippet: "b", textScore: 0.8 },
+        { id: "c", path: "memory/c.md", startLine: 1, endLine: 1, source: "memory", snippet: "c", textScore: 0.4 },
+      ],
+    });
+
+    // b appears in both lists -> highest; a (vec rank 0) > c (kw rank 1)
+    expect(merged.map((r) => r.path)).toEqual(["memory/b.md", "memory/a.md", "memory/c.md"]);
+    const b = merged.find((r) => r.path === "memory/b.md");
+    expect(b?.score).toBeCloseTo(1 / 62 + 1 / 61); // vec rank 1, kw rank 0, k=60
+  });
+
+  it("ignores raw magnitudes — pure rank ordering", () => {
+    const merged = mergeHybridResults({
+      vectorWeight: 1,
+      textWeight: 0,
+      fusion: "rrf",
+      vector: [
+        { id: "first", path: "memory/first.md", startLine: 1, endLine: 1, source: "memory", snippet: "f", vectorScore: 0.501 },
+        { id: "second", path: "memory/second.md", startLine: 1, endLine: 1, source: "memory", snippet: "s", vectorScore: 0.5 },
+      ],
+      keyword: [],
+    });
+
+    expect(merged.map((r) => r.path)).toEqual(["memory/first.md", "memory/second.md"]);
+    expect(merged[0]?.score).toBeCloseTo(1 / 61); // rank 0, k=60
+  });
+
+  it("respects custom rrfK", () => {
+    const merged = mergeHybridResults({
+      vectorWeight: 1,
+      textWeight: 0,
+      fusion: "rrf",
+      rrfK: 0,
+      vector: [
+        { id: "a", path: "memory/a.md", startLine: 1, endLine: 1, source: "memory", snippet: "a", vectorScore: 0.3 },
+      ],
+      keyword: [],
+    });
+
+    expect(merged[0]?.score).toBeCloseTo(1); // 1 / (0 + 0 + 1)
   });
 });
