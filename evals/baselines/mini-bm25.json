@@ -1,0 +1,5 @@
+{
+  "mini::jaccard": 0.9751172083949178,
+  "mini::bm25-only-and": 0,
+  "mini::bm25-only-or": 0.8800937667159343
+}
