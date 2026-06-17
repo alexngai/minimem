@@ -1,9 +1,11 @@
 # minimem Retrieval/Serving Evaluation — Design Spec
 
-> **Status:** design spec (no harness code yet). Defines *what* to measure, on
-> *which standard corpora*, *how* to plug minimem in, the *roadblocks* and how the
-> harness handles them, and *how* this offline retrieval eval bridges to the
-> end-to-end agent eval that already exists in cognitive-core.
+> **Status:** design spec. The harness is built and run — empirical results,
+> the bugs it surfaced, and confirmed findings are in
+> [RETRIEVAL-EVAL-RESULTS.md](RETRIEVAL-EVAL-RESULTS.md). This doc defines *what*
+> to measure, on *which standard corpora*, *how* to plug minimem in, the
+> *roadblocks* and how the harness handles them, and *how* this offline retrieval
+> eval bridges to the end-to-end agent eval that exists in cognitive-core.
 
 > **Thesis:** minimem is the *retrieval/serving* half of a two-repo memory system
 > (cognitive-core is the write/extraction half). Its retrieval quality is

@@ -89,10 +89,16 @@ Per dataset × {SciFact, NFCorpus, ArguAna}, reporting nDCG@10 / recall@10 / MRR
 | weight sweep (0 / .3 / .5 / .7 / 1.0) | is a single 70/30 defensible; per-regime optimum |
 | vector-only / BM25-only | which signal carries which dataset |
 
-### Hypotheses P0 will confirm or kill
-- **FTS AND→OR**: large win on ArguAna (long queries), ~neutral on SciFact (short).
-- **BM25 wins SciFact, vectors win ArguAna** → quantifies the right hybrid weight.
-- **RRF ≥ weighted-sum** (kills the cosine-vs-BM25 scale bug) → likely new default.
+### Hypotheses → outcome (full results: [RETRIEVAL-EVAL-RESULTS.md](RETRIEVAL-EVAL-RESULTS.md))
+- **FTS AND→OR** — ✅ confirmed, bigger than expected: AND collapses with query length
+  (ArguAna 0.000 vs 0.356; SciFact 0.017 vs 0.656; NFCorpus 0.192 vs 0.300). The
+  "~neutral on SciFact" guess was wrong — SciFact claims are multi-term, so AND is
+  catastrophic there too. OR is now the default.
+- **vector vs BM25** — ✗ guess revised: **vectors win SciFact** (0.702 > 0.656), not BM25
+  (ArguAna full matrix not yet run).
+- **RRF ≥ weighted-sum** — ✅ confirmed (0.729 vs 0.719); recommended as the fusion default.
+- **Bonus:** the run surfaced 4 real minimem bugs (bm25 inversion, BM25 normalization,
+  sqlite-vec never loading, per-query stat storm) — see the results doc.
 
 ---
 
