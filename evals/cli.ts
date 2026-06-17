@@ -41,7 +41,11 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 function parseEmbedding(spec: string | undefined, baseUrl?: string): MinimemConfig["embedding"] {
   const s = (spec ?? "none").trim();
   if (s === "none") return { provider: "none" };
-  const [provider, model] = s.split(":");
+  // Split on the FIRST colon only — model ids can contain colons
+  // (e.g. Bedrock "amazon.titan-embed-text-v2:0").
+  const colon = s.indexOf(":");
+  const provider = colon === -1 ? s : s.slice(0, colon);
+  const model = colon === -1 ? undefined : s.slice(colon + 1);
   if (provider === "openai") {
     return { provider: "openai", model, openai: baseUrl ? { baseUrl } : undefined };
   }
