@@ -23,11 +23,9 @@ aggregation + paired CIs, reporting, and gating all come from the package (desig
 
 ## Run
 
-`swarmkit-eval` is declared as a `file:../swarmkit/src/eval` devDependency but is not published, so build its
-`dist` once (the sibling checkout must be present):
+`swarmkit-eval` is a published dependency (`npm install` pulls it in):
 
 ```sh
-( cd ../swarmkit/src/eval && npm run build )
 npm run eval -- --fixture evals/datasets/__fixtures__/mini --bm25-only   # offline, instant
 npm run eval -- --dataset scifact --bm25-only --out scifact.md           # full BM25 matrix
 npm run eval -- --dataset arguana --embedding local --base-url $TEI_URL --ks 1,5,10,20
