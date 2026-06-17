@@ -301,7 +301,10 @@ export class Minimem {
   private openDatabase(): DatabaseSync {
     const dbDir = path.dirname(this.dbPath);
     ensureDir(dbDir);
-    return new DatabaseSync(this.dbPath);
+    // `allowExtension: true` is required for enableLoadExtension()/loadExtension()
+    // to work at all; without it sqlite-vec never loads and vector search silently
+    // falls back to brute-force JS cosine over every chunk.
+    return new DatabaseSync(this.dbPath, { allowExtension: true });
   }
 
   private ensureSchema(): void {
