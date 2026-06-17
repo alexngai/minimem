@@ -61,6 +61,10 @@ export interface RunMatrixOptions {
   memoryDir?: string;
   scoreOpts?: Partial<ScoreOptions>;
   log?: (msg: string) => void;
+  /** Config names already scored (resume) — these are skipped. */
+  skipConfigs?: string[];
+  /** Called after each config completes (for incremental checkpointing). */
+  onResult?: (r: ConfigResult) => void;
 }
 
 export interface MatrixOutcome {
@@ -86,17 +90,31 @@ export async function runMatrix(dataset: BeirDataset, opts: RunMatrixOptions): P
 
   const results: ConfigResult[] = [];
   const skipped: Array<{ name: string; reason: string }> = [];
+  const alreadyDone = new Set(opts.skipConfigs ?? []);
+
+  const record = (r: ConfigResult, note: string) => {
+    results.push(r);
+    opts.onResult?.(r);
+    log(note);
+  };
 
   for (const spec of configs) {
+    if (alreadyDone.has(spec.name)) {
+      log(`resume: skip ${spec.name} (already scored)`);
+      continue;
+    }
+
     if (spec.kind === "jaccard") {
       const ranks = jaccardRankings(dataset, topK);
-      results.push({
-        dataset: dataset.name,
-        config: spec.name,
-        score: scoreRankings(ranks, dataset.qrels, scoreOpts),
-        meta: { kind: "jaccard" },
-      });
-      log(`scored ${spec.name} (lexical)`);
+      record(
+        {
+          dataset: dataset.name,
+          config: spec.name,
+          score: scoreRankings(ranks, dataset.qrels, scoreOpts),
+          meta: { kind: "jaccard" },
+        },
+        `scored ${spec.name} (lexical)`,
+      );
       continue;
     }
 
@@ -114,13 +132,15 @@ export async function runMatrix(dataset: BeirDataset, opts: RunMatrixOptions): P
     });
     try {
       const ranks = await runQueries(mm, dataset, maps, { k: topK });
-      results.push({
-        dataset: dataset.name,
-        config: spec.name,
-        score: scoreRankings(ranks, dataset.qrels, scoreOpts),
-        meta: { kind: "minimem", ...flattenHybrid(spec.hybrid) },
-      });
-      log(`scored ${spec.name}`);
+      record(
+        {
+          dataset: dataset.name,
+          config: spec.name,
+          score: scoreRankings(ranks, dataset.qrels, scoreOpts),
+          meta: { kind: "minimem", ...flattenHybrid(spec.hybrid) },
+        },
+        `scored ${spec.name}`,
+      );
     } finally {
       mm.close();
     }

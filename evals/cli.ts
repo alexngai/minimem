@@ -10,16 +10,23 @@
  * Embedding spec: none | openai[:model] | gemini[:model] | local[:modelPath].
  * For SageMaker/Bedrock via an OpenAI-compatible endpoint, use
  * `--embedding openai:<model> --base-url <url>` (key from OPENAI_API_KEY).
+ *
+ * Robust/long runs: pass a persistent `--memory-dir <path>` so embeddings are
+ * cached and each completed config is checkpointed. Re-running the SAME command
+ * resumes — skipping finished configs and reusing the cached index (no re-embed).
+ *   npx tsx evals/cli.ts --dataset arguana --embedding local \
+ *     --memory-dir .eval-cache/arguana --json arguana-full.json
  */
 
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 
 import type { MinimemConfig } from "../src/index.js";
 import { loadBeirDataset, parseBeirDir, type BeirDatasetName } from "./datasets/beir.js";
 import type { BeirDataset } from "./datasets/types.js";
 import { runMatrix, P0_CONFIGS, BM25_CONFIGS } from "./harness/matrix.js";
-import { formatMarkdown, toJSON } from "./harness/report.js";
+import { formatMarkdown, toJSON, type ConfigResult } from "./harness/report.js";
 
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
@@ -78,17 +85,43 @@ async function main(): Promise<void> {
     throw new Error("Provide --dataset <scifact|nfcorpus|arguana> or --fixture <dir>.");
   }
 
-  const { results, skipped } = await runMatrix(dataset, {
+  const memoryDir = (args["memory-dir"] as string) || undefined;
+
+  // Resume checkpoint (meaningful with a persistent --memory-dir): completed
+  // configs are skipped and reused, so a killed run resumes where it stopped.
+  const checkpointPath = memoryDir
+    ? path.join(memoryDir, `.eval-checkpoint-${dataset.name}.json`)
+    : undefined;
+  let prior: ConfigResult[] = [];
+  if (checkpointPath) {
+    try {
+      prior = JSON.parse(await fs.readFile(checkpointPath, "utf-8")) as ConfigResult[];
+    } catch {
+      prior = [];
+    }
+  }
+  if (prior.length > 0) {
+    process.stderr.write(`[eval] resuming: ${prior.length} config(s) already scored\n`);
+  }
+  const all: ConfigResult[] = [...prior];
+
+  const { skipped } = await runMatrix(dataset, {
     embedding,
     configs,
     k,
+    memoryDir,
+    skipConfigs: prior.map((r) => r.config),
+    onResult: (r) => {
+      all.push(r);
+      if (checkpointPath) fsSync.writeFileSync(checkpointPath, JSON.stringify(all));
+    },
     log: (m) => process.stderr.write(`[eval] ${m}\n`),
   });
 
-  const md = formatMarkdown(results, { k, reference });
+  const md = formatMarkdown(all, { k, reference });
   if (args.out) await fs.writeFile(args.out as string, md + "\n");
   else process.stdout.write(md + "\n");
-  if (args.json) await fs.writeFile(args.json as string, toJSON(results) + "\n");
+  if (args.json) await fs.writeFile(args.json as string, toJSON(all) + "\n");
 
   if (skipped.length > 0) {
     process.stderr.write(
