@@ -1,79 +1,108 @@
 /**
- * Run minimem's BEIR retrieval evals through **swarmkit-eval** (design §3c/§4d, D6/D15 — minimem as the
- * client of the package). The mapping:
- *   - the corpus index is a swarmkit `ResourceSpec` (built once per arm, scope `[benchmark, arm]`, so each
- *     search-config arm gets its own minimem instance over the materialized corpus);
- *   - each judged query is a cell; the minimem-search adapter fills `RawRun.ranked`;
- *   - scoring is `{ kind: "retrieval", k }` (qrels → nDCG@k / Recall@k / MRR / Precision@k).
- * Everything else (matrix, store/resume, the shared-resource lifecycle, aggregation, paired CIs) is the
- * package. This file owns only the minimem-specific seams.
+ * Run minimem's BEIR retrieval evals through **swarmkit-eval** (minimem as the client; design §3c/§4d,
+ * D6/D15). This is minimem's PRIMARY eval path — it replaces the hand-rolled `evals/harness/`
+ * matrix+metrics+report+gate with the package, keeping only minimem's domain pieces (corpus
+ * materialization, the minimem index + `runQueries`, and the Jaccard baseline ranker).
+ *
+ * The mapping:
+ *   - each search config (bm25 / vector / hybrid / jaccard) is an **Arm** (the independent variable);
+ *   - the per-arm ranking set is a `ResourceSpec` — built once per arm (materialize + index + run all
+ *     queries, or the Jaccard precompute), shared by every query-cell;
+ *   - each judged query is a **cell**; the adapter looks up that query's ranking;
+ *   - scoring is `{ kind: "retrieval", k, ks }` (qrels → nDCG/Recall/Precision/MRR/Hit, with per-arm CIs).
  */
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  BenchmarkAdapter,
-  ExecutionAdapter,
-  ResourceSpec,
-  EvalTask,
-  RunContext,
-} from "swarmkit-eval";
-import type { Minimem, MinimemConfig } from "../../src/index.js";
+import type { BenchmarkAdapter, ExecutionAdapter, ResourceSpec, EvalTask, RunContext, Arm } from "swarmkit-eval";
+import type { MinimemConfig } from "../../src/index.js";
 import type { BeirDataset } from "../datasets/types.js";
-import { materializeCorpus, type CorpusMaps } from "../harness/materialize.js";
-import { openIndex, type HybridConfig } from "../harness/run.js";
+import { materializeCorpus } from "../harness/materialize.js";
+import { openIndex, runQueries, type HybridConfig, type RankedDoc } from "../harness/run.js";
+import { jaccardRankings } from "../harness/jaccard.js";
 
-/** Per-arm minimem configuration — the independent variable (a search strategy). */
-export interface BeirArmConfig {
+/** One search configuration = one swarmkit arm. */
+export interface RetrievalConfig {
+  id: string;
+  label: string;
+  kind: "minimem" | "jaccard";
   hybrid?: HybridConfig;
-  embedding?: MinimemConfig["embedding"];
 }
 
-/** What the corpus ResourceSpec hands every query-cell: an opened minimem index + the path→doc map. */
-interface CorpusValue {
-  mm: Minimem;
-  maps: CorpusMaps;
+/** The P0 config matrix as arms (mirrors the retired `harness/matrix.ts` P0_CONFIGS). */
+export const MINIMEM_CONFIGS: RetrievalConfig[] = [
+  { id: "jaccard", label: "Jaccard (lexical)", kind: "jaccard" },
+  { id: "bm25-only-and", label: "BM25 (AND)", kind: "minimem", hybrid: { vectorWeight: 0, textWeight: 1, ftsQueryMode: "and" } },
+  { id: "bm25-only-or", label: "BM25 (OR)", kind: "minimem", hybrid: { vectorWeight: 0, textWeight: 1, ftsQueryMode: "or" } },
+  { id: "vector-only", label: "Vector", kind: "minimem", hybrid: { vectorWeight: 1, textWeight: 0 } },
+  { id: "hybrid-weighted-70-30", label: "Hybrid weighted 70/30", kind: "minimem", hybrid: { vectorWeight: 0.7, textWeight: 0.3, fusion: "weighted" } },
+  { id: "hybrid-rrf", label: "Hybrid RRF", kind: "minimem", hybrid: { fusion: "rrf" } },
+  { id: "hybrid-rrf-or", label: "Hybrid RRF (OR)", kind: "minimem", hybrid: { fusion: "rrf", ftsQueryMode: "or" } },
+];
+
+/** A config needs an embedding provider iff it uses vector search. */
+export function needsVector(c: RetrievalConfig): boolean {
+  return c.kind === "minimem" && (c.hybrid?.vectorWeight ?? 0.7) > 0;
+}
+
+/** swarmkit arms for a set of configs (arm id = config id). */
+export function configArms(configs: RetrievalConfig[]): Arm[] {
+  return configs.map((c) => ({ id: c.id, label: c.label, scaffold: {} }));
+}
+
+export interface BeirBenchmarkOpts {
+  embedding?: MinimemConfig["embedding"];
+  /** Headline cutoff (default 10). */
+  k?: number;
+  /** Cutoffs to score at (default `[k]`; pass `[1,5,10,20]` for a full sweep). */
+  ks?: number[];
+}
+
+interface RankingValue {
+  rankings: Map<string, RankedDoc[]>;
 }
 
 /**
- * A swarmkit-eval {@link BenchmarkAdapter} for a BEIR dataset, driven by minimem. The expensive corpus
- * index is a {@link ResourceSpec} built once per arm and shared by every query-cell.
+ * A swarmkit-eval {@link BenchmarkAdapter} for a BEIR dataset over a set of minimem search configs. Each
+ * config's ranking set is a {@link ResourceSpec} built once (the expensive materialize + index + search,
+ * or the Jaccard precompute) and shared by every query-cell.
  */
-export function beirBenchmark(
-  dataset: BeirDataset,
-  arms: Record<string, BeirArmConfig>,
-  k = 10,
-): BenchmarkAdapter {
+export function beirBenchmark(dataset: BeirDataset, configs: RetrievalConfig[], opts: BeirBenchmarkOpts = {}): BenchmarkAdapter {
   const id = `beir/${dataset.name}`;
-  const corpus: ResourceSpec = {
-    id: "corpus",
-    scope: ["benchmark", "arm"], // one minimem index per search-config arm; shared across that arm's queries
-    cacheKey: (cell) => `${dataset.name}:${cell.arm.id}`,
+  const k = opts.k ?? 10;
+  const ks = opts.ks ?? [k];
+  const topK = Math.max(k, ...ks);
+  const embedding = opts.embedding ?? { provider: "none" };
+  const byId = new Map(configs.map((c) => [c.id, c]));
+
+  const rankings: ResourceSpec = {
+    id: "rankings",
+    scope: ["benchmark", "arm"], // one ranking set per config (arm); shared across that arm's query-cells
+    cacheKey: (cell) => `${dataset.name}:${cell.arm.id}:${embedding.provider}`,
     async build(ctx) {
-      const armCfg = arms[ctx.cell.arm.id] ?? {};
-      const memoryDir = await mkdtemp(join(tmpdir(), `beir-${dataset.name}-${ctx.cell.arm.id}-`));
+      const cfg = byId.get(ctx.cell.arm.id);
+      if (!cfg) throw new Error(`no retrieval config for arm '${ctx.cell.arm.id}'`);
+      if (cfg.kind === "jaccard") {
+        // Pure lexical baseline — no index needed; minimem's exact jaccardRankings.
+        return { value: { rankings: jaccardRankings(dataset, topK) } satisfies RankingValue, async stop() {} };
+      }
+      // minimem: materialize the corpus, open the index for this arm's hybrid config, run every query.
+      const memoryDir = await mkdtemp(join(tmpdir(), `beir-${dataset.name}-${cfg.id}-`));
       const maps = await materializeCorpus(dataset.corpus, memoryDir);
-      const mm = await openIndex({
-        memoryDir,
-        embedding: armCfg.embedding ?? { provider: "none" },
-        hybrid: armCfg.hybrid,
-        requireVector: false,
-      });
-      const value: CorpusValue = { mm, maps };
-      return {
-        value,
-        async stop() {
-          mm.close();
-        },
-      };
+      const mm = await openIndex({ memoryDir, embedding, hybrid: cfg.hybrid, requireVector: needsVector(cfg) });
+      try {
+        return { value: { rankings: await runQueries(mm, dataset, maps, { k: topK }) } satisfies RankingValue, async stop() {} };
+      } finally {
+        mm.close(); // rankings are computed; the index is no longer needed
+      }
     },
   };
 
   return {
     id,
     execution: "native",
-    grader: { kind: "retrieval", k },
-    resources: [corpus],
+    grader: { kind: "retrieval", k, ks },
+    resources: [rankings],
     async load(): Promise<EvalTask[]> {
       const tasks: EvalTask[] = [];
       for (const [qid, qtext] of dataset.queries) {
@@ -85,7 +114,7 @@ export function beirBenchmark(
           grades[docId] = g;
           if (g > 0) relevant.push(docId);
         }
-        if (relevant.length === 0) continue; // judged-positive queries only (BEIR convention; matches minimem)
+        if (relevant.length === 0) continue; // judged-positive queries only (BEIR convention)
         tasks.push({ id: qid, benchmark: id, prompt: qtext, relevance: { relevant, grades } });
       }
       return tasks;
@@ -93,38 +122,15 @@ export function beirBenchmark(
   };
 }
 
-/**
- * The minimem search SUT: per query-cell, search the shared index and aggregate chunk hits → a doc
- * ranking (max chunk score per doc, top-k) — the same chunk→doc reduction minimem's `runQueries` uses, so
- * the rankings (hence the metrics) match a native minimem eval run.
- */
-export function minimemRetrievalAdapter(k = 10): ExecutionAdapter {
-  const overfetch = Math.min(200, Math.max(k * 10, 50));
+/** The retrieval SUT: look up this query's ranking from its arm's precomputed resource → `RawRun.ranked`. */
+export function rankingAdapter(): ExecutionAdapter {
   return {
-    id: "minimem-search",
+    id: "minimem-retrieval",
     placement: "backend",
     async run(cell, ctx: RunContext) {
-      const { mm, maps } = ctx.resources!.corpus!.value as CorpusValue;
-      const hits = await mm.search(cell.task.prompt, { maxResults: overfetch, minScore: 0, skipStaleCheck: true });
-      const byDoc = new Map<string, number>();
-      for (const hit of hits) {
-        const docId = maps.pathToId.get(hit.path);
-        if (docId === undefined) continue;
-        const prev = byDoc.get(docId);
-        if (prev === undefined || hit.score > prev) byDoc.set(docId, hit.score);
-      }
-      const ranked = [...byDoc.entries()]
-        .map(([docId, score]) => ({ docId, score }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, k)
-        .map((d, i) => ({ id: d.docId, score: d.score, rank: i + 1 }));
-      return {
-        output: "",
-        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        trajectory: [],
-        durationMs: 0,
-        ranked,
-      };
+      const { rankings } = ctx.resources!.rankings!.value as RankingValue;
+      const ranked = (rankings.get(cell.task.id) ?? []).map((d, i) => ({ id: d.docId, score: d.score, rank: i + 1 }));
+      return { output: "", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, trajectory: [], durationMs: 0, ranked };
     },
   };
 }

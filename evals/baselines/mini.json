@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "label": "mini-bm25",
+  "sourceHash": "",
+  "publishedAt": "2026-06-17",
+  "metrics": {
+    "jaccard/none": {
+      "ndcg@10": 0.9751172083949178
+    },
+    "bm25-only-and/none": {
+      "ndcg@10": 0
+    },
+    "bm25-only-or/none": {
+      "ndcg@10": 0.8800937667159343
+    }
+  }
+}

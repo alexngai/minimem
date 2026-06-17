@@ -1,37 +1,55 @@
 # minimem × swarmkit-eval
 
-Run minimem's BEIR retrieval evals through [**swarmkit-eval**](https://github.com/anthropics) — the
-centralized eval infra — instead of the bespoke `evals/harness/`. minimem is the *client*: this directory
-owns only the minimem-specific seams; the matrix, content-addressed store/resume, shared-resource
-lifecycle, aggregation, and paired CIs come from the package (design §3c/§4d, decisions D6/D15).
+minimem's BEIR retrieval evals run on [**swarmkit-eval**](https://github.com/alexngai/swarmkit/src/eval),
+the centralized eval infra — this is minimem's **primary** eval path. The bespoke generic harness (config
+matrix, IR metrics + bootstrap CIs, report rendering, regression gate) has been **retired**; `evals/harness/`
+now holds only minimem's domain pieces (corpus materialization, the minimem index + `runQueries`, and the
+Jaccard baseline ranker). The matrix, content-addressed store/resume, shared-resource lifecycle,
+aggregation + paired CIs, reporting, and gating all come from the package (design §3c/§4d, D6/D15).
 
 ## The mapping
 
 | minimem concept | swarmkit-eval seam |
 |---|---|
-| corpus index (materialize + open, expensive) | a `ResourceSpec` — built once per arm (`scope: ['benchmark','arm']`), shared by every query-cell |
-| a search config (bm25 / vector / hybrid-rrf …) | an **Arm** (the independent variable) |
+| corpus index (materialize + open + run all queries, expensive) | a `ResourceSpec` — built once per arm (`scope: ['benchmark','arm']`), shared by every query-cell |
+| a search config (bm25 / vector / hybrid-rrf / jaccard) | an **Arm** (the independent variable) |
 | a query | a **cell** (`task.prompt` = query, `task.relevance` = qrels) |
-| nDCG@k / Recall@k / MRR / Precision@k | the `{ kind: 'retrieval', k }` grader → `score.metrics` (per-arm CIs for free) |
+| nDCG@k / Recall@k / MRR / Precision@k | the `{ kind: 'retrieval', k, ks }` grader → `score.metrics` (per-arm CIs + paired Δ-vs-jaccard for free) |
+| regression baseline | `buildGateBaseline` / `checkGate` vs a committed `baselines/*.json` |
 
-`beir-swarmkit.ts` — `beirBenchmark(dataset, arms, k)` (the BenchmarkAdapter + corpus ResourceSpec) and
-`minimemRetrievalAdapter(k)` (the search SUT that fills `RawRun.ranked`).
+- `beir-swarmkit.ts` — `MINIMEM_CONFIGS` (the arms), `beirBenchmark()` (benchmark + per-arm ranking `ResourceSpec`), `rankingAdapter()`.
+- `cli.ts` — the eval entrypoint (`npm run eval`): matrix → report → gate.
+- `__tests__/gate.smoke.test.ts` — the offline BM25-only CI gate (`npm run eval:ci`).
 
 ## Run
 
-`swarmkit-eval` is not published yet, so link it from the sibling checkout (build its `dist` first):
+`swarmkit-eval` is declared as a `file:../swarmkit/src/eval` devDependency but is not published, so build its
+`dist` once (the sibling checkout must be present):
 
 ```sh
 ( cd ../swarmkit/src/eval && npm run build )
-ln -s ../../swarmkit/src/eval node_modules/swarmkit-eval   # from the minimem repo root
-npx tsx evals/swarmkit/run-scifact.ts
+npm run eval -- --fixture evals/datasets/__fixtures__/mini --bm25-only   # offline, instant
+npm run eval -- --dataset scifact --bm25-only --out scifact.md           # full BM25 matrix
+npm run eval -- --dataset arguana --embedding local --base-url $TEI_URL --ks 1,5,10,20
 ```
 
-`run-scifact.ts` is the acceptance test: it reproduces the native minimem result
-(`evals/results/scifact-bm25.md`, `bm25-only-or`) **through swarmkit-eval** —
+Gating / CI:
 
-```
-[beir/scifact bm25-only-or] queries=300 nDCG@10=0.656 Recall@10=0.780 MRR@10=0.624 Hit@10=0.800 ✅
+```sh
+npm run eval:ci                                                          # the offline gate smoke test
+npm run eval -- --fixture … --bm25-only --gate evals/baselines/mini.json # gate an arbitrary run
+npm run eval -- --fixture … --bm25-only --update-baseline evals/baselines/mini.json --as-of 2026-06-17
 ```
 
-— matching all four metrics exactly.
+Results are content-addressed under `--store` (default `.eval-cache/swarmkit-<dataset>`), so re-running the
+same command resumes — skipping already-scored query-cells across runs.
+
+## Validated
+
+- **Fixture (`mini`, BM25-only):** jaccard nDCG@10 0.975 · bm25-only-or 0.880 · bm25-only-and 0.000 — matches
+  the retired harness's committed baseline exactly; the gate passes.
+- **scifact `bm25-only-or`:** nDCG@10 0.656 / Recall@10 0.780 / MRR@10 0.624 / Hit@10 0.800 over 300 queries —
+  reproduces the native minimem result through swarmkit-eval.
+
+> Note: the per-arm index rebuilds each run (no `ResourceCache` persistence wired yet — D15c). BM25/Jaccard
+> need no embeddings, so the free CI path is unaffected; vector runs re-embed until a cache is added.

@@ -1,7 +1,8 @@
 /**
- * Retrieval eval harness. Materializes a BEIR corpus into minimem, runs queries,
- * aggregates chunk hits to document rankings (W3), scores them against qrels and
- * compares to a lexical baseline (W4).
+ * Retrieval eval harness — minimem's DOMAIN pieces only: materialize a BEIR corpus into minimem, run
+ * queries → document rankings, and the lexical Jaccard baseline ranker. The generic eval machinery
+ * (config matrix, IR metrics + bootstrap CIs, report rendering, regression gate) now lives in
+ * **swarmkit-eval**; minimem drives it from `evals/swarmkit/`. See `evals/swarmkit/README.md`.
  */
 
 export { materializeCorpus, sanitizeId, type CorpusMaps } from "./materialize.js";
@@ -16,40 +17,9 @@ export {
   type RunDatasetOptions,
 } from "./run.js";
 export {
-  scoreRankings,
-  dcg,
-  ndcgAtK,
-  recallAtK,
-  reciprocalRankAtK,
-  hitAtK,
-  mean,
-  bootstrapCI,
-  mulberry32,
-  type AggregateScore,
-  type MetricStat,
-  type ScoreOptions,
-} from "./metrics.js";
-export {
   jaccardRankings,
   textSimilarity,
   jaccardSimilarity,
   ngramSimilarity,
   tokenize,
 } from "./jaccard.js";
-export { formatMarkdown, toJSON, type ConfigResult, type ReportOptions } from "./report.js";
-export {
-  runMatrix,
-  needsVector,
-  P0_CONFIGS,
-  BM25_CONFIGS,
-  type ConfigSpec,
-  type RunMatrixOptions,
-  type MatrixOutcome,
-} from "./matrix.js";
-export {
-  checkRegression,
-  buildBaseline,
-  baselineKey,
-  type Baseline,
-  type GateResult,
-} from "./gate.js";
