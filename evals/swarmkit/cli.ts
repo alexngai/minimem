@@ -29,6 +29,7 @@ import type { MinimemConfig } from "../../src/index.js";
 import type { BeirDataset } from "../datasets/types.js";
 import { loadBeirDataset, parseBeirDir, type BeirDatasetName } from "../datasets/beir.js";
 import { MINIMEM_CONFIGS, needsVector, configArms, beirBenchmark, rankingAdapter } from "./beir-swarmkit.js";
+import { LocalRankingCache } from "./ranking-cache.js";
 
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
@@ -99,6 +100,8 @@ async function main(): Promise<void> {
     backend: new InProcessBackend(),
     store: new LocalResultStore(storeDir),
     adapter: rankingAdapter(),
+    // Persist each arm's rankings across runs (skips re-materialize/embed/index on a cache hit).
+    resourceCache: new LocalRankingCache(path.join(storeDir, "resources")),
   });
 
   const report = buildReport(results, config, { baselineArmId: "jaccard", accuracyMetric: "sPartial" });

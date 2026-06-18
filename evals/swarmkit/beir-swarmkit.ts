@@ -78,7 +78,10 @@ export function beirBenchmark(dataset: BeirDataset, configs: RetrievalConfig[], 
   const rankings: ResourceSpec = {
     id: "rankings",
     scope: ["benchmark", "arm"], // one ranking set per config (arm); shared across that arm's query-cells
-    cacheKey: (cell) => `${dataset.name}:${cell.arm.id}:${embedding.provider}`,
+    // Folds the invalidation axes into the persistent ResourceCache key: dataset + corpus size +
+    // arm (= search config) + embedding provider/model. NOT minimem's retrieval code version, so
+    // clear the cache dir after changing chunking/scoring that would alter rankings.
+    cacheKey: (cell) => `${dataset.name}:n${dataset.corpus.size}:${cell.arm.id}:${embedding.provider}:${embedding.model ?? "default"}`,
     async build(ctx) {
       const cfg = byId.get(ctx.cell.arm.id);
       if (!cfg) throw new Error(`no retrieval config for arm '${ctx.cell.arm.id}'`);
