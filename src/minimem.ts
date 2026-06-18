@@ -105,7 +105,9 @@ export type MinimemConfig = {
      *  AND collapses to near-zero recall on multi-term/natural-language queries
      *  (BEIR ArguAna nDCG@10: AND 0.000 vs OR 0.356), so OR is the default. */
     ftsQueryMode?: "and" | "or";
-    /** Fusion strategy: "weighted" (default) or "rrf" (reciprocal rank fusion) */
+    /** Fusion strategy: "rrf" (default; reciprocal rank fusion, rank-based & scale-free)
+     *  or "weighted" (score-weighted sum of vector + BM25). RRF avoids the
+     *  cosine-vs-BM25 scale mismatch and scored higher in eval (nDCG@10 0.729 vs 0.719). */
     fusion?: "weighted" | "rrf";
     /** RRF rank constant (default: 60). Only used when fusion === "rrf". */
     rrfK?: number;
@@ -232,7 +234,7 @@ export class Minimem {
       textWeight: config.hybrid?.textWeight ?? 0.3,
       candidateMultiplier: config.hybrid?.candidateMultiplier ?? 2.0,
       ftsQueryMode: config.hybrid?.ftsQueryMode ?? "or",
-      fusion: config.hybrid?.fusion ?? "weighted",
+      fusion: config.hybrid?.fusion ?? "rrf",
       rrfK: config.hybrid?.rrfK ?? 60,
     };
     this.queryConfig = {

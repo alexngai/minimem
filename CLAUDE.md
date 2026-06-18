@@ -99,7 +99,7 @@ Only `MEMORY.md` and `memory/*.md` files are indexed. The `validateMemoryPath()`
 Embeddings are cached by content hash in SQLite. Same content = same embedding, even across files.
 
 ### Hybrid Search
-Default weights: 70% vector similarity, 30% BM25 text search. Configurable via `hybrid.vectorWeight` and `hybrid.textWeight`.
+Default fusion is **RRF** (reciprocal rank fusion) — it combines the vector and BM25 result lists by rank position, so it needs no score normalization (eval: RRF nDCG@10 0.729 vs weighted-sum 0.719 on BEIR/SciFact). Set `hybrid.fusion: "weighted"` for the score-weighted sum, which uses `hybrid.vectorWeight` / `hybrid.textWeight` (default 0.7 / 0.3). `vectorWeight: 0` → pure BM25; `textWeight: 0` → pure vector.
 
 ### Multi-Directory Search
 The search command can query multiple directories:

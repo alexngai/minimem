@@ -58,7 +58,7 @@ The harness surfaced these by **hard-failing instead of silently degrading**. Al
 
 ## 3. Findings (hypotheses → confirmed)
 
-- **RRF beats weighted-sum fusion** (0.729 vs 0.719) — confirms the spec's hypothesis, and RRF sidesteps the cosine-vs-BM25 scale problem entirely. **Recommend RRF as the default fusion.**
+- **RRF beats weighted-sum fusion** (0.729 vs 0.719) — confirms the spec's hypothesis, and RRF sidesteps the cosine-vs-BM25 scale problem entirely. **✅ Applied: RRF is now the default fusion** (`hybrid.fusion` default `"rrf"`); raw RRF scores are max-normalized within the result set so the `minScore` threshold stays meaningful.
 - **Vector > BM25 on SciFact** (0.702 vs 0.656) — semantic matching helps on scientific-claim retrieval.
 - **Hybrid > either signal alone** — each layer (lexical → BM25 → vector → hybrid → RRF) is monotonically better.
 - **FTS `AND`→`OR` is critical, and the effect scales with query length:** AND degrades to ~0 as queries get longer — ArguAna (full-paragraph queries) **AND 0.000 vs OR 0.356**; SciFact (claims) **0.017 vs 0.656**; NFCorpus (short terms) **0.192 vs 0.300**. OR is now the default.

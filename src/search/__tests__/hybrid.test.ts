@@ -275,8 +275,13 @@ describe("mergeHybridResults — RRF fusion", () => {
 
     // b appears in both lists -> highest; a (vec rank 0) > c (kw rank 1)
     expect(merged.map((r) => r.path)).toEqual(["memory/b.md", "memory/a.md", "memory/c.md"]);
+    // scores are max-normalized: the top (in both lists) is 1.0, others below it
     const b = merged.find((r) => r.path === "memory/b.md");
-    expect(b?.score).toBeCloseTo(1 / 62 + 1 / 61); // vec rank 1, kw rank 0, k=60
+    const a = merged.find((r) => r.path === "memory/a.md");
+    const c = merged.find((r) => r.path === "memory/c.md");
+    expect(b?.score).toBeCloseTo(1);
+    expect(a!.score).toBeGreaterThan(c!.score);
+    expect(c!.score).toBeGreaterThan(0);
   });
 
   it("ignores raw magnitudes — pure rank ordering", () => {
@@ -292,7 +297,9 @@ describe("mergeHybridResults — RRF fusion", () => {
     });
 
     expect(merged.map((r) => r.path)).toEqual(["memory/first.md", "memory/second.md"]);
-    expect(merged[0]?.score).toBeCloseTo(1 / 61); // rank 0, k=60
+    // max-normalized: top is 1.0, the lower-ranked item is below it
+    expect(merged[0]?.score).toBeCloseTo(1);
+    expect(merged[1]!.score).toBeLessThan(merged[0]!.score);
   });
 
   it("respects custom rrfK", () => {

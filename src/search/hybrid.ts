@@ -134,7 +134,10 @@ export function mergeHybridResults(params: {
   if (fusion === "rrf") {
     // Reciprocal Rank Fusion: scale-free, fuses by rank position rather than
     // by blending incomparable cosine and BM25 magnitudes. The input arrays
-    // are already sorted best-first, so their index is the rank.
+    // are already sorted best-first, so their index is the rank. Raw RRF scores
+    // are tiny (~1/k), so we max-normalize within the result set (best = 1.0),
+    // keeping scores on a [0,1] scale comparable to cosine and the minScore
+    // threshold. Normalization is monotonic, so it preserves the RRF order.
     const k = params.rrfK ?? 60;
     const vRank = new Map<string, number>();
     params.vector.forEach((r, i) => {
@@ -147,19 +150,22 @@ export function mergeHybridResults(params: {
     const fused = Array.from(byId.values()).map((entry) => {
       const vr = vRank.get(entry.id);
       const kr = kRank.get(entry.id);
-      const score =
+      const raw =
         (vr !== undefined ? 1 / (k + vr + 1) : 0) +
         (kr !== undefined ? 1 / (k + kr + 1) : 0);
-      return {
+      return { entry, raw };
+    });
+    const maxRaw = fused.reduce((m, f) => (f.raw > m ? f.raw : m), 0);
+    return fused
+      .map(({ entry, raw }) => ({
         path: entry.path,
         startLine: entry.startLine,
         endLine: entry.endLine,
-        score,
+        score: maxRaw > 0 ? raw / maxRaw : 0,
         snippet: entry.snippet,
         source: entry.source,
-      };
-    });
-    return fused.sort((a, b) => b.score - a.score);
+      }))
+      .sort((a, b) => b.score - a.score);
   }
 
   // Weighted-sum fusion (default).
