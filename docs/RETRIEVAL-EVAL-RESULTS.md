@@ -5,6 +5,10 @@
 > Corpora: real BEIR (SciFact, NFCorpus, ArguAna). Vector configs use local
 > **embeddinggemma-300M** (Q8_0, 768-dim) via sqlite-vec; BM25 via FTS5; the
 > Jaccard baseline replicates cognitive-core's default `textSimilarity`.
+>
+> **Note:** these committed numbers were produced by the original native harness (since
+> retired). The BM25/Jaccard configs reproduce through the current swarmkit-eval path
+> (`npm run eval`); the full vector matrix awaits a re-run on a remote embedding endpoint.
 
 ## TL;DR
 

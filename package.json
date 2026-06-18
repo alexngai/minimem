@@ -73,7 +73,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "publint": "^0.3.21",
-    "swarmkit-eval": "^0.0.2",
+    "swarmkit-eval": "^0.0.4",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
