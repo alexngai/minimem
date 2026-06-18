@@ -88,8 +88,12 @@ export async function searchVector(params: {
   ensureVectorReady: (dimensions: number) => Promise<boolean>;
   sourceFilterVec: { sql: string; params: SearchSource[] };
   sourceFilterChunks: { sql: string; params: SearchSource[] };
+  /** Optional metadata WHERE on the chunks alias `c` (from buildKnowledgeFilterSql). */
+  knowledgeFilter?: { sql: string; params: (string | number)[] };
 }): Promise<SearchRowResult[]> {
   if (params.queryVec.length === 0 || params.limit <= 0) return [];
+  const knowledgeSql = params.knowledgeFilter?.sql ?? "";
+  const knowledgeParams = params.knowledgeFilter?.params ?? [];
   if (await params.ensureVectorReady(params.queryVec.length)) {
     const rows = params.db
       .prepare(
@@ -98,7 +102,7 @@ export async function searchVector(params: {
           `       vec_distance_cosine(v.embedding, ?) AS dist\n` +
           `  FROM ${params.vectorTable} v\n` +
           `  JOIN chunks c ON c.id = v.id\n` +
-          ` WHERE c.model = ?${params.sourceFilterVec.sql}\n` +
+          ` WHERE c.model = ?${params.sourceFilterVec.sql}${knowledgeSql}\n` +
           ` ORDER BY dist ASC\n` +
           ` LIMIT ?`,
       )
@@ -106,6 +110,7 @@ export async function searchVector(params: {
         vectorToBlob(params.queryVec),
         params.providerModel,
         ...params.sourceFilterVec.params,
+        ...knowledgeParams,
         params.limit,
       ) as Array<{
       id: string;
@@ -131,6 +136,7 @@ export async function searchVector(params: {
     db: params.db,
     providerModel: params.providerModel,
     sourceFilter: params.sourceFilterChunks,
+    knowledgeFilter: params.knowledgeFilter,
   });
   const scored = candidates
     .map((chunk) => ({
@@ -162,6 +168,8 @@ export function listChunks(params: {
   db: DatabaseSync;
   providerModel: string;
   sourceFilter: { sql: string; params: SearchSource[] };
+  /** Optional metadata WHERE on the chunks alias `c` (from buildKnowledgeFilterSql). */
+  knowledgeFilter?: { sql: string; params: (string | number)[] };
 }): Array<{
   id: string;
   path: string;
@@ -173,11 +181,15 @@ export function listChunks(params: {
 }> {
   const rows = params.db
     .prepare(
-      `SELECT id, path, start_line, end_line, text, embedding, source\n` +
-        `  FROM chunks\n` +
-        ` WHERE model = ?${params.sourceFilter.sql}`,
+      `SELECT c.id, c.path, c.start_line, c.end_line, c.text, c.embedding, c.source\n` +
+        `  FROM chunks c\n` +
+        ` WHERE c.model = ?${params.sourceFilter.sql}${params.knowledgeFilter?.sql ?? ""}`,
     )
-    .all(params.providerModel, ...params.sourceFilter.params) as Array<{
+    .all(
+      params.providerModel,
+      ...params.sourceFilter.params,
+      ...(params.knowledgeFilter?.params ?? []),
+    ) as Array<{
     id: string;
     path: string;
     start_line: number;
@@ -216,21 +228,35 @@ export async function searchKeyword(params: {
   sourceFilter: { sql: string; params: SearchSource[] };
   buildFtsQuery: (raw: string) => string | null;
   bm25RankToScore: (rank: number) => number;
+  /** Optional metadata WHERE on a joined chunks alias `c` (from buildKnowledgeFilterSql). */
+  knowledgeFilter?: { sql: string; params: (string | number)[] };
 }): Promise<Array<SearchRowResult & { textScore: number }>> {
   if (params.limit <= 0) return [];
   const ftsQuery = params.buildFtsQuery(params.query);
   if (!ftsQuery) return [];
 
-  const rows = params.db
-    .prepare(
-      `SELECT id, path, source, start_line, end_line, text,\n` +
-        `       bm25(${params.ftsTable}) AS rank\n` +
-        `  FROM ${params.ftsTable}\n` +
-        ` WHERE ${params.ftsTable} MATCH ? AND model = ?${params.sourceFilter.sql}\n` +
-        ` ORDER BY rank ASC\n` +
-        ` LIMIT ?`,
-    )
-    .all(ftsQuery, params.providerModel, ...params.sourceFilter.params, params.limit) as Array<{
+  // When a metadata filter is present, join chunks so its columns are in scope.
+  const kf = params.knowledgeFilter;
+  const hasKnowledge = !!(kf && kf.sql);
+  const sql = hasKnowledge
+    ? `SELECT c.id, c.path, c.source, c.start_line, c.end_line, c.text,\n` +
+      `       bm25(${params.ftsTable}) AS rank\n` +
+      `  FROM ${params.ftsTable}\n` +
+      `  JOIN chunks c ON c.id = ${params.ftsTable}.id\n` +
+      ` WHERE ${params.ftsTable} MATCH ? AND ${params.ftsTable}.model = ?${params.sourceFilter.sql}${kf!.sql}\n` +
+      ` ORDER BY rank ASC\n` +
+      ` LIMIT ?`
+    : `SELECT id, path, source, start_line, end_line, text,\n` +
+      `       bm25(${params.ftsTable}) AS rank\n` +
+      `  FROM ${params.ftsTable}\n` +
+      ` WHERE ${params.ftsTable} MATCH ? AND model = ?${params.sourceFilter.sql}\n` +
+      ` ORDER BY rank ASC\n` +
+      ` LIMIT ?`;
+  const bindings = hasKnowledge
+    ? [ftsQuery, params.providerModel, ...params.sourceFilter.params, ...kf!.params, params.limit]
+    : [ftsQuery, params.providerModel, ...params.sourceFilter.params, params.limit];
+
+  const rows = params.db.prepare(sql).all(...bindings) as Array<{
     id: string;
     path: string;
     source: SearchSource;
@@ -240,8 +266,16 @@ export async function searchKeyword(params: {
     rank: number;
   }>;
 
-  return rows.map((row) => {
-    const textScore = params.bm25RankToScore(row.rank);
+  // Per-row BM25 score (monotonic in match strength), then max-normalize across
+  // the result set so the best match scores 1.0. BM25 magnitudes are not
+  // comparable to cosine (and vary wildly by corpus), so normalizing keeps the
+  // text signal on a [0,1] scale for hybrid fusion and the minScore threshold.
+  // Normalization is monotonic, so it preserves the BM25 ranking order.
+  const scored = rows.map((row) => ({ row, raw: params.bm25RankToScore(row.rank) }));
+  const maxRaw = scored.reduce((m, s) => (s.raw > m ? s.raw : m), 0);
+
+  return scored.map(({ row, raw }) => {
+    const textScore = maxRaw > 0 ? raw / maxRaw : 0;
     return {
       id: row.id,
       path: row.path,
