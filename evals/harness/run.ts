@@ -47,6 +47,17 @@ export async function openIndex(opts: OpenIndexOptions): Promise<Minimem> {
     watch: { enabled: false },
     hybrid: opts.hybrid,
     query: { minScore: 0 },
+    // Keep the whole corpus in the content-hash embedding cache (default prunes to 10k). The shared
+    // vector dir is persistent, so this makes a crashed/throttled run resume without re-embedding.
+    cache: { maxEntries: 5_000_000 },
+    // Concurrent corpus embedding. Default 4 concurrent single-text requests — the
+    // throttle-safe sweet spot for Bedrock Titan via LiteLLM (~520 emb/min, zero 429s;
+    // higher just trips the account's TPS cap). Override per-backend via env, e.g. a real
+    // OpenAI endpoint tolerates much more: MM_EMBED_CONCURRENCY=16 MM_EMBED_BATCH=16.
+    indexing: {
+      embedConcurrency: Number(process.env.MM_EMBED_CONCURRENCY) || 4,
+      embedBatchSize: Number(process.env.MM_EMBED_BATCH) || 1,
+    },
   });
 
   await mm.sync();
@@ -74,6 +85,11 @@ export interface RunQueriesOptions {
   k?: number;
   /** Chunk over-fetch to recover top-k DOCS (bounded by minimem's 200 cap). */
   overfetch?: number;
+  /** Concurrent in-flight queries. Overlaps the async query-embed (the dominant per-query cost on
+   *  remote endpoints — the sync sqlite search serializes naturally, so this mainly amortizes
+   *  embedding latency). Default 8 or `MM_QUERY_CONCURRENCY`. Results are independent per query, so
+   *  concurrency does not change rankings. */
+  concurrency?: number;
 }
 
 /**
@@ -90,10 +106,12 @@ export async function runQueries(
   // Over-fetch chunks so a doc with several chunks doesn't crowd out top-k docs.
   // minimem caps internal candidates at 200, so that's the hard ceiling.
   const overfetch = Math.min(200, Math.max(opts?.overfetch ?? k * 10, 50));
+  const concurrency = Math.max(1, opts?.concurrency ?? (Number(process.env.MM_QUERY_CONCURRENCY) || 8));
 
   const rankings = new Map<string, RankedDoc[]>();
+  const entries = [...dataset.queries.entries()];
 
-  for (const [qid, qtext] of dataset.queries) {
+  const runOne = async (qid: string, qtext: string): Promise<void> => {
     // Corpus is static during a run and openIndex already synced, so skip the
     // per-query staleness sweep (otherwise it stats every corpus file each call).
     const hits = await mm.search(qtext, { maxResults: overfetch, minScore: 0, skipStaleCheck: true });
@@ -112,8 +130,21 @@ export async function runQueries(
       .sort((a, b) => b.score - a.score)
       .slice(0, k);
 
-    rankings.set(qid, ranked);
-  }
+    rankings.set(qid, ranked); // distinct qid per task; Map.set is atomic on the single JS thread
+  };
+
+  // Bounded worker pool: queries are independent, so this only overlaps their async embeds — the
+  // synchronous sqlite search still runs one-at-a-time, so rankings are identical to the serial path.
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = cursor++; i < entries.length; i = cursor++) {
+      const [qid, qtext] = entries[i];
+      await runOne(qid, qtext);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, entries.length || 1) }, () => worker()),
+  );
 
   return rankings;
 }

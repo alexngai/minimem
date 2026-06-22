@@ -29,6 +29,7 @@ import type { MinimemConfig } from "../../src/index.js";
 import type { BeirDataset } from "../datasets/types.js";
 import { loadBeirDataset, parseBeirDir, type BeirDatasetName } from "../datasets/beir.js";
 import { MINIMEM_CONFIGS, needsVector, configArms, beirBenchmark, rankingAdapter } from "./beir-swarmkit.js";
+import { LocalRankingCache } from "./ranking-cache.js";
 
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
@@ -87,7 +88,10 @@ async function main(): Promise<void> {
     models: [{ name: embedding.provider }], // retrieval has no LLM; the embedding provider labels the run
     seeds: [1],
     backend: "in-process",
-    concurrency: { cells: 8, modelConnections: 1, resources: 2 },
+    // resources:1 → arm index builds run serially. Vector arms share one per-dataset index dir
+    // (see beir-swarmkit.ts); the first must finish embedding before the rest reuse it. The
+    // embedding *requests* inside a build are already concurrent (minimem indexing.embedConcurrency).
+    concurrency: { cells: 8, modelConnections: 1, resources: 1 },
     retry: { maxAttempts: 1, baseDelayMs: 0 },
     output: { dir: storeDir, trace: false },
   };
@@ -99,6 +103,8 @@ async function main(): Promise<void> {
     backend: new InProcessBackend(),
     store: new LocalResultStore(storeDir),
     adapter: rankingAdapter(),
+    // Persist each arm's rankings across runs (skips re-materialize/embed/index on a cache hit).
+    resourceCache: new LocalRankingCache(path.join(storeDir, "resources")),
   });
 
   const report = buildReport(results, config, { baselineArmId: "jaccard", accuracyMetric: "sPartial" });

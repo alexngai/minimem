@@ -187,7 +187,22 @@ export async function createOpenAiEmbeddingProvider(
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`openai embeddings failed: ${res.status} ${text}`);
+      const err = new Error(`openai embeddings failed: ${res.status} ${text}`) as Error & {
+        status?: number;
+        retryAfterMs?: number;
+      };
+      err.status = res.status;
+      // Surface a server Retry-After (seconds or HTTP-date) so the caller's backoff can honor it.
+      const ra = res.headers.get("retry-after");
+      if (ra) {
+        const secs = Number(ra);
+        if (Number.isFinite(secs)) err.retryAfterMs = secs * 1000;
+        else {
+          const when = Date.parse(ra);
+          if (!Number.isNaN(when)) err.retryAfterMs = Math.max(0, when - Date.now());
+        }
+      }
+      throw err;
     }
     const payload = (await res.json()) as {
       data?: Array<{ embedding?: number[] }>;

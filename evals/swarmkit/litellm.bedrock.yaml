@@ -1,0 +1,33 @@
+# LiteLLM gateway → Amazon Bedrock embeddings (OpenAI-compatible /v1/embeddings).
+#
+# Why: the eval's vector arms need a *stable* embedding endpoint. Local embeddinggemma
+# (node-llama-cpp + Metal) loses its GPU context across host/session suspend-resume and
+# degrades to ~1 emb/s CPU. A managed endpoint is immune to that. This proxy runs locally
+# and signs SigV4 to Bedrock using your ~/.aws/credentials (no secrets in this file).
+#
+#   litellm --config evals/swarmkit/litellm.bedrock.yaml --port 4000
+#   OPENAI_API_KEY=sk-local npm run eval -- --dataset arguana \
+#     --embedding openai:titan-embed-v2 --base-url http://localhost:4000/v1 --ks 1,5,10,20
+#
+# Model notes (matters for retrieval quality):
+#   - titan-embed-v2  : symmetric, 1024-dim, NO input_type → works with minimem's current
+#                       {model, input} seam unchanged. Default choice.
+#   - cohere-embed-v3 : asymmetric, needs input_type (search_query/search_document) for full
+#                       quality. minimem doesn't send input_type yet, so this underperforms
+#                       until that seam is added. Kept here for when it is.
+model_list:
+  - model_name: titan-embed-v2
+    litellm_params:
+      model: bedrock/amazon.titan-embed-text-v2:0
+      aws_region_name: us-east-1
+  - model_name: cohere-embed-v3
+    litellm_params:
+      model: bedrock/cohere.embed-english-v3
+      aws_region_name: us-east-1
+  - model_name: cohere-embed-v4
+    litellm_params:
+      model: bedrock/cohere.embed-v4:0
+      aws_region_name: us-east-1
+
+litellm_settings:
+  drop_params: true   # drop OpenAI params Bedrock doesn't accept instead of erroring

@@ -78,7 +78,10 @@ export function beirBenchmark(dataset: BeirDataset, configs: RetrievalConfig[], 
   const rankings: ResourceSpec = {
     id: "rankings",
     scope: ["benchmark", "arm"], // one ranking set per config (arm); shared across that arm's query-cells
-    cacheKey: (cell) => `${dataset.name}:${cell.arm.id}:${embedding.provider}`,
+    // Folds the invalidation axes into the persistent ResourceCache key: dataset + corpus size +
+    // arm (= search config) + embedding provider/model. NOT minimem's retrieval code version, so
+    // clear the cache dir after changing chunking/scoring that would alter rankings.
+    cacheKey: (cell) => `${dataset.name}:n${dataset.corpus.size}:${cell.arm.id}:${embedding.provider}:${embedding.model ?? "default"}`,
     async build(ctx) {
       const cfg = byId.get(ctx.cell.arm.id);
       if (!cfg) throw new Error(`no retrieval config for arm '${ctx.cell.arm.id}'`);
@@ -86,10 +89,21 @@ export function beirBenchmark(dataset: BeirDataset, configs: RetrievalConfig[], 
         // Pure lexical baseline — no index needed; minimem's exact jaccardRankings.
         return { value: { rankings: jaccardRankings(dataset, topK) } satisfies RankingValue, async stop() {} };
       }
-      // minimem: materialize the corpus, open the index for this arm's hybrid config, run every query.
-      const memoryDir = await mkdtemp(join(tmpdir(), `beir-${dataset.name}-${cfg.id}-`));
+      // Vector arms differ only in *search-time* fusion/fts-mode, so they share one per-dataset
+      // index dir: the first vector arm embeds the corpus; the rest reuse it (sync is a no-op when
+      // content hashes match — no re-embed). With a throttle-limited remote provider this turns 4×
+      // corpus embedding into 1×. The dir is PERSISTENT (under .eval-cache, not /tmp) and keyed by
+      // dataset+model, so a crashed/throttled run resumes from the content-hash embedding cache
+      // instead of re-embedding from scratch — the one-time embedding cost is paid once. BM25/jaccard
+      // arms get their own throwaway dir + `provider: "none"` (they never read vectors, so they can't
+      // pollute the shared dir with un-embedded chunks, and skip the embed entirely). Relies on serial
+      // resource builds so the first vector arm finishes before the others read it — see cli.ts.
+      const armEmbedding = needsVector(cfg) ? embedding : ({ provider: "none" } as const);
+      const memoryDir = needsVector(cfg)
+        ? join(process.cwd(), ".eval-cache", "beir-vec-shared", `${dataset.name}-${(embedding.model ?? "default").replace(/[^A-Za-z0-9._-]/g, "_")}`)
+        : await mkdtemp(join(tmpdir(), `beir-${dataset.name}-${cfg.id}-`));
       const maps = await materializeCorpus(dataset.corpus, memoryDir);
-      const mm = await openIndex({ memoryDir, embedding, hybrid: cfg.hybrid, requireVector: needsVector(cfg) });
+      const mm = await openIndex({ memoryDir, embedding: armEmbedding, hybrid: cfg.hybrid, requireVector: needsVector(cfg) });
       try {
         return { value: { rankings: await runQueries(mm, dataset, maps, { k: topK }) } satisfies RankingValue, async stop() {} };
       } finally {
