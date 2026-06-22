@@ -95,6 +95,54 @@ export async function searchVector(params: {
   const knowledgeSql = params.knowledgeFilter?.sql ?? "";
   const knowledgeParams = params.knowledgeFilter?.params ?? [];
   if (await params.ensureVectorReady(params.queryVec.length)) {
+    type VecRow = {
+      id: string;
+      path: string;
+      start_line: number;
+      end_line: number;
+      text: string;
+      source: SearchSource;
+      dist: number;
+    };
+    const toResult = (row: VecRow) => ({
+      id: row.id,
+      path: row.path,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      score: 1 - row.dist,
+      snippet: truncateUtf16Safe(row.text, params.snippetMaxChars),
+      source: row.source,
+    });
+
+    if (!knowledgeSql) {
+      // Fast path: sqlite-vec's KNN index (`MATCH ... AND k = ?`) instead of scoring every row with
+      // a scalar `vec_distance_cosine` (which is an O(N) full scan — ~6s/query on a ~18k-chunk corpus).
+      // The model is single-valued per index, so we over-fetch k only to absorb a source filter, then
+      // re-limit. Knowledge-filtered queries (below) keep the scalar path: their candidate set is small.
+      const overfetch = params.sourceFilterVec.sql
+        ? Math.min(2000, Math.max(params.limit * 8, 100))
+        : params.limit;
+      const rows = params.db
+        .prepare(
+          `WITH knn AS (\n` +
+            `  SELECT id, distance FROM ${params.vectorTable} WHERE embedding MATCH ? AND k = ?\n` +
+            `)\n` +
+            `SELECT c.id, c.path, c.start_line, c.end_line, c.text, c.source, knn.distance AS dist\n` +
+            `  FROM knn JOIN chunks c ON c.id = knn.id\n` +
+            ` WHERE c.model = ?${params.sourceFilterVec.sql}\n` +
+            ` ORDER BY knn.distance ASC\n` +
+            ` LIMIT ?`,
+        )
+        .all(
+          vectorToBlob(params.queryVec),
+          overfetch,
+          params.providerModel,
+          ...params.sourceFilterVec.params,
+          params.limit,
+        ) as VecRow[];
+      return rows.map(toResult);
+    }
+
     const rows = params.db
       .prepare(
         `SELECT c.id, c.path, c.start_line, c.end_line, c.text,\n` +
@@ -112,24 +160,8 @@ export async function searchVector(params: {
         ...params.sourceFilterVec.params,
         ...knowledgeParams,
         params.limit,
-      ) as Array<{
-      id: string;
-      path: string;
-      start_line: number;
-      end_line: number;
-      text: string;
-      source: SearchSource;
-      dist: number;
-    }>;
-    return rows.map((row) => ({
-      id: row.id,
-      path: row.path,
-      startLine: row.start_line,
-      endLine: row.end_line,
-      score: 1 - row.dist,
-      snippet: truncateUtf16Safe(row.text, params.snippetMaxChars),
-      source: row.source,
-    }));
+      ) as VecRow[];
+    return rows.map(toResult);
   }
 
   const candidates = listChunks({

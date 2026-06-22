@@ -47,6 +47,17 @@ export async function openIndex(opts: OpenIndexOptions): Promise<Minimem> {
     watch: { enabled: false },
     hybrid: opts.hybrid,
     query: { minScore: 0 },
+    // Keep the whole corpus in the content-hash embedding cache (default prunes to 10k). The shared
+    // vector dir is persistent, so this makes a crashed/throttled run resume without re-embedding.
+    cache: { maxEntries: 5_000_000 },
+    // Concurrent corpus embedding. Default 4 concurrent single-text requests — the
+    // throttle-safe sweet spot for Bedrock Titan via LiteLLM (~520 emb/min, zero 429s;
+    // higher just trips the account's TPS cap). Override per-backend via env, e.g. a real
+    // OpenAI endpoint tolerates much more: MM_EMBED_CONCURRENCY=16 MM_EMBED_BATCH=16.
+    indexing: {
+      embedConcurrency: Number(process.env.MM_EMBED_CONCURRENCY) || 4,
+      embedBatchSize: Number(process.env.MM_EMBED_BATCH) || 1,
+    },
   });
 
   await mm.sync();

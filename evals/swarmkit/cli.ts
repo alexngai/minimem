@@ -88,7 +88,10 @@ async function main(): Promise<void> {
     models: [{ name: embedding.provider }], // retrieval has no LLM; the embedding provider labels the run
     seeds: [1],
     backend: "in-process",
-    concurrency: { cells: 8, modelConnections: 1, resources: 2 },
+    // resources:1 → arm index builds run serially. Vector arms share one per-dataset index dir
+    // (see beir-swarmkit.ts); the first must finish embedding before the rest reuse it. The
+    // embedding *requests* inside a build are already concurrent (minimem indexing.embedConcurrency).
+    concurrency: { cells: 8, modelConnections: 1, resources: 1 },
     retry: { maxAttempts: 1, baseDelayMs: 0 },
     output: { dir: storeDir, trace: false },
   };

@@ -60,15 +60,28 @@ const SNIPPET_MAX_CHARS = 700;
 const VECTOR_TABLE = "chunks_vec";
 const FTS_TABLE = "chunks_fts";
 const EMBEDDING_CACHE_TABLE = "embedding_cache";
-const EMBEDDING_BATCH_MAX_TOKENS = 8000;
-const EMBEDDING_APPROX_CHARS_PER_TOKEN = 1;
-const EMBEDDING_INDEX_CONCURRENCY = 4;
-const EMBEDDING_RETRY_MAX_ATTEMPTS = 3;
+// Concurrent embedding during sync. Without this, minimem embeds one request at a time
+// (per file, awaited), which throttles remote providers to a single in-flight request
+// (~1-2 emb/s regardless of how fast the backend is). The sync pre-warm fans the
+// cache-miss embeddings out across these many concurrent batch requests, then the
+// per-file index pass hits a warm cache. DB writes stay serial (node:sqlite is sync).
+const EMBEDDING_SYNC_CONCURRENCY = 8;
+const EMBEDDING_SYNC_BATCH_SIZE = 16;
+// Embedding retry: tuned to ride out sustained rate-limit (429) storms from remote providers
+// (e.g. Bedrock's per-account TPS cap) rather than aborting a whole index build on one transient
+// failure. Generous attempts + capped exponential backoff with jitter; honors a server Retry-After.
+const EMBEDDING_RETRY_MAX_ATTEMPTS = 8;
 const EMBEDDING_RETRY_BASE_DELAY_MS = 500;
-const EMBEDDING_RETRY_MAX_DELAY_MS = 8000;
+const EMBEDDING_RETRY_MAX_DELAY_MS = 30_000;
 const VECTOR_LOAD_TIMEOUT_MS = 30_000;
 const EMBEDDING_QUERY_TIMEOUT_REMOTE_MS = 60_000;
 const EMBEDDING_QUERY_TIMEOUT_LOCAL_MS = 5 * 60_000;
+
+/** A server-provided Retry-After delay (ms) attached to an embedding error by the provider, if any. */
+function retryAfterMs(err: unknown): number | undefined {
+  const v = (err as { retryAfterMs?: unknown } | null)?.retryAfterMs;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+}
 
 export type MinimemConfig = {
   /** Directory containing memory files (MEMORY.md, memory/*.md) */
@@ -90,6 +103,15 @@ export type MinimemConfig = {
     enabled?: boolean;
     /** Max cache entries before LRU pruning (default: 10000) */
     maxEntries?: number;
+  };
+  /** Indexing throughput configuration */
+  indexing?: {
+    /** Concurrent embedding requests during the sync pre-warm (default: 8). Remote
+     *  providers were otherwise embedded one request at a time (~1-2 emb/s); this fans
+     *  the cache-miss embeddings out. DB writes stay serial. Set 1 to disable concurrency. */
+    embedConcurrency?: number;
+    /** Texts per embedding request in the pre-warm (default: 16). */
+    embedBatchSize?: number;
   };
   /** Hybrid search configuration */
   hybrid?: {
@@ -167,6 +189,7 @@ export class Minimem {
   private readonly dbPath: string;
   private readonly chunking: { tokens: number; overlap: number };
   private readonly cache: { enabled: boolean; maxEntries: number };
+  private readonly indexing: { embedConcurrency: number; embedBatchSize: number };
   private readonly hybrid: {
     enabled: boolean;
     vectorWeight: number;
@@ -227,6 +250,10 @@ export class Minimem {
     this.cache = {
       enabled: config.cache?.enabled ?? true,
       maxEntries: config.cache?.maxEntries ?? 10000,
+    };
+    this.indexing = {
+      embedConcurrency: Math.max(1, config.indexing?.embedConcurrency ?? EMBEDDING_SYNC_CONCURRENCY),
+      embedBatchSize: Math.max(1, config.indexing?.embedBatchSize ?? EMBEDDING_SYNC_BATCH_SIZE),
     };
     this.hybrid = {
       enabled: config.hybrid?.enabled ?? true,
@@ -613,6 +640,7 @@ export class Minimem {
 
     const files = await listMemoryFiles(this.memoryDir);
     const activePaths = new Set<string>();
+    const toIndex: MemoryFileEntry[] = [];
 
     for (const absPath of files) {
       const entry = await buildFileEntry(absPath, this.memoryDir);
@@ -626,6 +654,16 @@ export class Minimem {
         continue;
       }
 
+      toIndex.push(entry);
+    }
+
+    // Pre-warm embeddings for everything we're about to index, fanned out across many
+    // concurrent requests, so the per-file indexFile pass below hits a warm cache instead
+    // of blocking on one in-flight embedding at a time. (No-op for the "none" provider or
+    // when the cache is disabled — those fall back to per-file embedding.)
+    await this.prewarmEmbeddingCache(toIndex);
+
+    for (const entry of toIndex) {
       await this.indexFile(entry);
     }
 
@@ -813,6 +851,61 @@ export class Minimem {
     }
   }
 
+  /**
+   * Embed the cache-miss chunks across {@link toIndex} concurrently and populate the
+   * embedding cache, so the per-file index pass that follows finds them already cached.
+   *
+   * The concurrency is only over network embedding requests; every cache write is a
+   * synchronous sqlite op (atomic on the single event-loop thread), so there is no
+   * concurrent-write hazard. Skipped when there is nothing remote to gain — the "none"
+   * provider (BM25-only) or a disabled cache (per-file embedding would re-embed anyway).
+   */
+  private async prewarmEmbeddingCache(toIndex: MemoryFileEntry[]): Promise<void> {
+    if (this.provider.id === "none" || !this.cache.enabled || toIndex.length === 0) return;
+
+    // Collect unique chunk texts by content hash across all files to index (dedups
+    // identical chunks so the same content is never embedded twice).
+    const textByHash = new Map<string, string>();
+    for (const entry of toIndex) {
+      const content = await fs.readFile(entry.absPath, "utf-8");
+      for (const chunk of chunkMarkdown(content, this.chunking)) {
+        if (!textByHash.has(chunk.hash)) textByHash.set(chunk.hash, chunk.text);
+      }
+    }
+    if (textByHash.size === 0) return;
+
+    // Embed only the cache misses.
+    const cached = this.loadEmbeddingCache([...textByHash.keys()]);
+    const missing = [...textByHash.keys()].filter((h) => !cached.has(h));
+    if (missing.length === 0) return;
+
+    // Split into request-sized batches, then drain them with up to embedConcurrency in flight.
+    const batches: string[][] = [];
+    for (let i = 0; i < missing.length; i += this.indexing.embedBatchSize) {
+      batches.push(missing.slice(i, i + this.indexing.embedBatchSize));
+    }
+    this.debug?.("prewarm embeddings starting", {
+      chunks: missing.length,
+      batches: batches.length,
+      concurrency: this.indexing.embedConcurrency,
+    });
+
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      for (let index = cursor++; index < batches.length; index = cursor++) {
+        const hashes = batches[index];
+        const vectors = await this.embedBatchWithRetry(hashes.map((h) => textByHash.get(h)!));
+        for (let j = 0; j < hashes.length; j++) {
+          this.upsertEmbeddingCache(hashes[j], vectors[j] ?? []);
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(this.indexing.embedConcurrency, batches.length) }, () => worker()),
+    );
+    this.debug?.("prewarm embeddings complete", { chunks: missing.length });
+  }
+
   private async embedChunks(chunks: MemoryChunk[]): Promise<number[][]> {
     if (chunks.length === 0) return [];
 
@@ -861,15 +954,27 @@ export class Minimem {
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (attempt < EMBEDDING_RETRY_MAX_ATTEMPTS - 1) {
-          const delay = Math.min(
-            EMBEDDING_RETRY_MAX_DELAY_MS,
-            EMBEDDING_RETRY_BASE_DELAY_MS * Math.pow(2, attempt),
-          );
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          await this.embedRetryBackoff(attempt, lastError);
         }
       }
     }
     throw lastError;
+  }
+
+  /**
+   * Sleep before the next embedding retry: capped exponential backoff with equal-jitter (avoids a
+   * synchronized retry herd when many concurrent requests are throttled at once); a server-provided
+   * Retry-After wins. Shared by the corpus-batch and per-query embedding paths.
+   */
+  private async embedRetryBackoff(attempt: number, lastError: Error): Promise<void> {
+    const capped = Math.min(
+      EMBEDDING_RETRY_MAX_DELAY_MS,
+      EMBEDDING_RETRY_BASE_DELAY_MS * Math.pow(2, attempt),
+    );
+    const jittered = capped / 2 + Math.random() * (capped / 2);
+    const delay = Math.max(jittered, retryAfterMs(lastError) ?? 0);
+    this.debug?.(`embedding retry`, { attempt: attempt + 1, delayMs: Math.round(delay), error: lastError.message });
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
 
   private async embedWithBatchApi(texts: string[]): Promise<number[][]> {
@@ -920,25 +1025,39 @@ export class Minimem {
   }
 
   private async embedQueryWithTimeout(text: string): Promise<number[]> {
+    // Reuse the content-hash embedding cache for queries: identical query text (or a corpus chunk
+    // with the same text) embeds once and is shared across arms/runs — resume-friendly and avoids
+    // re-embedding every query per arm.
+    const hash = hashText(text);
+    const cached = this.loadEmbeddingCache([hash]).get(hash);
+    if (cached && cached.length > 0) return cached;
+
     const timeout =
       this.provider.id === "local" ? EMBEDDING_QUERY_TIMEOUT_LOCAL_MS : EMBEDDING_QUERY_TIMEOUT_REMOTE_MS;
 
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeout);
-
-    try {
-      const result = await Promise.race([
-        this.provider.embedQuery(text),
-        new Promise<number[]>((_, reject) => {
-          ac.signal.addEventListener("abort", () =>
-            reject(new Error("embedding query timeout")),
-          );
-        }),
-      ]);
-      return result;
-    } finally {
-      clearTimeout(timer);
+    // Same resilient retry as corpus embedding: ride out transient rate-limit/connection failures
+    // instead of failing the whole search (and, in batch callers, the whole run) on one bad fetch.
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < EMBEDDING_RETRY_MAX_ATTEMPTS; attempt++) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), timeout);
+      try {
+        const result = await Promise.race([
+          this.provider.embedQuery(text),
+          new Promise<number[]>((_, reject) => {
+            ac.signal.addEventListener("abort", () => reject(new Error("embedding query timeout")));
+          }),
+        ]);
+        if (result.length > 0) this.upsertEmbeddingCache(hash, result);
+        return result;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < EMBEDDING_RETRY_MAX_ATTEMPTS - 1) await this.embedRetryBackoff(attempt, lastError);
+      } finally {
+        clearTimeout(timer);
+      }
     }
+    throw lastError;
   }
 
   private loadEmbeddingCache(hashes: string[]): Map<string, number[]> {

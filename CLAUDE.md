@@ -99,7 +99,7 @@ Only `MEMORY.md` and `memory/*.md` files are indexed. The `validateMemoryPath()`
 Embeddings are cached by content hash in SQLite. Same content = same embedding, even across files.
 
 ### Hybrid Search
-Default fusion is **RRF** (reciprocal rank fusion) — it combines the vector and BM25 result lists by rank position, so it needs no score normalization (eval: RRF nDCG@10 0.729 vs weighted-sum 0.719 on BEIR/SciFact). Set `hybrid.fusion: "weighted"` for the score-weighted sum, which uses `hybrid.vectorWeight` / `hybrid.textWeight` (default 0.7 / 0.3). `vectorWeight: 0` → pure BM25; `textWeight: 0` → pure vector.
+Default fusion is **RRF** (reciprocal rank fusion) — it combines the vector and BM25 result lists by rank position, so it needs no score normalization. RRF is the best (or tied-best) fusion on all 3 BEIR datasets and both embedding models tested, and crucially it's **scale-invariant**: weighted-sum *helped* with embeddinggemma (SciFact 0.719) but *collapsed* with Titan v2 (0.533, below pure-vector), because its result depends on the cosine-score distribution, which varies by model. See [RETRIEVAL-EVAL-RESULTS.md](docs/RETRIEVAL-EVAL-RESULTS.md) §2c/§3. Set `hybrid.fusion: "weighted"` for the score-weighted sum (uses `hybrid.vectorWeight` / `hybrid.textWeight`, default 0.7 / 0.3). `vectorWeight: 0` → pure BM25; `textWeight: 0` → pure vector.
 
 ### Multi-Directory Search
 The search command can query multiple directories:
