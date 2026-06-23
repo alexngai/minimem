@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import chokidar, { type FSWatcher } from "chokidar";
 
 import {
@@ -31,6 +31,7 @@ import {
   type GraphNeighbor,
 } from "./search/graph.js";
 import { loadSqliteVecExtension } from "./db/sqlite-vec.js";
+import { openSqliteDatabase } from "./db/open-db.js";
 import {
   createEmbeddingProvider,
   type EmbeddingProvider,
@@ -312,7 +313,7 @@ export class Minimem {
     }
 
     // Open database
-    this.db = this.openDatabase();
+    this.db = await this.openDatabase();
     this.ensureSchema();
 
     // Check for existing vector dims
@@ -327,13 +328,13 @@ export class Minimem {
     }
   }
 
-  private openDatabase(): DatabaseSync {
+  private async openDatabase(): Promise<DatabaseSync> {
     const dbDir = path.dirname(this.dbPath);
     ensureDir(dbDir);
-    // `allowExtension: true` is required for enableLoadExtension()/loadExtension()
-    // to work at all; without it sqlite-vec never loads and vector search silently
-    // falls back to brute-force JS cosine over every chunk.
-    return new DatabaseSync(this.dbPath, { allowExtension: true });
+    // Cross-runtime open (node:sqlite / bun:sqlite). allowExtension (Node) and
+    // setCustomSQLite (Bun) enable sqlite-vec where possible; otherwise minimem
+    // falls back to brute-force JS cosine. See ./db/open-db.ts.
+    return openSqliteDatabase(this.dbPath);
   }
 
   private ensureSchema(): void {

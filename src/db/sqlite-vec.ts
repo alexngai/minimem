@@ -9,7 +9,13 @@ export async function loadSqliteVecExtension(params: {
     const resolvedPath = params.extensionPath?.trim() ? params.extensionPath.trim() : undefined;
     const extensionPath = resolvedPath ?? sqliteVec.getLoadablePath();
 
-    params.db.enableLoadExtension(true);
+    // node:sqlite requires enableLoadExtension() before loadExtension();
+    // bun:sqlite has no such method (extension capability comes from the
+    // underlying libsqlite3 build / setCustomSQLite), so only call it if present.
+    const toggle = params.db as { enableLoadExtension?: (on: boolean) => void };
+    if (typeof toggle.enableLoadExtension === "function") {
+      toggle.enableLoadExtension(true);
+    }
     if (resolvedPath) {
       params.db.loadExtension(extensionPath);
     } else {
