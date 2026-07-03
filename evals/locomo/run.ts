@@ -169,29 +169,51 @@ async function runSystem(
     let done = 0;
     const rows = await mapPool(questions, args.concurrency, async (q) => {
       const t0 = Date.now();
-      const ans = await adapter.answer(q, conv);
-      const judged = await judgeAnswer(llm, q.question, q.answer, ans.text);
-      const judgeStat: UsageStats = { latencyMs: Date.now() - t0, totalTokens: judged.judgeTokens };
+      try {
+        const ans = await adapter.answer(q, conv);
+        const judged = await judgeAnswer(llm, q.question, q.answer, ans.text);
+        const judgeStat: UsageStats = { latencyMs: Date.now() - t0, totalTokens: judged.judgeTokens };
 
-      // Adversarial: correct behavior is refusal; the J-judge scores against the
-      // planted distractor, so we override with refusal detection for cat 5.
-      const correct = q.isAdversarial ? isRefusal(ans.text) : judged.correct;
+        // Adversarial: correct behavior is refusal; the J-judge scores against the
+        // planted distractor, so we override with refusal detection for cat 5.
+        const correct = q.isAdversarial ? isRefusal(ans.text) : judged.correct;
 
-      const row: QAResult = {
-        system: adapter.name,
-        sampleId: conv.sampleId,
-        questionId: q.id,
-        categoryId: q.categoryId,
-        category: q.category,
-        question: q.question,
-        goldAnswer: q.answer,
-        predicted: ans.text,
-        correct,
-        judgeRaw: judged.raw,
-        usage: { latencyMs: ans.latencyMs, totalTokens: ans.totalTokens, promptTokens: ans.promptTokens, completionTokens: ans.completionTokens },
-      };
-      if (++done % 10 === 0) process.stderr.write(`  ...${done}/${questions.length}\n`);
-      return { row, judgeStat };
+        const row: QAResult = {
+          system: adapter.name,
+          sampleId: conv.sampleId,
+          questionId: q.id,
+          categoryId: q.categoryId,
+          category: q.category,
+          question: q.question,
+          goldAnswer: q.answer,
+          predicted: ans.text,
+          correct,
+          judgeRaw: judged.raw,
+          usage: { latencyMs: ans.latencyMs, totalTokens: ans.totalTokens, promptTokens: ans.promptTokens, completionTokens: ans.completionTokens },
+        };
+        if (++done % 10 === 0) process.stderr.write(`  ...${done}/${questions.length}\n`);
+        return { row, judgeStat };
+      } catch (err) {
+        // One bad question (transient API error, etc.) must never kill a
+        // multi-hour arm: record it as incorrect and keep going.
+        process.stderr.write(
+          `  [warn] ${adapter.name} question ${q.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        const row: QAResult = {
+          system: adapter.name,
+          sampleId: conv.sampleId,
+          questionId: q.id,
+          categoryId: q.categoryId,
+          category: q.category,
+          question: q.question,
+          goldAnswer: q.answer,
+          predicted: "[ERROR]",
+          correct: false,
+          judgeRaw: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
+          usage: { latencyMs: Date.now() - t0, totalTokens: 0 },
+        };
+        return { row, judgeStat: { latencyMs: Date.now() - t0, totalTokens: 0 } };
+      }
     });
 
     for (const { row, judgeStat } of rows) {

@@ -91,7 +91,18 @@ export class LlmClient {
           continue;
         }
         if (!res.ok) {
-          throw new Error(`Azure chat failed: HTTP ${res.status} ${await res.text()}`);
+          const body = await res.text();
+          // Azure's content-management policy rejects some LOCOMO prompts
+          // (400 content_filter). It is not retryable and must not kill the
+          // run: treat it as an unanswerable question (empty answer, scored
+          // wrong) so the arm continues.
+          if (res.status === 400 && /content_filter|ResponsibleAIPolicy/i.test(body)) {
+            return {
+              text: "",
+              usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: Date.now() - started },
+            };
+          }
+          throw new Error(`Azure chat failed: HTTP ${res.status} ${body}`);
         }
 
         const json = (await res.json()) as {
