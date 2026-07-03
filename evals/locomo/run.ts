@@ -25,6 +25,7 @@ import { isRefusal, judgeAnswer } from "./judge.js";
 import { LlmClient } from "./llm.js";
 import { scoreSystem, summarizeCost } from "./metrics.js";
 import { MinimemAloneAdapter } from "./adapters/minimem-alone.js";
+import { CogcoreRetrievalAdapter } from "./adapters/cogcore-retrieval.js";
 import type {
   LocomoConversation,
   LocomoQuestion,
@@ -40,6 +41,7 @@ interface Args {
   topk: number;
   seed: number;
   concurrency: number;
+  embeddings: "local" | "none";
   out?: string;
 }
 
@@ -78,6 +80,7 @@ function parseArgs(argv: string[]): Args {
     topk: Number(get("--topk") ?? 8),
     seed: Number(get("--seed") ?? 1),
     concurrency: Number(get("--concurrency") ?? 6),
+    embeddings: (get("--embeddings") ?? "local") === "none" ? "none" : "local",
     out: get("--out"),
   };
 }
@@ -121,12 +124,16 @@ function sampleQuestions(
   return out;
 }
 
-function makeAdapter(name: string, llm: LlmClient, topk: number): MemorySystemAdapter {
+function makeAdapter(name: string, llm: LlmClient, args: Args): MemorySystemAdapter {
   switch (name) {
     case "minimem-alone":
-      return new MinimemAloneAdapter(llm, { topK: topk });
+      return new MinimemAloneAdapter(llm, { topK: args.topk });
+    case "cogcore-retrieval":
+      return new CogcoreRetrievalAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
     default:
-      throw new Error(`Unknown system "${name}" (available: minimem-alone)`);
+      throw new Error(
+        `Unknown system "${name}" (available: minimem-alone, cogcore-retrieval)`,
+      );
   }
 }
 
@@ -202,7 +209,7 @@ async function main() {
   const report: Record<string, unknown> = { config: args, systems: {} };
 
   for (const sysName of args.systems) {
-    const adapter = makeAdapter(sysName, llm, args.topk);
+    const adapter = makeAdapter(sysName, llm, args);
     const { qa, ingestUsage, judgeUsage } = await runSystem(adapter, conversations, args, llm);
     const score = scoreSystem(sysName, qa, ingestUsage);
     const judgeCost = summarizeCost(judgeUsage);

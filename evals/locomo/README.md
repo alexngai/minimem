@@ -110,9 +110,24 @@ Takeaways:
 - [x] Judge (mem0 J-judge, verbatim) + answer prompt
 - [x] Azure GPT-5.5 client (reasoning-model aware, usage accounting)
 - [x] `minimem-alone` adapter + runner + **dry run** (real cost estimate)
-- [ ] Add request concurrency to the runner (wall-clock blocker)
-- [ ] Adapters: `minimem+cogcore`, `mem0`, `letta`
+- [x] Bounded-concurrency question pool (`--concurrency`, ~6-7x speedup)
+- [x] `cogcore-retrieval` adapter (cognitive-core KnowledgeBank + injected minimem SearchProvider, BM25 or local-embedding hybrid)
+- [ ] `cogcore-memory` adapter (LLM extraction → entity consolidation, playbooks off)
+- [ ] `mem0`, `letta` adapters
 - [ ] Human-label validation of the judge
 - [ ] Full 10-conversation run + published results (JSON+MD)
 
-Next gate: add concurrency, then wire the remaining arms.
+## Embeddings
+
+This Azure resource has no embeddings deployment and no OpenAI/Gemini keys are
+present, so the shared embedder is **minimem's local model** (`--embeddings local`,
+default; `none` = BM25). Swappable for a hosted provider later.
+
+## The cogcore arms use OUR minimem
+
+cognitive-core is used memory-only (no playbooks / learning pipeline). Rather
+than let it use its own bundled minimem, we inject the repo's minimem as
+cognitive-core's `SearchProvider` (`MinimemSearchProvider`), so the arm is
+genuinely "this minimem + cognitive-core".
+
+Next gate: build `cogcore-memory` (extraction arm), then run the ladder.
