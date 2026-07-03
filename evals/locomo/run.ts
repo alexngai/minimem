@@ -39,7 +39,31 @@ interface Args {
   systems: string[];
   topk: number;
   seed: number;
+  concurrency: number;
   out?: string;
+}
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight. Results are returned in
+ * input order; failures reject the whole batch.
+ */
+async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+  await Promise.all(workers);
+  return results;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -53,6 +77,7 @@ function parseArgs(argv: string[]): Args {
     systems: (get("--systems") ?? "minimem-alone").split(",").map((s) => s.trim()),
     topk: Number(get("--topk") ?? 8),
     seed: Number(get("--seed") ?? 1),
+    concurrency: Number(get("--concurrency") ?? 6),
     out: get("--out"),
   };
 }
@@ -124,20 +149,22 @@ async function runSystem(
     ingestUsage.push(ing);
 
     const questions = sampleQuestions(conv.questions, args.questions, args.seed);
-    process.stderr.write(`[${adapter.name}] answering ${questions.length} questions...\n`);
+    process.stderr.write(
+      `[${adapter.name}] answering ${questions.length} questions (concurrency ${args.concurrency})...\n`,
+    );
 
-    let i = 0;
-    for (const q of questions) {
+    let done = 0;
+    const rows = await mapPool(questions, args.concurrency, async (q) => {
       const t0 = Date.now();
       const ans = await adapter.answer(q, conv);
       const judged = await judgeAnswer(llm, q.question, q.answer, ans.text);
-      judgeUsage.push({ latencyMs: Date.now() - t0, totalTokens: judged.judgeTokens });
+      const judgeStat: UsageStats = { latencyMs: Date.now() - t0, totalTokens: judged.judgeTokens };
 
       // Adversarial: correct behavior is refusal; the J-judge scores against the
       // planted distractor, so we override with refusal detection for cat 5.
       const correct = q.isAdversarial ? isRefusal(ans.text) : judged.correct;
 
-      qa.push({
+      const row: QAResult = {
         system: adapter.name,
         sampleId: conv.sampleId,
         questionId: q.id,
@@ -149,9 +176,14 @@ async function runSystem(
         correct,
         judgeRaw: judged.raw,
         usage: { latencyMs: ans.latencyMs, totalTokens: ans.totalTokens, promptTokens: ans.promptTokens, completionTokens: ans.completionTokens },
-      });
+      };
+      if (++done % 10 === 0) process.stderr.write(`  ...${done}/${questions.length}\n`);
+      return { row, judgeStat };
+    });
 
-      if (++i % 10 === 0) process.stderr.write(`  ...${i}/${questions.length}\n`);
+    for (const { row, judgeStat } of rows) {
+      qa.push(row);
+      judgeUsage.push(judgeStat);
     }
   }
 
