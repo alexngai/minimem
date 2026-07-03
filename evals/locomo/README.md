@@ -13,7 +13,7 @@ Every system shares the **same base LLM (Azure GPT-5.5)** for both memory extrac
 | Arm | Memory layer | Notes |
 |---|---|---|
 | `minimem+cogcore` | cognitive-core `MemorySystem` (semantic/knowledge memory ON, **learning + playbook/skill-extraction channels OFF**), minimem as retrieval backend | the system we're promoting |
-| `mem0` | pinned OSS `mem0ai` (JS SDK), self-hosted vector store | competitor |
+| `mem0` | pinned OSS `mem0ai` (JS SDK), in-process vector store, local Ollama embedder | competitor |
 | `letta` | pinned OSS Letta server (Docker), TS client | competitor |
 | `minimem-alone` | raw minimem retrieval, no extraction | baseline — quantifies what cognitive-core's extraction adds |
 
@@ -113,7 +113,8 @@ Takeaways:
 - [x] Bounded-concurrency question pool (`--concurrency`, ~6-7x speedup)
 - [x] `cogcore-retrieval` adapter (cognitive-core KnowledgeBank + injected minimem SearchProvider, BM25 or local-embedding hybrid)
 - [x] `cogcore-memory` adapter (GPT-5.5 extraction → heuristic entity consolidation → 3-tier retrieval, playbooks off)
-- [ ] `mem0`, `letta` adapters
+- [x] `mem0` adapter (OSS `mem0ai/oss`: Azure GPT-5.5 LLM + Ollama embedder + in-process store)
+- [ ] `letta` adapter
 - [ ] Human-label validation of the judge
 - [ ] Full 10-conversation run + published results (JSON+MD)
 
@@ -144,4 +145,36 @@ Consolidated entity notes can be large, so retrieved excerpts are capped
 Note: extraction uses a reasoning model with no fixed seed, so ingested facts
 vary run-to-run; multi-conversation runs + bootstrap CIs absorb this.
 
-Next gate: `mem0` + `letta` adapters, then the full ladder run.
+### `mem0` arm (competitor) — setup & mechanism
+
+mem0 uses its own OSS self-hosted `Memory` (`mem0ai/oss`), kept fair by sharing
+the **same base LLM (Azure GPT-5.5)** for its extraction/update pipeline and by
+handing its retrieved memories to the **same answer prompt + model** as every
+other arm. Only the memory layer differs.
+
+- **LLM:** `azure_openai` provider → GPT-5.5. mem0's Azure client sends neither
+  `max_tokens` nor `temperature`, so the reasoning-model constraints hold.
+- **Embedder:** no hosted embedding key exists, so mem0 uses a **local Ollama**
+  model (`nomic-embed-text`, 768-dim) in Docker:
+
+  ```bash
+  docker run -d --name minimem-ollama -p 11434:11434 \
+    -v minimem-ollama:/root/.ollama ollama/ollama
+  docker exec minimem-ollama ollama pull nomic-embed-text
+  # override host with OLLAMA_URL if not localhost:11434
+  ```
+
+- **Vector store:** mem0's in-process `memory` store (no external DB), fresh per
+  conversation, namespaced by `userId = locomo-<sampleId>`.
+
+**Cost caveat:** mem0's ingest-time extraction runs through mem0's own OpenAI
+client, which does **not** surface token usage to us, so mem0 **ingest tokens
+are not captured** (latency is). Answer + judge tokens are captured via the
+shared `LlmClient`, so per-question answer cost is directly comparable.
+
+**Wall-clock:** mem0's per-fact ADD/UPDATE decision loop on a reasoning model is
+heavy — smoke test measured **~20 min to ingest one conversation** (19 sessions,
+419 turns, ~850 embed calls). Budget ~3–4 h for mem0 ingest across all 10
+conversations; it dominates the full-run time.
+
+Next gate: `letta` adapter, then the full ladder run.

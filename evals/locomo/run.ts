@@ -27,6 +27,7 @@ import { scoreSystem, summarizeCost } from "./metrics.js";
 import { MinimemAloneAdapter } from "./adapters/minimem-alone.js";
 import { CogcoreRetrievalAdapter } from "./adapters/cogcore-retrieval.js";
 import { CogcoreMemoryAdapter } from "./adapters/cogcore-memory.js";
+import { Mem0Adapter } from "./adapters/mem0.js";
 import type {
   LocomoConversation,
   LocomoQuestion,
@@ -133,9 +134,11 @@ function makeAdapter(name: string, llm: LlmClient, args: Args): MemorySystemAdap
       return new CogcoreRetrievalAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
     case "cogcore-memory":
       return new CogcoreMemoryAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
+    case "mem0":
+      return new Mem0Adapter(llm, { topK: args.topk });
     default:
       throw new Error(
-        `Unknown system "${name}" (available: minimem-alone, cogcore-retrieval, cogcore-memory)`,
+        `Unknown system "${name}" (available: minimem-alone, cogcore-retrieval, cogcore-memory, mem0)`,
       );
   }
 }
