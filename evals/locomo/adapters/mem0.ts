@@ -11,10 +11,13 @@
  * the container started by the harness. The vector store is mem0's in-process
  * `memory` store (no external DB).
  *
- * Cost caveat: mem0's ingest-time extraction runs through mem0's own OpenAI
- * client, which does not surface token usage to us — so ingest tokens are NOT
- * captured here (latency is). Answer + judge tokens ARE captured (shared
- * LlmClient), so the per-question answer cost is directly comparable.
+ * Cost: mem0's ingest-time extraction runs through mem0's own OpenAI client, so
+ * we capture its token usage by injecting a counting `fetch` into the Azure
+ * client (mem0 forwards `modelProperties` straight to `new AzureOpenAI(...)`,
+ * and openai@4 accepts a custom `fetch`). Embeddings use the separate Ollama
+ * client, so the counter sees ONLY Azure LLM (extraction) tokens. Answer + judge
+ * tokens are captured via the shared LlmClient — so mem0's full cost (ingest +
+ * answer) is directly comparable to the other arms.
  */
 
 import { Memory } from "mem0ai/oss";
@@ -40,8 +43,43 @@ export interface Mem0Options {
   embedDims?: number;
 }
 
+/** Running token tally for mem0's internal (Azure) LLM calls. */
+interface TokenSink {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  calls: number;
+}
+
+/**
+ * A `fetch` that transparently accumulates OpenAI/Azure `usage` from chat
+ * completion responses. Reads a clone so the SDK still consumes the body.
+ */
+function makeCountingFetch(sink: TokenSink): typeof fetch {
+  return async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const res = await fetch(input, init);
+    res
+      .clone()
+      .json()
+      .then((j) => {
+        const u = (j as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } })
+          ?.usage;
+        if (!u) return;
+        sink.promptTokens += u.prompt_tokens ?? 0;
+        sink.completionTokens += u.completion_tokens ?? 0;
+        sink.totalTokens += u.total_tokens ?? 0;
+        sink.calls += 1;
+      })
+      .catch(() => {});
+    return res;
+  };
+}
+
 /** Build the mem0 self-hosted config from Azure env + local Ollama. */
-function buildMem0Config(opts: Required<Pick<Mem0Options, "ollamaUrl" | "embedModel" | "embedDims">>) {
+function buildMem0Config(
+  opts: Required<Pick<Mem0Options, "ollamaUrl" | "embedModel" | "embedDims">>,
+  countingFetch: typeof fetch,
+) {
   const base = process.env.AZURE_API_BASE;
   const apiKey = process.env.AZURE_API_KEY;
   const apiVersion = process.env.AZURE_API_VERSION;
@@ -62,6 +100,8 @@ function buildMem0Config(opts: Required<Pick<Mem0Options, "ollamaUrl" | "embedMo
           endpoint: base.replace(/\/$/, ""),
           deployment,
           apiVersion,
+          // Forwarded into `new AzureOpenAI(...)`; lets us tally extraction tokens.
+          fetch: countingFetch,
         },
       },
     },
@@ -86,6 +126,8 @@ export class Mem0Adapter implements MemorySystemAdapter {
   private readonly topK: number;
   private readonly llm: LlmClient;
   private readonly cfg: ReturnType<typeof buildMem0Config>;
+  /** Accumulates mem0's internal (Azure) extraction tokens. */
+  private readonly tokens: TokenSink = { promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 0 };
 
   private memory: Memory | null = null;
   private userId = "";
@@ -93,15 +135,20 @@ export class Mem0Adapter implements MemorySystemAdapter {
   constructor(llm: LlmClient, opts?: Mem0Options) {
     this.llm = llm;
     this.topK = opts?.topK ?? 8;
-    this.cfg = buildMem0Config({
-      ollamaUrl: opts?.ollamaUrl ?? process.env.OLLAMA_URL ?? "http://localhost:11434",
-      embedModel: opts?.embedModel ?? "nomic-embed-text",
-      embedDims: opts?.embedDims ?? 768,
-    });
+    this.cfg = buildMem0Config(
+      {
+        ollamaUrl: opts?.ollamaUrl ?? process.env.OLLAMA_URL ?? "http://localhost:11434",
+        embedModel: opts?.embedModel ?? "nomic-embed-text",
+        embedDims: opts?.embedDims ?? 768,
+      },
+      makeCountingFetch(this.tokens),
+    );
   }
 
   async ingest(conversation: LocomoConversation): Promise<UsageStats> {
     const started = Date.now();
+    // Snapshot the token tally so we report THIS conversation's ingest cost.
+    const t0 = { ...this.tokens };
     // Fresh in-process store per conversation.
     this.memory = new Memory(this.cfg as never);
     this.userId = `locomo-${conversation.sampleId}`;
@@ -117,7 +164,14 @@ export class Mem0Adapter implements MemorySystemAdapter {
       });
     }
 
-    return { latencyMs: Date.now() - started, totalTokens: 0 };
+    // Let any in-flight usage-accounting clones settle before reading the delta.
+    await new Promise((r) => setTimeout(r, 250));
+    return {
+      latencyMs: Date.now() - started,
+      promptTokens: this.tokens.promptTokens - t0.promptTokens,
+      completionTokens: this.tokens.completionTokens - t0.completionTokens,
+      totalTokens: this.tokens.totalTokens - t0.totalTokens,
+    };
   }
 
   async answer(question: LocomoQuestion): Promise<{ text: string } & UsageStats> {

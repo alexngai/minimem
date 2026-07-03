@@ -40,6 +40,22 @@ Sessions/conversation: 19–32; 5882 turns total.
 - **Accuracy** — LLM-as-judge correctness, per category and overall (adversarial excluded), with **bootstrap 95% CIs** (seeded, reproducible).
 - **Cost axis** — token totals/means and latency **p50/p95** for both ingest and answer phases. Reported alongside accuracy, never accuracy alone (mem0-paper convention).
 
+### Cost / token comparison (`cost-report.ts`)
+
+Every arm captures tokens for all three phases: **ingest** (extraction — nonzero
+only for `cogcore-memory` and `mem0`), **answer**, and **judge**. Retrieval-only
+arms (`minimem-alone`, `cogcore-retrieval`) have zero ingest LLM cost by design —
+that gap *is* a headline comparison point.
+
+`cost-report.ts` aggregates the per-arm result files into one side-by-side table
+(absolute + per-conversation + per-question), with an optional USD estimate:
+
+```bash
+npx tsx evals/locomo/cost-report.ts                       # tokens only (results/full-*.json)
+LLM_PRICE_IN_PER_M=1.25 LLM_PRICE_OUT_PER_M=10 \
+  npx tsx evals/locomo/cost-report.ts --out evals/locomo/results/cost.md
+```
+
 ## Judge (`judge.ts` — next increment)
 
 LLM-as-judge using Azure GPT-5.5. Because the answer model and judge share a family, the judge is **validated against a small human-labeled sample** and its agreement rate reported; the judge score is treated as a lower bound.
@@ -167,10 +183,13 @@ other arm. Only the memory layer differs.
 - **Vector store:** mem0's in-process `memory` store (no external DB), fresh per
   conversation, namespaced by `userId = locomo-<sampleId>`.
 
-**Cost caveat:** mem0's ingest-time extraction runs through mem0's own OpenAI
-client, which does **not** surface token usage to us, so mem0 **ingest tokens
-are not captured** (latency is). Answer + judge tokens are captured via the
-shared `LlmClient`, so per-question answer cost is directly comparable.
+**Cost capture:** mem0's ingest-time extraction runs through mem0's own OpenAI
+client, so we capture its usage by injecting a **token-counting `fetch`** into
+the Azure client (mem0 forwards `modelProperties` straight to `new
+AzureOpenAI(...)`, and openai@4 accepts a custom `fetch`). Embeddings go through
+the separate Ollama client, so the counter sees only Azure LLM (extraction)
+tokens. Answer + judge tokens come from the shared `LlmClient`, so **mem0's full
+cost (ingest + answer) is captured and directly comparable**.
 
 **Wall-clock:** mem0's per-fact ADD/UPDATE decision loop on a reasoning model is
 heavy — smoke test measured **~20 min to ingest one conversation** (19 sessions,
