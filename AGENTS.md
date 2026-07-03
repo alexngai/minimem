@@ -1,18 +1,16 @@
 # Agent Instructions
 
-<!-- SWARMKIT-WIKI:START -->
-## SwarmKit Ecosystem Knowledge Base
+Working on the minimem codebase? See [CLAUDE.md](CLAUDE.md) for the full
+contributor guide: architecture map, key files, development commands, testing
+conventions, and common tasks like adding CLI commands or embedding providers.
 
-This repository participates in the SwarmKit ecosystem. Before changing architecture, package boundaries, cross-repo integrations, protocols, task/dispatch behavior, memory/learning flows, workspace/git behavior, or agent orchestration semantics, query the shared knowledge base:
+Quick reference:
 
 ```sh
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs context --cwd "$PWD"
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs repo minimem
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs interactions minimem
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs search "<concept>"
+npm run build      # Build library and CLI (tsup + postbuild)
+npm run test       # Unit tests (vitest)
+npm run test:all   # Unit + integration + CLI + knowledge tests
+npm run eval:ci    # Offline retrieval-eval regression gate
 ```
 
-Canonical ecosystem memory lives at `/Users/alexngai/GitHub/swarmkit-wiki`.
-
-When this repo changes knowledge that should persist across agents, update the relevant wiki article, semantic model, raw snapshot, graph artifact, or cross-repo interaction data in `swarmkit-wiki`. Do not treat this repo's local `.understand-anything/` cache as canonical; graph artifacts are centralized in `swarmkit-wiki/.understand-anything/graphs/`.
-<!-- SWARMKIT-WIKI:END -->
+Requires Node.js 22+ (uses `node:sqlite`).

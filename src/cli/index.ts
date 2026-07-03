@@ -114,14 +114,14 @@ program
   .option("--unset <key>", "Remove a config value")
   .action(config);
 
-// minimem sync init-central <path>
+// minimem sync:init-central <path>
 program
   .command("sync:init-central <path>")
   .description("Initialize a central repository for syncing memories")
   .option("-f, --force", "Force creation even if directory exists")
   .action(syncInitCentral);
 
-// minimem sync init
+// minimem sync:init
 program
   .command("sync:init")
   .description("Initialize sync for a memory directory")

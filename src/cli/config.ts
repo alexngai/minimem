@@ -66,9 +66,15 @@ export type CliConfig = {
   hybrid?: {
     /** Enable hybrid search (vector + BM25) */
     enabled?: boolean;
-    /** Weight for vector search results (0-1) */
+    /** Fusion strategy: "rrf" (default) or "weighted" */
+    fusion?: "rrf" | "weighted";
+    /** FTS query mode: "or" (default) or "and" */
+    ftsQueryMode?: "or" | "and";
+    /** RRF rank constant (default: 60). Only used when fusion is "rrf" */
+    rrfK?: number;
+    /** Weight for vector search results (0-1). Only used when fusion is "weighted" */
     vectorWeight?: number;
-    /** Weight for text/BM25 search results (0-1) */
+    /** Weight for text/BM25 search results (0-1). Only used when fusion is "weighted" */
     textWeight?: number;
   };
   query?: {
@@ -150,11 +156,13 @@ export function getGlobalDir(): string {
 }
 
 /**
- * Get the global config file path (~/.minimem/.minimem/config.json)
- * Note: Global directory follows same structure as other memory directories
+ * Get the global config file path.
+ * The global directory (~/.minimem) follows the same layout resolution as any
+ * other memory directory: contained (~/.minimem/config.json) first, then
+ * legacy subdirectory layouts.
  */
 export function getGlobalConfigPath(): string {
-  return path.join(getGlobalDir(), CONFIG_DIR, CONFIG_FILENAME);
+  return getConfigPath(getGlobalDir());
 }
 
 /**

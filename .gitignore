@@ -4,3 +4,9 @@ dist/
 .DS_Store
 .omc/
 .eval-cache/
+
+# Local agent/tooling state (not part of the project)
+.claude/
+.sessionlog/
+.sudocode/
+.vscode/

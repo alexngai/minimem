@@ -5,8 +5,7 @@
  * Compatible with Claude Desktop, Cursor, and other MCP clients.
  *
  * Usage:
- *   import { Minimem } from "minimem";
- *   import { createMcpServer, runMcpServer } from "minimem/mcp";
+ *   import { Minimem, createMcpServer, runMcpServer } from "minimem";
  *
  *   const minimem = await Minimem.create({ ... });
  *   const server = createMcpServer(minimem);
@@ -15,6 +14,7 @@
 
 import * as readline from "node:readline";
 import type { Minimem } from "../minimem.js";
+import { VERSION } from "../cli/version.js";
 import {
   MEMORY_TOOLS,
   type ToolDefinition,
@@ -25,7 +25,7 @@ import {
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "minimem";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = VERSION;
 
 /**
  * JSON-RPC 2.0 request

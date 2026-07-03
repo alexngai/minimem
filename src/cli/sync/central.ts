@@ -53,7 +53,7 @@ To sync a local memory directory to this repo:
 
 \`\`\`bash
 minimem config --xdg-global --set centralRepo=<path-to-this-repo>
-minimem sync init --path <directory-name>/
+minimem sync:init --path <directory-name>/
 \`\`\`
 
 ## Files

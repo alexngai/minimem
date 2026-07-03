@@ -86,6 +86,8 @@ mem.close();
 
 ## CLI Commands
 
+### Core
+
 | Command | Description |
 |---------|-------------|
 | `minimem init [dir]` | Initialize a memory directory (creates files, DB, and indexes) |
@@ -95,9 +97,44 @@ mem.close();
 | `minimem append <text>` | Append to today's daily log |
 | `minimem upsert <file> [content]` | Create or update a memory file |
 | `minimem mcp` | Run as MCP server (stdio) |
-| `minimem store:add <name> <path>` | Register a store in the global manifest |
+| `minimem config` | View or modify configuration (`--set key=value`, `--unset key`) |
+
+### Stores (cross-directory search)
+
+| Command | Description |
+|---------|-------------|
+| `minimem store:add <name> <path>` | Register a store in the global manifest (`--remote <url>` for git-backed stores) |
+| `minimem store:remove <name>` | Remove a store from the global manifest |
 | `minimem store:list` | List all registered stores and their links |
 | `minimem store:link <store> <target>` | Link a store to another for cross-store search |
+| `minimem store:unlink <store> <target>` | Remove a link between stores |
+
+### Git sync (multi-machine memory)
+
+Sync memory directories through a central git repository — write on one machine, recall on another.
+
+| Command | Description |
+|---------|-------------|
+| `minimem sync:init-central <path>` | Initialize a central repository for syncing |
+| `minimem sync:init --path <name>/` | Enable sync for a memory directory |
+| `minimem push` / `minimem pull` | Push/pull changes to/from the central repository |
+| `minimem sync:status` | Show sync status for a directory |
+| `minimem sync:list` | List all sync mappings |
+| `minimem sync:remove` | Remove sync mapping for a directory |
+| `minimem sync:conflicts` | List quarantined conflicts |
+| `minimem sync:resolve <timestamp>` | Resolve a quarantined conflict with a merge tool |
+| `minimem sync:cleanup` | Clean up old quarantined conflicts |
+| `minimem sync:log` | Show sync history |
+| `minimem sync:validate` | Validate the registry for collisions and stale mappings |
+
+### Sync daemon (auto-sync)
+
+| Command | Description |
+|---------|-------------|
+| `minimem daemon` | Start the sync daemon (`--background` to detach) |
+| `minimem daemon:stop` | Stop the sync daemon |
+| `minimem daemon:status` | Show daemon status |
+| `minimem daemon:logs` | Show daemon logs (`--follow` to tail) |
 
 ### Common Options
 
@@ -152,14 +189,20 @@ my-memories/
 │   ├── 2024-01-15.md   # Daily logs
 │   ├── 2024-01-16.md
 │   └── projects.md     # Topic-specific notes
-└── .minimem/           # Internal data (gitignored)
-    ├── config.json     # Configuration
-    └── index.db        # SQLite database with vectors
+├── config.json         # Configuration
+├── index.db            # SQLite database with vectors (gitignored)
+└── .gitignore          # Ignores index.db
 ```
+
+Everything lives in the memory directory itself, so it's trivially portable: the Markdown
+files and `config.json` can be committed to git, while the derived `index.db` is ignored
+and rebuilt on any machine with `minimem sync`.
+
+(Legacy layouts with a `.minimem/` subdirectory are still read transparently.)
 
 ## Configuration
 
-Configuration is stored in `.minimem/config.json`:
+Configuration is stored in `config.json` at the memory directory root:
 
 ```json
 {
@@ -169,8 +212,8 @@ Configuration is stored in `.minimem/config.json`:
   },
   "hybrid": {
     "enabled": true,
-    "vectorWeight": 0.7,
-    "textWeight": 0.3
+    "fusion": "rrf",
+    "ftsQueryMode": "or"
   },
   "query": {
     "maxResults": 10,
@@ -178,6 +221,10 @@ Configuration is stored in `.minimem/config.json`:
   }
 }
 ```
+
+The values above are the defaults. Set `"fusion": "weighted"` to use a score-weighted
+sum instead of RRF (then `vectorWeight`/`textWeight`, default 0.7/0.3, apply). A global
+config at `~/.minimem/config.json` is layered under each directory's local config.
 
 ### Environment Variables
 
@@ -273,29 +320,30 @@ Add to Cursor's MCP settings:
 }
 ```
 
-### Available MCP Tool
+### Available MCP Tools
 
-The MCP server exposes a `memory_search` tool:
+The MCP server exposes five tools:
+
+| Tool | Purpose |
+|------|---------|
+| `memory_search` | Semantic search across memory files. Supports `maxResults`, `minScore`, `directories`, `detail` (`"compact"` index or `"full"` snippets), and `type` (filter by observation type: decision, bugfix, feature, discovery, context, note) |
+| `memory_get_details` | Fetch full text for chunks returned by a compact `memory_search` — a two-phase workflow that saves tokens |
+| `knowledge_search` | Search knowledge notes with domain/entity/confidence/type filters (see [Knowledge Frontmatter](CLAUDE.md#knowledge-frontmatter-convention)) |
+| `knowledge_graph` | Traverse knowledge-graph relationships outward from a note |
+| `knowledge_path` | Find the shortest path between two knowledge notes via graph links |
+
+The three `knowledge_*` tools are additive: they only return results when
+knowledge-formatted notes (YAML frontmatter with `type`, `domain`, `links`, etc.)
+are present. Regular memory files work fine without them.
+
+Typical search flow:
 
 ```typescript
-{
-  name: "memory_search",
-  description: "Search through memory files using semantic search",
-  inputSchema: {
-    type: "object",
-    properties: {
-      query: { type: "string", description: "Search query" },
-      maxResults: { type: "number", description: "Max results (default: 10)" },
-      minScore: { type: "number", description: "Min score 0-1 (default: 0.3)" },
-      directories: {
-        type: "array",
-        items: { type: "string" },
-        description: "Filter to specific directories (searches all if omitted)"
-      }
-    },
-    required: ["query"]
-  }
-}
+// 1. Compact search — lightweight index of matches
+memory_search({ query: "api design decisions", maxResults: 10 })
+
+// 2. Fetch full text only for the results that matter
+memory_get_details({ results: [{ path, startLine, endLine }] })
 ```
 
 ## Library API
@@ -316,8 +364,8 @@ const config: MinimemConfig = {
   },
   hybrid: {
     enabled: true,
-    vectorWeight: 0.7,
-    textWeight: 0.3
+    fusion: 'rrf',       // default; or 'weighted' (uses vectorWeight/textWeight)
+    ftsQueryMode: 'or'   // default; 'and' requires all query terms to match
   },
   watch: true,  // Auto-sync on file changes
   debug: console.log  // Optional debug logging
@@ -413,7 +461,7 @@ const geminiProvider = createEmbeddingProvider({
 │  ┌─────────────────────────────────────┐                    │
 │  │           Chunking                   │                    │
 │  │  Split by headings/paragraphs        │                    │
-│  │  ~500 chars per chunk                │                    │
+│  │  ~256 tokens per chunk               │                    │
 │  └──────────────────┬──────────────────┘                    │
 │                     │                                        │
 │                     ▼                                        │
@@ -436,7 +484,7 @@ const geminiProvider = createEmbeddingProvider({
 │  ┌─────────────────────────────────────┐                    │
 │  │         Hybrid Search                │                    │
 │  │  Vector similarity + BM25 ranking    │                    │
-│  │  Weighted merge of results           │                    │
+│  │  Reciprocal rank fusion (RRF)        │                    │
 │  └─────────────────────────────────────┘                    │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -444,7 +492,7 @@ const geminiProvider = createEmbeddingProvider({
 ### Indexing Process
 
 1. **File Discovery**: Scans for `MEMORY.md` and `memory/*.md` files
-2. **Chunking**: Splits content by Markdown headings and paragraphs (~500 chars each)
+2. **Chunking**: Splits content by Markdown headings and paragraphs (~256 tokens each)
 3. **Hashing**: Each chunk gets a content hash to detect changes
 4. **Embedding**: New/changed chunks are sent to the embedding provider
 5. **Storage**: Chunks and vectors stored in SQLite with sqlite-vec extension
@@ -453,59 +501,62 @@ const geminiProvider = createEmbeddingProvider({
 ### Search Process
 
 1. **Query Embedding**: Convert search query to vector using same embedding model
-2. **Vector Search**: Find similar chunks using cosine similarity (sqlite-vec)
-3. **Text Search**: Find matching chunks using FTS5 full-text search (BM25)
-4. **Hybrid Merge**: Combine results with configurable weights (default 70% vector, 30% text)
-5. **Ranking**: Sort by combined score, apply min-score filter
+2. **Vector Search**: KNN search using the sqlite-vec index (cosine distance)
+3. **Text Search**: Find matching chunks using FTS5 full-text search (BM25, OR-mode)
+4. **Hybrid Fusion**: Combine both ranked lists with reciprocal rank fusion (RRF)
+5. **Ranking**: Sort by fused score (max-normalized), apply min-score filter
 
-### Why Hybrid Search?
+### Why Hybrid Search — and Why RRF?
 
 Pure vector search excels at semantic similarity but can miss exact matches. Pure text search finds exact terms but misses synonyms. Hybrid search combines both:
 
-- **Vector (70%)**: Finds conceptually related content ("database" matches "PostgreSQL")
-- **Text (30%)**: Boosts exact keyword matches ("PostgreSQL" query ranks PostgreSQL mentions higher)
+- **Vector**: Finds conceptually related content ("database" matches "PostgreSQL")
+- **Text (BM25)**: Boosts exact keyword matches ("PostgreSQL" query ranks PostgreSQL mentions higher)
+
+The default fusion is **RRF (reciprocal rank fusion)**: it merges the two result
+lists by rank position instead of mixing raw scores, so it needs no score
+normalization and is robust across embedding models. On BEIR retrieval
+benchmarks, RRF was the best (or tied-best) configuration on every dataset and
+embedding model tested, while score-weighted fusion collapsed when switching
+embedding models — see [docs/RETRIEVAL-EVAL-RESULTS.md](docs/RETRIEVAL-EVAL-RESULTS.md)
+for the full numbers. A score-weighted sum is available via
+`hybrid.fusion: "weighted"`.
 
 ### Storage Format
 
-SQLite database with three main tables:
+SQLite database (`index.db` in the memory directory) with these main tables:
 
 ```sql
 -- File metadata and modification tracking
-CREATE TABLE memory_files (
-  path TEXT PRIMARY KEY,
-  mtime INTEGER,
-  hash TEXT
+CREATE TABLE files (path, source, hash, mtime, size);
+
+-- Content chunks with embeddings and optional knowledge metadata
+CREATE TABLE chunks (
+  id, path, source, start_line, end_line, hash, model, text, embedding,
+  type,                                      -- observation type (decision, bugfix, ...)
+  knowledge_type, knowledge_id,              -- knowledge frontmatter metadata
+  domains, entities, confidence,
+  updated_at
 );
 
--- Content chunks with embeddings
-CREATE TABLE memory_chunks (
-  id INTEGER PRIMARY KEY,
-  path TEXT,
-  content TEXT,
-  hash TEXT,
-  start_line INTEGER,
-  end_line INTEGER,
-  heading TEXT,
-  embedding BLOB  -- F32 vector
-);
+-- Full-text search index (BM25)
+CREATE VIRTUAL TABLE chunks_fts USING fts5(text, id, path, ...);
 
--- Full-text search index
-CREATE VIRTUAL TABLE memory_fts USING fts5(content, path);
+-- Vector KNN index (when sqlite-vec is available; dims are model-dependent)
+CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding FLOAT[<dims>]);
 
--- Vector similarity index (when sqlite-vec available)
-CREATE VIRTUAL TABLE memory_vec USING vec0(embedding float[128]);
+-- Knowledge graph edges (from knowledge frontmatter links)
+CREATE TABLE knowledge_links (from_id, to_id, relation, layer, weight, ...);
 ```
 
 ### Embedding Cache
 
-Embeddings are cached by content hash in a separate table:
+Embeddings are cached by provider, model, and content hash:
 
 ```sql
 CREATE TABLE embedding_cache (
-  hash TEXT PRIMARY KEY,
-  embedding BLOB,
-  model TEXT,
-  created_at INTEGER
+  provider, model, provider_key, hash, embedding, dims, updated_at,
+  PRIMARY KEY (provider, model, provider_key, hash)
 );
 ```
 
@@ -513,6 +564,7 @@ This means:
 - Identical text always produces the same embedding (deterministic)
 - Moving/copying chunks doesn't require re-embedding
 - Switching files with same content is instant
+- The cache survives schema migrations, so re-indexing is cheap
 
 ## Claude Code Plugin
 
@@ -533,11 +585,14 @@ claude --plugin-dir /path/to/minimem/claude-plugin
 
 ### Plugin Features
 
-- **MCP Server**: `memory_search` tool for semantic search
+- **MCP Server**: all five memory/knowledge tools (see [Available MCP Tools](#available-mcp-tools))
 - **Memory Skill**: Auto-invoked for storing/recalling context
 - **Commands**:
   - `/minimem:remember <text>` - Store information
   - `/minimem:recall <query>` - Search memories
+- **Session hooks** (opt-in): inject recent memories at session start, log a
+  marker at session end. Enable with `minimem config --set hooks.sessionStart=true`
+  and `hooks.sessionEnd=true`.
 
 See `claude-plugin/README.md` for detailed documentation.
 
@@ -552,7 +607,7 @@ npm run build
 
 # Run tests
 npm run test:all      # All tests
-npm run test:unit     # Unit tests (vitest)
+npm run test          # Unit tests (vitest)
 npm run test:cli      # CLI command tests
 npm run test:integration  # E2E integration tests
 

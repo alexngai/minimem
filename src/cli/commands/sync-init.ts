@@ -73,10 +73,10 @@ export async function syncInitCentral(
   console.log();
   console.log("Next steps:");
   console.log("  1. Initialize sync for a memory directory:");
-  console.log("     minimem sync init --path myproject/");
+  console.log("     minimem sync:init --path myproject/");
   console.log();
   console.log("  2. Or from a different directory:");
-  console.log("     minimem sync init --local ~/my-memories --path mymemories/");
+  console.log("     minimem sync:init --local ~/my-memories --path mymemories/");
 }
 
 /**
@@ -101,7 +101,7 @@ export async function syncInit(options: SyncInitOptions): Promise<void> {
   if (!options.path) {
     exitWithError(
       "--path is required.",
-      "Example: minimem sync init --path myproject/"
+      "Example: minimem sync:init --path myproject/"
     );
   }
 
@@ -112,7 +112,7 @@ export async function syncInit(options: SyncInitOptions): Promise<void> {
   if (!centralRepo) {
     exitWithError(
       "No central repository configured.",
-      "First initialize a central repository: minimem sync init-central ~/memories-repo"
+      "First initialize a central repository: minimem sync:init-central ~/memories-repo"
     );
   }
 
@@ -171,7 +171,7 @@ export async function syncInit(options: SyncInitOptions): Promise<void> {
   };
 
   await saveConfig(memoryDir, localConfig);
-  console.log("  Updated .minimem/config.json with sync settings");
+  console.log("  Updated config.json with sync settings");
 
   // Update registry
   const updatedRegistry = addMapping(registry, {
@@ -211,7 +211,7 @@ export async function syncList(): Promise<void> {
 
   if (!centralRepo) {
     console.log("No central repository configured.");
-    console.log("Run: minimem sync init-central <path>");
+    console.log("Run: minimem sync:init-central <path>");
     return;
   }
 
@@ -224,7 +224,7 @@ export async function syncList(): Promise<void> {
 
   if (registry.mappings.length === 0) {
     console.log("No sync mappings registered.");
-    console.log("Run: minimem sync init --path <name>/");
+    console.log("Run: minimem sync:init --path <name>/");
     return;
   }
 

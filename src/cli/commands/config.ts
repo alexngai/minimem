@@ -91,6 +91,8 @@ async function showConfig(options: ConfigOptions): Promise<void> {
 
   printConfigSection("Hybrid Search", {
     "enabled": mergedConfig.hybrid?.enabled,
+    "fusion": mergedConfig.hybrid?.fusion ?? "rrf",
+    "ftsQueryMode": mergedConfig.hybrid?.ftsQueryMode ?? "or",
     "vectorWeight": mergedConfig.hybrid?.vectorWeight,
     "textWeight": mergedConfig.hybrid?.textWeight,
   });

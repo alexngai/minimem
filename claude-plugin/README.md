@@ -4,11 +4,15 @@ A Claude Code plugin that provides memory capabilities via the minimem semantic 
 
 ## Features
 
-- **MCP Server**: Provides `memory_search` tool for semantic search across memories
+- **MCP Server**: `memory_search` and `memory_get_details` for two-phase semantic
+  search, plus `knowledge_search`, `knowledge_graph`, and `knowledge_path` for
+  knowledge-formatted notes
 - **Memory Skill**: Automatically invoked when storing or recalling information
 - **Commands**:
   - `/minimem:remember <text>` - Store information for later
   - `/minimem:recall <query>` - Search for stored memories
+- **Session Hooks** (opt-in): inject recent memories at session start and log a
+  session marker at session end — see [Session Hooks](#session-hooks)
 
 ## Installation
 
@@ -66,13 +70,35 @@ The memory skill is automatically invoked when you:
 /minimem:recall database decisions
 ```
 
-### Direct MCP Tool
+### Direct MCP Tools
 
 The `memory_search` tool is available for direct use:
 
 ```
 memory_search("api design decisions", maxResults=5)
 ```
+
+For token-efficient recall, use the two-phase flow: `memory_search` with the
+default compact detail level, then `memory_get_details` for the results that
+matter.
+
+### Session Hooks
+
+Two hooks ship with the plugin, **disabled by default**:
+
+- **SessionStart**: searches your memories for recent context and injects the
+  top matches into the session
+- **Stop**: appends a brief session-end marker to today's daily log
+
+Enable them per-directory or globally via minimem config:
+
+```bash
+minimem config --global --set hooks.sessionStart=true
+minimem config --global --set hooks.sessionEnd=true
+```
+
+(Or set `"hooks": { "sessionStart": true, "sessionEnd": true }` in the memory
+directory's `config.json`.)
 
 ## Configuration
 
@@ -123,6 +149,10 @@ claude-plugin/
 ├── commands/
 │   ├── remember.md      # /minimem:remember command
 │   └── recall.md        # /minimem:recall command
+├── hooks/
+│   ├── hooks.json       # Hook registration (SessionStart, Stop)
+│   ├── session-start.sh # Inject recent memories (opt-in)
+│   └── session-end.sh   # Append session marker (opt-in)
 └── README.md            # This file
 ```
 
