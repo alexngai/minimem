@@ -34,6 +34,8 @@ program
   .description("Initialize a memory directory")
   .option("-g, --global", "Use ~/.minimem as global memory directory")
   .option("-f, --force", "Reinitialize even if already initialized")
+  .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, none, auto); skips prompt")
+  .option("-y, --yes", "Accept defaults without prompting (non-interactive)")
   .action(init);
 
 // minimem search <query>

@@ -20,6 +20,7 @@ import {
   resolveStore,
 } from "../../store/manifest.js";
 import { materializeStore } from "../../store/materialize.js";
+import { resolveInitEmbedding } from "../embedding-setup.js";
 
 const MEMORY_TEMPLATE = `# Memory
 
@@ -40,6 +41,10 @@ export type InitOptions = {
   force?: boolean;
   /** Skip initial sync (for testing or when no embedding key is available yet) */
   skipSync?: boolean;
+  /** Preset embedding provider (openai|gemini|local|none|auto); skips prompting */
+  provider?: string;
+  /** Accept defaults without prompting (non-interactive) */
+  yes?: boolean;
 };
 
 export async function init(
@@ -72,11 +77,21 @@ export async function init(
     console.log("  Created MEMORY.md");
   }
 
+  // Resolve embedding provider (prompts interactively when no key is present)
+  const embeddingSetup = await resolveInitEmbedding({
+    provider: options.provider,
+    yes: options.yes,
+  });
+
   // Create config.json directly in memoryDir (contained layout)
   const config = getInitConfig();
+  config.embedding = embeddingSetup.embedding;
   const configPath = path.join(memoryDir, "config.json");
   await fs.writeFile(configPath, JSON.stringify(config, null, 2), "utf-8");
   console.log("  Created config.json");
+  for (const message of embeddingSetup.messages) {
+    console.log(`  ${message}`);
+  }
 
   // Create .gitignore
   const gitignorePath = path.join(memoryDir, ".gitignore");
@@ -110,7 +125,9 @@ async function initialSync(memoryDir: string): Promise<void> {
 
   // Dynamic import to avoid pulling in node:sqlite at module load time
   const { Minimem } = await import("../../minimem.js");
-  let minimem: InstanceType<typeof Minimem> | null = null;
+  // Derive the instance type from create() — Minimem has a private constructor,
+  // so InstanceType<typeof Minimem> is not usable here.
+  let minimem: Awaited<ReturnType<typeof Minimem.create>> | null = null;
 
   try {
     minimem = await Minimem.create(config);

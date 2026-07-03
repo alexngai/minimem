@@ -6,44 +6,52 @@
 
 # minimem
 
-A lightweight, file-based memory system with vector search for AI agents.
+**Agent memory that's just Markdown and one SQLite file. No server, no vector database, no infrastructure.**
 
-Turn your filesystem into a searchable knowledge base. Write memories in Markdown, search them semantically.
+Give any AI agent long-term memory in about 30 seconds. Your memories are plain
+Markdown files you own and can `git` — minimem indexes them into a single local
+SQLite file and serves hybrid semantic search to Claude Code, Codex, Cursor, or
+your own code over MCP.
 
-## Features
+```bash
+npm install -g minimem && minimem init ~/memories
+```
 
-- **File-based storage** - Memories are plain Markdown files you can edit, version with git, and sync anywhere
-- **Semantic search** - Find relevant memories using natural language queries powered by embeddings
-- **Hybrid search** - Combines vector similarity with full-text search (BM25) for better results
-- **Multiple embedding providers** - OpenAI, Google Gemini, or local models via llama.cpp
-- **MCP server** - Integrate with Claude Desktop, Cursor, and other MCP-compatible tools
-- **CLI tool** - Initialize, search, sync, and manage memories from the command line
-- **Multi-directory search** - Search across multiple memory banks in a single query
+That's the whole setup. No Docker, no Postgres, no Pinecone, no daemon to babysit.
+
+## Why minimem
+
+- **Zero infrastructure** - The entire index is one SQLite file (`sqlite-vec` for vectors, FTS5 for keywords). Nothing to host, nothing to run.
+- **Your memory, in plain files** - Memories are Markdown you can read, edit, diff, and version with git. No proprietary store, no lock-in.
+- **Local-first & portable** - Commit the Markdown, `.gitignore` the index, and rebuild it on any machine with `minimem sync`.
+- **Strong hybrid retrieval** - Vector similarity fused with BM25 via reciprocal rank fusion (RRF) — the best-scoring config across the BEIR datasets we tested ([results](docs/RETRIEVAL-EVAL-RESULTS.md)).
+- **Bring your own embeddings** - OpenAI, Gemini, or a fully local model via `llama.cpp` (no API key required). Guided setup picks one for you on `init`.
+- **Drops into your agent** - First-class MCP server for Claude Code, Codex, Cursor, and Claude Desktop, plus a Claude Code plugin — see [integrations](#mcp-server-integration).
 
 ## Installation
 
-```bash
-npm install minimem
-```
-
-Or install globally for CLI usage:
+Install globally for the CLI + MCP server (recommended for most users):
 
 ```bash
 npm install -g minimem
 ```
 
-Requires Node.js 22+ (uses experimental `node:sqlite`).
+Or add it as a library dependency:
+
+```bash
+npm install minimem
+```
+
+Requires Node.js 22+ (uses the built-in `node:sqlite`).
 
 ## Quick Start
 
-### CLI Usage
-
 ```bash
-# Set your embedding API key
-export OPENAI_API_KEY=your-key
-# or: export GOOGLE_API_KEY=your-key
-
-# Initialize a memory directory (creates files, DB, and indexes in one step)
+# Initialize a memory directory. init detects an embedding API key in your
+# environment; if it doesn't find one, it asks how you'd like to search:
+#   • a hosted provider (OpenAI/Gemini),
+#   • a local model (~320 MB, runs offline, no key), or
+#   • keyword-only for now (upgrade anytime).
 minimem init ~/memories
 
 # Add some memories
@@ -55,6 +63,9 @@ minimem search "database decisions" --dir ~/memories
 # Create or update a memory file
 minimem upsert "memory/architecture.md" "# Architecture Notes..." --dir ~/memories
 ```
+
+Prefer non-interactive setup? Pass `--provider` (e.g. `minimem init ~/memories
+--provider local`) or `--yes` to accept the keyword-only default in scripts/CI.
 
 ### Library Usage
 
@@ -318,6 +329,42 @@ Add to Cursor's MCP settings:
     }
   }
 }
+```
+
+### Codex (CLI & IDE)
+
+The fastest way is the Codex CLI, which writes the config for you:
+
+```bash
+codex mcp add minimem --env OPENAI_API_KEY=your-key -- minimem mcp --global
+```
+
+Or add the table to `~/.codex/config.toml` directly (note the snake_case
+`mcp_servers` — a typo here is silently ignored):
+
+```toml
+[mcp_servers.minimem]
+command = "minimem"
+args = ["mcp", "--global"]
+
+[mcp_servers.minimem.env]
+OPENAI_API_KEY = "your-key"
+```
+
+Verify it's live with `codex mcp list`. The CLI and IDE extension share this
+config, so you only set it up once. To scope memory to a single project, use a
+trusted-project `.codex/config.toml` and swap `--global` for
+`--dir /path/to/memories`.
+
+To nudge Codex (or any agent) to actually use the memory tools, add a short
+block to your project's `AGENTS.md`:
+
+```markdown
+## Memory (minimem)
+
+Before starting a task, call `memory_search` to recall relevant prior context.
+When you make a decision or learn something durable, write it to `MEMORY.md`
+(or `memory/YYYY-MM-DD.md`) so it's indexed for next time.
 ```
 
 ### Available MCP Tools
