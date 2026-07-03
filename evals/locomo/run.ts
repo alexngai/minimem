@@ -24,10 +24,6 @@ import { loadLocomo, turnCount } from "./dataset.js";
 import { isRefusal, judgeAnswer } from "./judge.js";
 import { LlmClient } from "./llm.js";
 import { scoreSystem, summarizeCost } from "./metrics.js";
-import { MinimemAloneAdapter } from "./adapters/minimem-alone.js";
-import { CogcoreRetrievalAdapter } from "./adapters/cogcore-retrieval.js";
-import { CogcoreMemoryAdapter } from "./adapters/cogcore-memory.js";
-import { Mem0Adapter } from "./adapters/mem0.js";
 import type {
   LocomoConversation,
   LocomoQuestion,
@@ -126,16 +122,30 @@ function sampleQuestions(
   return out;
 }
 
-function makeAdapter(name: string, llm: LlmClient, args: Args): MemorySystemAdapter {
+/**
+ * Adapters are imported lazily so an arm's process only loads the deps it
+ * actually uses. This matters: the cogcore adapters transitively load
+ * node-llama-cpp's native addon, and having that in (e.g.) the mem0 process —
+ * where it is never used — risked native teardown crashing the run.
+ */
+async function makeAdapter(name: string, llm: LlmClient, args: Args): Promise<MemorySystemAdapter> {
   switch (name) {
-    case "minimem-alone":
+    case "minimem-alone": {
+      const { MinimemAloneAdapter } = await import("./adapters/minimem-alone.js");
       return new MinimemAloneAdapter(llm, { topK: args.topk });
-    case "cogcore-retrieval":
+    }
+    case "cogcore-retrieval": {
+      const { CogcoreRetrievalAdapter } = await import("./adapters/cogcore-retrieval.js");
       return new CogcoreRetrievalAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
-    case "cogcore-memory":
+    }
+    case "cogcore-memory": {
+      const { CogcoreMemoryAdapter } = await import("./adapters/cogcore-memory.js");
       return new CogcoreMemoryAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
-    case "mem0":
+    }
+    case "mem0": {
+      const { Mem0Adapter } = await import("./adapters/mem0.js");
       return new Mem0Adapter(llm, { topK: args.topk });
+    }
     default:
       throw new Error(
         `Unknown system "${name}" (available: minimem-alone, cogcore-retrieval, cogcore-memory, mem0)`,
@@ -148,6 +158,11 @@ async function runSystem(
   conversations: LocomoConversation[],
   args: Args,
   llm: LlmClient,
+  onConversationDone?: (state: {
+    qa: QAResult[];
+    ingestUsage: UsageStats[];
+    judgeUsage: UsageStats[];
+  }) => Promise<void>,
 ): Promise<{ qa: QAResult[]; ingestUsage: UsageStats[]; judgeUsage: UsageStats[] }> {
   const qa: QAResult[] = [];
   const ingestUsage: UsageStats[] = [];
@@ -220,6 +235,10 @@ async function runSystem(
       qa.push(row);
       judgeUsage.push(judgeStat);
     }
+
+    // Checkpoint after each conversation so a late failure never loses a
+    // near-complete (and expensive) run.
+    if (onConversationDone) await onConversationDone({ qa, ingestUsage, judgeUsage });
   }
 
   await adapter.close?.();
@@ -235,10 +254,30 @@ async function main() {
   const conversations = all.slice(0, args.conversations);
 
   const report: Record<string, unknown> = { config: args, systems: {} };
+  const outPath = args.out ? path.resolve(args.out) : undefined;
+  const writeReport = async (): Promise<void> => {
+    if (!outPath) return;
+    await fs.mkdir(path.dirname(outPath), { recursive: true });
+    await fs.writeFile(outPath, JSON.stringify(report, null, 2), "utf-8");
+  };
 
   for (const sysName of args.systems) {
-    const adapter = makeAdapter(sysName, llm, args);
-    const { qa, ingestUsage, judgeUsage } = await runSystem(adapter, conversations, args, llm);
+    const adapter = await makeAdapter(sysName, llm, args);
+    const { qa, ingestUsage, judgeUsage } = await runSystem(
+      adapter,
+      conversations,
+      args,
+      llm,
+      async ({ qa: q, ingestUsage: iu, judgeUsage: ju }) => {
+        // Checkpoint: persist partial results after every conversation.
+        (report.systems as Record<string, unknown>)[sysName] = {
+          score: scoreSystem(sysName, q, iu),
+          judgeCost: summarizeCost(ju),
+          qa: q,
+        };
+        await writeReport();
+      },
+    );
     const score = scoreSystem(sysName, qa, ingestUsage);
     const judgeCost = summarizeCost(judgeUsage);
 
@@ -282,10 +321,8 @@ async function main() {
     );
   }
 
-  if (args.out) {
-    const outPath = path.resolve(args.out);
-    await fs.mkdir(path.dirname(outPath), { recursive: true });
-    await fs.writeFile(outPath, JSON.stringify(report, null, 2), "utf-8");
+  if (outPath) {
+    await writeReport();
     process.stdout.write(`\nWrote ${outPath}\n`);
   }
 }
