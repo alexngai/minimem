@@ -74,13 +74,45 @@ evals/locomo/
 └── cache/         # dataset cache (gitignored)
 ```
 
+## Running
+
+```bash
+# load Azure GPT-5.5 creds, then:
+npx tsx evals/locomo/run.ts --conversations 1 --questions 30 --topk 8 \
+  --out evals/locomo/results/dryrun.json
+```
+
+Flags: `--conversations N`, `--questions N` (0 = all, stratified sample), `--systems a,b`, `--topk N`, `--seed N`, `--out path`.
+
+## Dry-run findings (conv-26, 30 stratified Q, minimem-alone)
+
+| Metric | Value |
+|---|---|
+| Overall accuracy (excl. adversarial) | 62.5% (15/24), 95% CI [41.7, 79.2] |
+| single-hop | 100% (6/6) |
+| open-domain | 83.3% (5/6) |
+| temporal | 66.7% (4/6) |
+| **multi-hop** | **0% (0/6)** |
+| adversarial (refusal) | 0/6 |
+| Cost | ~827 tok/q (594 answer + 233 judge); completion ~59 tok/call |
+
+Takeaways:
+- **Token cost is trivial:** full LOCOMO ≈ 1.64M tok/arm, ~6.6M tokens for 4 arms.
+- **Wall-clock is the constraint:** ~7s/call sequential → the full 4-arm run (~15.9k calls) is ~30h. **The runner needs request concurrency before the full run.**
+- **multi-hop 0%** is the retrieval-only ceiling — the gap cognitive-core's extraction/knowledge layer is expected to close. This is the baseline the `minimem+cogcore` arm must beat.
+- Adversarial refusal is low in `natural` answer mode; may need a refusal-aware prompt for category 5.
+
 ## Status
 
 - [x] Dataset loader + cache, verified against real data
 - [x] Normalized types + adapter/result contracts
 - [x] Metrics (accuracy, cost, bootstrap CIs)
-- [ ] Adapters (minimem+cogcore, mem0, letta, minimem-alone)
-- [ ] Judge + human-label validation
-- [ ] Runner/CLI + published results
+- [x] Judge (mem0 J-judge, verbatim) + answer prompt
+- [x] Azure GPT-5.5 client (reasoning-model aware, usage accounting)
+- [x] `minimem-alone` adapter + runner + **dry run** (real cost estimate)
+- [ ] Add request concurrency to the runner (wall-clock blocker)
+- [ ] Adapters: `minimem+cogcore`, `mem0`, `letta`
+- [ ] Human-label validation of the judge
+- [ ] Full 10-conversation run + published results (JSON+MD)
 
-Next gate: a **1-conversation dry run** (minimem+cogcore arm only) to produce a real token/cost estimate before committing to the full run.
+Next gate: add concurrency, then wire the remaining arms.
