@@ -26,6 +26,7 @@ import { LlmClient } from "./llm.js";
 import { scoreSystem, summarizeCost } from "./metrics.js";
 import { MinimemAloneAdapter } from "./adapters/minimem-alone.js";
 import { CogcoreRetrievalAdapter } from "./adapters/cogcore-retrieval.js";
+import { CogcoreMemoryAdapter } from "./adapters/cogcore-memory.js";
 import type {
   LocomoConversation,
   LocomoQuestion,
@@ -130,9 +131,11 @@ function makeAdapter(name: string, llm: LlmClient, args: Args): MemorySystemAdap
       return new MinimemAloneAdapter(llm, { topK: args.topk });
     case "cogcore-retrieval":
       return new CogcoreRetrievalAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
+    case "cogcore-memory":
+      return new CogcoreMemoryAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
     default:
       throw new Error(
-        `Unknown system "${name}" (available: minimem-alone, cogcore-retrieval)`,
+        `Unknown system "${name}" (available: minimem-alone, cogcore-retrieval, cogcore-memory)`,
       );
   }
 }
@@ -235,18 +238,19 @@ async function main() {
       `Judge cost:  ${judgeCost.meanTokens.toFixed(0)} tok/q, latency p50 ${judgeCost.latencyP50Ms.toFixed(0)}ms\n`,
     );
 
-    // ---- full-run extrapolation ----
-    const scoredPerConv = 1540 / 10; // LOCOMO scored (non-adversarial) QA per conversation
+    // ---- full-run extrapolation (answer + judge + amortized ingest) ----
     const totalPerConv = 1986 / 10;
     const meanAnsTok = score.answerCost.meanTokens;
     const meanJudgeTok = judgeCost.meanTokens;
+    const meanIngestTokPerConv = score.ingestCost.meanTokens; // 0 for non-extraction arms
     const perQ = meanAnsTok + meanJudgeTok;
-    const fullTokensOneArm = perQ * totalPerConv * 10;
+    const fullTokensOneArm = perQ * totalPerConv * 10 + meanIngestTokPerConv * 10;
     process.stdout.write(
-      `\n[extrapolation] mean ${perQ.toFixed(0)} tok/q (answer+judge). ` +
-        `Full LOCOMO (1986 QA) ≈ ${(fullTokensOneArm / 1e6).toFixed(2)}M tok/arm; ` +
-        `4 arms ≈ ${((fullTokensOneArm * 4) / 1e6).toFixed(2)}M tok. ` +
-        `(scored QA/conv ~${scoredPerConv})\n`,
+      `\n[extrapolation] ${perQ.toFixed(0)} tok/q (answer+judge)` +
+        (meanIngestTokPerConv > 0
+          ? ` + ${(meanIngestTokPerConv / 1000).toFixed(0)}k ingest tok/conv`
+          : "") +
+        `. Full LOCOMO (1986 QA) ≈ ${(fullTokensOneArm / 1e6).toFixed(2)}M tok for this arm.\n`,
     );
     process.stdout.write(
       `[llm totals] calls=${llm.totals.calls} prompt=${llm.totals.promptTokens} completion=${llm.totals.completionTokens} total=${llm.totals.totalTokens}\n`,

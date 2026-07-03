@@ -112,7 +112,7 @@ Takeaways:
 - [x] `minimem-alone` adapter + runner + **dry run** (real cost estimate)
 - [x] Bounded-concurrency question pool (`--concurrency`, ~6-7x speedup)
 - [x] `cogcore-retrieval` adapter (cognitive-core KnowledgeBank + injected minimem SearchProvider, BM25 or local-embedding hybrid)
-- [ ] `cogcore-memory` adapter (LLM extraction → entity consolidation, playbooks off)
+- [x] `cogcore-memory` adapter (GPT-5.5 extraction → heuristic entity consolidation → 3-tier retrieval, playbooks off)
 - [ ] `mem0`, `letta` adapters
 - [ ] Human-label validation of the judge
 - [ ] Full 10-conversation run + published results (JSON+MD)
@@ -130,4 +130,18 @@ than let it use its own bundled minimem, we inject the repo's minimem as
 cognitive-core's `SearchProvider` (`MinimemSearchProvider`), so the arm is
 genuinely "this minimem + cognitive-core".
 
-Next gate: build `cogcore-memory` (extraction arm), then run the ladder.
+### `cogcore-memory` mechanism & cost
+
+Ingest runs one GPT-5.5 extraction call per session → entity-tagged facts →
+`addObservation`. Then `KnowledgeBank.defragment()` (heuristic, no LLM) groups
+observations by entity tag into cross-session **entity notes**, which power
+tier-2 retrieval — the intended multi-hop mechanism.
+
+Consolidated entity notes can be large, so retrieved excerpts are capped
+(~1200 chars each) to bound answer-prompt cost. Profile: ~44k ingest tok/conv +
+~1.1–1.4k tok/q → **~3.2M tok/arm** for full LOCOMO.
+
+Note: extraction uses a reasoning model with no fixed seed, so ingested facts
+vary run-to-run; multi-conversation runs + bootstrap CIs absorb this.
+
+Next gate: `mem0` + `letta` adapters, then the full ladder run.
