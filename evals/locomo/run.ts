@@ -41,12 +41,32 @@ interface Args {
   concurrency: number;
   embeddings: "local" | "none";
   out?: string;
+  /** Skip conversations already present in --out (mop up partial runs). */
+  resume: boolean;
 }
 
 /**
  * Run `fn` over `items` with at most `limit` in flight. Results are returned in
  * input order; failures reject the whole batch.
  */
+/** Reject if `p` doesn't settle within `ms` (frees the concurrency tail from a
+ * dropped/hung request; the caller's try/catch turns it into an errored row). */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout after ${ms}ms: ${label}`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function mapPool<T, R>(
   items: T[],
   limit: number,
@@ -80,6 +100,7 @@ function parseArgs(argv: string[]): Args {
     concurrency: Number(get("--concurrency") ?? 6),
     embeddings: (get("--embeddings") ?? "local") === "none" ? "none" : "local",
     out: get("--out"),
+    resume: argv.includes("--resume"),
   };
 }
 
@@ -185,8 +206,12 @@ async function runSystem(
     const rows = await mapPool(questions, args.concurrency, async (q) => {
       const t0 = Date.now();
       try {
-        const ans = await adapter.answer(q, conv);
-        const judged = await judgeAnswer(llm, q.question, q.answer, ans.text);
+        const ans = await withTimeout(adapter.answer(q, conv), 180000, `answer ${q.id}`);
+        const judged = await withTimeout(
+          judgeAnswer(llm, q.question, q.answer, ans.text),
+          120000,
+          `judge ${q.id}`,
+        );
         const judgeStat: UsageStats = { latencyMs: Date.now() - t0, totalTokens: judged.judgeTokens };
 
         // Adversarial: correct behavior is refusal; the J-judge scores against the
@@ -245,10 +270,34 @@ async function runSystem(
   return { qa, ingestUsage, judgeUsage };
 }
 
+async function loadResume(
+  outPath: string | undefined,
+  sysName: string,
+): Promise<{ qa: QAResult[]; ingestUsage: UsageStats[]; doneIds: Set<string> } | null> {
+  if (!outPath) return null;
+  try {
+    const prev = JSON.parse(await fs.readFile(outPath, "utf-8")) as {
+      systems?: Record<string, { qa?: QAResult[]; ingestUsage?: UsageStats[] }>;
+    };
+    const qa = prev.systems?.[sysName]?.qa ?? [];
+    const ingestUsage = prev.systems?.[sysName]?.ingestUsage ?? [];
+    const doneIds = new Set(qa.map((r) => r.sampleId));
+    return { qa, ingestUsage, doneIds };
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const llm = new LlmClient();
   process.stderr.write(`[locomo] deployment=${llm.deployment}\n`);
+
+  // A pending promise does not keep Node's event loop alive; if a request's
+  // socket is dropped at the concurrency tail its promise never settles and the
+  // loop can empty, exiting 0 mid-run. This timer keeps the loop alive so the
+  // per-question timeouts (see withTimeout) can fire and the run completes.
+  const keepAlive = setInterval(() => {}, 1 << 30);
 
   const all = await loadLocomo();
   const conversations = all.slice(0, args.conversations);
@@ -262,26 +311,44 @@ async function main() {
   };
 
   for (const sysName of args.systems) {
+    // Resume: keep conversations already scored in a prior (partial) run.
+    const resumed = args.resume ? await loadResume(outPath, sysName) : null;
+    const seedQa = resumed?.qa ?? [];
+    const seedIngest = resumed?.ingestUsage ?? [];
+    const todo = resumed
+      ? conversations.filter((c) => !resumed.doneIds.has(c.sampleId))
+      : conversations;
+    if (resumed) {
+      process.stderr.write(
+        `[${sysName}] resume: ${resumed.doneIds.size} conversations already done, ${todo.length} to go\n`,
+      );
+    }
+
     const adapter = await makeAdapter(sysName, llm, args);
-    const { qa, ingestUsage, judgeUsage } = await runSystem(
+    const { qa: newQa, ingestUsage: newIngest, judgeUsage } = await runSystem(
       adapter,
-      conversations,
+      todo,
       args,
       llm,
       async ({ qa: q, ingestUsage: iu, judgeUsage: ju }) => {
-        // Checkpoint: persist partial results after every conversation.
+        // Checkpoint: persist partial results (resumed + new) after every conversation.
+        const mergedQa = [...seedQa, ...q];
+        const mergedIngest = [...seedIngest, ...iu];
         (report.systems as Record<string, unknown>)[sysName] = {
-          score: scoreSystem(sysName, q, iu),
+          score: scoreSystem(sysName, mergedQa, mergedIngest),
           judgeCost: summarizeCost(ju),
-          qa: q,
+          qa: mergedQa,
+          ingestUsage: mergedIngest,
         };
         await writeReport();
       },
     );
+    const qa = [...seedQa, ...newQa];
+    const ingestUsage = [...seedIngest, ...newIngest];
     const score = scoreSystem(sysName, qa, ingestUsage);
     const judgeCost = summarizeCost(judgeUsage);
 
-    (report.systems as Record<string, unknown>)[sysName] = { score, judgeCost, qa };
+    (report.systems as Record<string, unknown>)[sysName] = { score, judgeCost, qa, ingestUsage };
 
     // ---- console report ----
     process.stdout.write(`\n=== ${sysName} ===\n`);
@@ -325,6 +392,8 @@ async function main() {
     await writeReport();
     process.stdout.write(`\nWrote ${outPath}\n`);
   }
+
+  clearInterval(keepAlive);
 }
 
 main().catch((err) => {
