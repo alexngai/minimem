@@ -33,8 +33,10 @@ import type { LlmClient } from "../llm.js";
 export interface CogcoreRetrievalOptions {
   topK?: number;
   scratchRoot?: string;
-  /** "local" enables minimem hybrid (BM25 + local embeddings); "none" = BM25. */
+  /** "local" = minimem hybrid; "nomic" = Ollama nomic-embed-text; "none" = BM25. */
   embeddings?: Embeddings;
+  /** Distill each question to keywords via the LLM before retrieval. */
+  keywordExpansion?: boolean;
 }
 
 export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
@@ -42,14 +44,22 @@ export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
   protected readonly topK: number;
   protected readonly scratchRoot: string;
   protected readonly embeddings: Embeddings;
+  protected readonly keywordExpansion: boolean;
   protected readonly llm: LlmClient;
   protected state: CogcoreState | null = null;
 
   constructor(llm: LlmClient, opts?: CogcoreRetrievalOptions) {
     this.llm = llm;
-    this.topK = opts?.topK ?? 8;
+    this.topK = opts?.topK ?? 16;
     this.scratchRoot = opts?.scratchRoot ?? defaultScratchRoot();
     this.embeddings = opts?.embeddings ?? "local";
+    this.keywordExpansion = opts?.keywordExpansion ?? false;
+  }
+
+  /** LLM hook for keyword expansion (returns only the completion text). */
+  protected keywordHook(): ((prompt: string) => Promise<string>) | undefined {
+    if (!this.keywordExpansion) return undefined;
+    return async (prompt: string) => (await this.llm.chat([{ role: "user", content: prompt }])).text;
   }
 
   async ingest(conversation: LocomoConversation): Promise<UsageStats> {
@@ -78,7 +88,7 @@ export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
       }
     }
 
-    await indexAndInject(state, this.embeddings, this.topK);
+    await indexAndInject(state, this.embeddings, this.topK, this.keywordHook());
     return { latencyMs: Date.now() - started, totalTokens: 0 };
   }
 

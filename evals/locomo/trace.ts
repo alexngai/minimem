@@ -37,7 +37,8 @@ interface TraceArgs {
   topk: number;
   seed: number;
   concurrency: number;
-  embeddings: "local" | "none";
+  embeddings: "local" | "none" | "nomic";
+  keywordExpansion: boolean;
   out: string;
 }
 
@@ -73,9 +74,14 @@ function parseArgs(argv: string[]): TraceArgs {
     topk: Number(get("--topk") ?? 8),
     seed: Number(get("--seed") ?? 1),
     concurrency: Number(get("--concurrency") ?? 6),
-    embeddings: (get("--embeddings") ?? "local") === "none" ? "none" : "local",
+    embeddings: parseEmbeddings(get("--embeddings")),
+    keywordExpansion: argv.includes("--keyword-expansion"),
     out: get("--out") ?? "evals/locomo/results/trace",
   };
+}
+
+function parseEmbeddings(v: string | undefined): "local" | "none" | "nomic" {
+  return v === "none" ? "none" : v === "nomic" ? "nomic" : "local";
 }
 
 function mulberry32(seed: number): () => number {
@@ -149,11 +155,19 @@ async function makeAdapter(
     }
     case "cogcore-retrieval": {
       const { CogcoreRetrievalAdapter } = await import("./adapters/cogcore-retrieval.js");
-      return new CogcoreRetrievalAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
+      return new CogcoreRetrievalAdapter(llm, {
+        topK: args.topk,
+        embeddings: args.embeddings,
+        keywordExpansion: args.keywordExpansion,
+      });
     }
     case "cogcore-memory": {
       const { CogcoreMemoryAdapter } = await import("./adapters/cogcore-memory.js");
-      return new CogcoreMemoryAdapter(llm, { topK: args.topk, embeddings: args.embeddings });
+      return new CogcoreMemoryAdapter(llm, {
+        topK: args.topk,
+        embeddings: args.embeddings,
+        keywordExpansion: args.keywordExpansion,
+      });
     }
     case "mem0": {
       const { Mem0Adapter } = await import("./adapters/mem0.js");

@@ -79,7 +79,12 @@ export function ensureMemoryIndexSchema(params: {
           `  source UNINDEXED,\n` +
           `  model UNINDEXED,\n` +
           `  start_line UNINDEXED,\n` +
-          `  end_line UNINDEXED\n` +
+          `  end_line UNINDEXED,\n` +
+          // Porter stemming (over the default unicode61 tokenizer) so morphological
+          // variants match: a query for "pets"/"names" hits notes saying "pet"/"named".
+          // Applied to both indexing and query terms by FTS5. Requires a reindex to
+          // take effect on pre-existing databases.
+          `  tokenize = 'porter unicode61'\n` +
           `);`,
       );
       ftsAvailable = true;

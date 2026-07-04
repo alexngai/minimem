@@ -168,6 +168,109 @@ seed=1, topk=8, local embeddings):**
   in a single process accumulates native embedding/exit-listener resources (~14 minimem
   instances) and crashed the combined run mid-way; per-arm resume completed cleanly.
 
+## Sample-iteration diagnostic — why cogcore trails mem0 (conv-26, 24 Q)
+
+Ran a per-question failure taxonomy on the deterministic conv-26 sample (extraction cached).
+Split cogcore-memory's 8 losses by whether cogcore-retrieval got them right:
+
+| bucket | count | meaning |
+|---|---|---|
+| memory wrong, **retrieval right** | 6 | **extraction cost** — detail existed in raw turns, extraction dropped it |
+| **both** wrong | 2 | shared multi-hop recall / embedding ceiling |
+| retrieval wrong, memory right | 5 | index/boost consolidation genuinely helps (abstract art, "since 2016", "10 yrs ago") |
+
+**Iteration 1 — extraction fidelity (v2 prompt, cache v2):** preserve concrete modifiers,
+exact temporal phrasing, emotions; split enumerations into atomic facts. Result: the dropped
+details ("bailey", "violin", "friday", "universe", "conference", "got hurt") are **now in the
+store** (743 facts, up from enumeration-splitting). **But aggregate accuracy did not move
+(16/24).** The bottleneck **moved to retrieval**: facts present, not surfaced.
+
+**Iteration 2 — IDF-weighted entity boost (cognitive-core):** the flat +0.15 boost floods the
+top-k with the dominant speaker's generic facts. Made it `boostWeight / log2(links+2)` so
+ubiquitous entities fade. Tests green. **But mechanically unchanged on the target case:**
+"What are Melanie's pets' names?" still retrieves 0 pet notes in top-16 — the pet facts
+("Melanie has a pet named Luna/Oliver", "another cat named Bailey") aren't in the semantic
+pool at all. cogcore-retrieval (dense raw turns) finds them; the 743 thin atomic facts +
+weak local embeddings can't.
+
+**Conclusions:**
+1. **The mem0-style write technique (index consolidation + boost) is winning its cases (5 wins),
+   not the problem.** The ceiling is **retrieval precision over the atomic-fact store**, and it
+   is a *shared* ceiling — cogcore-retrieval (raw hybrid) also trails mem0 → embedding quality
+   (minimem local model vs mem0's `nomic-embed-text`) is the prime suspect.
+2. **Enumeration-splitting helped completeness but hurt retrievability** — dense notes match
+   weak embeddings better than many thin facts.
+3. **24 Q cannot A/B ±1–2pp changes.** GPT-5.5 is a reasoning model (no `temperature`), so the
+   answerer is irreducibly noisy — retrieval arm swung 17→18→16 with no code change. Reliable
+   sample A/B needs ≥3–5 convs (~120–150 Q) + bootstrap CIs.
+
+**Recommended next levers (validate on a mid sample, not 24 Q, before the full 1540 run):**
+- **A.** Wire the already-built `KeywordExpandingSearchProvider` (WS2d) into the cogcore arms —
+  distills the question to keywords, lifting lexical recall for thin atomic facts.
+- **B.** Swap minimem's embedding model (or use the same `nomic-embed-text` as mem0) — shared
+  ceiling for **both** arms; likely the biggest single lever.
+- **C.** Don't over-split enumerations — keep a combined note alongside atomic facts.
+- **D.** (mem0 parity) dedup / UPDATE to shrink the store and cut distractors.
+
+## ROOT CAUSE FOUND — FTS had no stemming ("pets" ≠ "pet")
+
+Isolated the retrieval failure with a standalone probe (`probe-retrieval.ts`) that reconstructs
+the bank from the extraction cache and queries minimem directly, bypassing the noisy answer/judge:
+
+| query | pet-relevant in top-16 |
+|---|---|
+| `"Luna"` | 5/5 (incl. the pet fact `k-00279`) — **indexing is fine** |
+| `"Melanie pets cats dogs names Luna Oliver Bailey"` | 13/16 — **content is retrievable** |
+| `"What are Melanie's pets' names?"` (the actual question) | **0/16** |
+
+The note says "Melanie has a pet named Luna"; the question says "pet**s**' **names**". minimem's
+FTS5 table used the **default tokenizer with no stemming**, so `pets ≠ pet` and `names ≠ named` —
+the only matching token was "Melanie", which floods. Not an embedding, boost, or extraction
+problem — a **lexical-stemming** gap that capped **both** arms.
+
+**Fix (`src/db/schema.ts`):** `tokenize = 'porter unicode61'` on the FTS5 table. Query and index
+terms are both Porter-stemmed, so morphological variants match. (Requires a reindex for
+pre-existing DBs; the eval builds fresh indexes each run.)
+
+**Impact (conv-26, 24 Q, topk 16, local embeddings) — before → after stemming:**
+
+| arm | before | after |
+|---|---|---|
+| cogcore-retrieval | 16–18/24 | **21/24 (87.5%)** |
+| cogcore-memory | 16/24 | **18/24 (75.0%)** |
+
+The pets question now answers "Luna, Oliver, and Bailey" on **both** arms. This is a minimem-core
+retrieval improvement (helps every consumer, not just the eval). Keyword expansion (A) and the
+`nomic` embedding option (B) are now wired and available (`--keyword-expansion`,
+`--embeddings nomic`) but are secondary to stemming; evaluate whether they add anything on top
+via the mid sample before spending them on the full run.
+
+### Mid-sample A/B with stemming (3 convs = conv-26/30/41, 94 non-adversarial QA, topk 16, local emb.)
+
+Run one arm per process (`mid-stem.json` = retrieval, `mid-stem-ccm.json` = memory; the combined
+one-process run crashed on the memory arm's embedding startup — the documented resource issue).
+
+| metric | cogcore-retrieval | cogcore-memory |
+|---|---|---|
+| overall (excl-adv) | **79.8% (75/94)** CI[71.3–87.2] | **71.3% (67/94)** CI[61.7–80.9] |
+| single_hop | 88.5% | 80.8% |
+| multi_hop | 65.4% | 57.7% |
+| temporal | 92.3% | 84.6% |
+| open_domain | 68.8% | 56.3% |
+
+**Read-out:**
+- Stemming lifted **both** arms. `cogcore-retrieval` at **79.8%** is competitive with / above the
+  mem0 OSS number (78.2% full-run) — on a different sample, but its CI comfortably spans it.
+- `cogcore-memory` (the extraction arm, closest to mem0's write technique) still trails its own
+  retrieval arm on **every** category (~8pp). This is the **extraction recall tax**: compressing
+  dense turns into atomic facts loses verbatim detail that LOCOMO rewards. The mem0-style
+  index/boost helps ranking but can't recover detail the extractor dropped or split too thin.
+- Takeaway for launch: **raw-turn structured hybrid retrieval + stemming is the strongest,
+  simplest arm.** Closing the memory arm's gap to mem0 would need mem0-parity write work
+  (ADD/UPDATE dedup, less aggressive enumeration splitting) — a separate investment.
+- Next: full 1540-QA natural-distribution ladder (retrieval + memory + mem0) with stemming for
+  the headline. Expect retrieval ≈ or > mem0; memory somewhat behind.
+
 ## mem0's "91.6 LoCoMo" vs our measured 78.2 — reconciling the gap
 
 Source: mem0 blog "The Token-Efficient Memory Algorithm" (Apr 16 2026).
@@ -210,3 +313,77 @@ cache extracted facts (+ the built KnowledgeBank note dir) to disk keyed by
 `sampleId`, and reuse across runs so answer-side changes (topK, entity ranking,
 entity tier on/off, hybrid context) become clean single-variable A/Bs. Only then
 re-test levers B and C for memory.
+
+## Recall diagnostic — where do the misses come from? (conv-26, 24 Q, seed=1)
+
+Retrieval-only, deterministic (no answer/judge LLM). Attributes each miss to
+retrieval vs extraction by checking whether the **gold evidence turns** are
+actually surfaced. Tool: `recall-diag.ts`. Report: `results/recall-diag.md`.
+
+**Recall of gold evidence**
+
+| k | ccr turn-recall | ccr session-recall | ccm session-recall |
+|---|---|---|---|
+| 8 | 62.5% | 83.3% | 75.0% |
+| 16 | 75.0% | 100% | 79.2% |
+| 24 | 79.2% | 100% | 79.2% |
+
+- **Extraction coverage** = 83.9% (26/31 evidence sessions produced ≥1 fact).
+  ~16% of evidence is **dropped at extraction** — a hard ceiling for
+  `cogcore-memory` regardless of retrieval/topK.
+
+**Attribution @k=8 (retrieval hit × answer correctness)**
+
+| arm | retrieved✓ & wrong | retrieved✓ & right | retrieved✗ & wrong | retrieved✗ & right |
+|---|---|---|---|---|
+| cogcore-memory | 6 | 12 | 2 | 4 |
+| cogcore-retrieval | 3 | 12 | 4 | 5 |
+
+- `cogcore-retrieval` → **retrieval-bound**: 4/7 misses are the exact evidence
+  turn falling outside top-8; turn-recall +12.5pp at k=16.
+- `cogcore-memory` → **extraction-bound**: 6/8 misses have the right session
+  retrieved but the answer still wrong (lossy fact), + zero-fact sessions.
+  Session-recall plateaus ~79% — more k barely helps.
+
+## Fix + retest: topK 8 → 16 (same sample, 0.3.0 code)
+
+| arm | topK=8 | topK=16 | Δ | drivers |
+|---|---|---|---|---|
+| cogcore-retrieval | 70.8% | **83.3%** | +12.5pp | multi_hop 3→5, temporal 3→4 |
+| cogcore-memory | 66.7% | **75.0%** | +8.3pp | single_hop 3→5, multi_hop 2→4 |
+
+Matches the recall prediction exactly (ccr turn-recall +12.5pp @k=16). Baked
+`topK=16` as the default for both cogcore adapters. **Next lever (ccm ceiling):
+extraction lossiness** — richer per-turn facts + reducing zero-fact sessions
+(the retrieved✓-but-wrong bucket), which topK cannot fix.
+
+## Extraction ceiling fix: chunked extraction (cache v2 → v3)
+
+Root cause of the 16% coverage gap: GPT-5.5 is a **reasoning** model, so reasoning
+tokens count against `max_completion_tokens` (4096). On the *largest* sessions
+the budget was exhausted before the JSON finished → truncated output → `parseFacts`
+(which required a closing `]`) returned `[]`. The 3 biggest sessions of conv-26
+(8=39, 14=35, 16=20 turns) each extracted **zero facts**.
+
+Fix (adapter, cache v3):
+- **Chunk long sessions** into ≤10-turn windows; extract per chunk; union facts
+  per session. Bounds output so it never truncates, and improves per-turn
+  thoroughness.
+- **Salvage-parse**: recover complete `{...}` objects from a truncated array
+  (string/escape-aware brace scan) as defense-in-depth.
+
+Result on conv-26 (24 Q, seed=1, topK=16):
+
+| metric | v2 | v3 |
+|---|---|---|
+| zero-fact sessions | 8, 14, 16 | **none** |
+| total facts | 743 | **1061** (+43%) |
+| extraction coverage (evidence sessions w/ ≥1 fact) | 83.9% | **100%** |
+| ccm session-recall@8 | 75.0% | **95.8%** |
+| **ccm sample accuracy** | 75.0% | **95.8%** (multi_hop 4→6, temporal 4→6, single_hop 5→6) |
+
+Attribution @k=8 flipped to 22/24 "retrieved✓ & right" — the lossy
+extraction bucket is essentially eliminated. Net on this sample: ccm went
+66.7% (topk8/v2) → **95.8%** (topk16/v3). Single conversation (n=24) so the
+absolute number is optimistic/noisy, but the mechanism is real; full-ladder
+run (topK=16 + v3) in progress for the headline.

@@ -10,7 +10,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { KnowledgeBank, MinimemSearchProvider } from "cognitive-core/memory";
+import {
+  KnowledgeBank,
+  KeywordExpandingSearchProvider,
+  MinimemSearchProvider,
+} from "cognitive-core/memory";
 import { KnowledgeBankConfigSchema } from "cognitive-core";
 
 import { Minimem } from "../../../src/index.js";
@@ -18,7 +22,44 @@ import { buildAnswerPrompt, type RetrievedExcerpt } from "../judge.js";
 import type { LlmClient } from "../llm.js";
 import type { AnswerResult, LocomoQuestion } from "../types.js";
 
-export type Embeddings = "local" | "none";
+/**
+ * Retrieval embedding backend for the cogcore arms:
+ * - `local`  — minimem's node-llama-cpp model (embeddinggemma-300M), hybrid RRF
+ * - `nomic`  — Ollama `nomic-embed-text` via the OpenAI-compatible endpoint
+ *              (apples-to-apples with the mem0 arm), hybrid RRF
+ * - `none`   — BM25 full-text only
+ */
+export type Embeddings = "local" | "none" | "nomic";
+
+/** LLM hook for keyword-expanding retrieval (question → search keywords). */
+export type CompletionFn = (prompt: string) => Promise<string>;
+
+const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
+
+type MinimemArgs = Parameters<typeof Minimem.create>[0];
+
+function embeddingConfig(embeddings: Embeddings): Pick<MinimemArgs, "embedding" | "hybrid"> {
+  if (embeddings === "none") {
+    return {
+      embedding: { provider: "none" },
+      hybrid: { enabled: true, vectorWeight: 0, textWeight: 1, ftsQueryMode: "or" },
+    };
+  }
+  if (embeddings === "nomic") {
+    return {
+      embedding: {
+        provider: "openai",
+        model: "nomic-embed-text",
+        openai: { baseUrl: `${OLLAMA_URL}/v1`, apiKey: "ollama" },
+      },
+      hybrid: { enabled: true, fusion: "rrf" },
+    };
+  }
+  return {
+    embedding: { provider: "local" },
+    hybrid: { enabled: true, fusion: "rrf" },
+  };
+}
 
 export interface CogcoreState {
   dir: string;
@@ -45,25 +86,26 @@ export async function indexAndInject(
   state: CogcoreState,
   embeddings: Embeddings,
   topK: number,
+  /** When set, wrap retrieval in a keyword-expansion pass (question → keywords). */
+  keywordExpansion?: CompletionFn,
 ): Promise<void> {
   const mm = await Minimem.create({
     memoryDir: state.memoryDir,
     dbPath: path.join(state.dir, "index.db"),
-    embedding: embeddings === "local" ? { provider: "local" } : { provider: "none" },
-    hybrid:
-      embeddings === "local"
-        ? { enabled: true, fusion: "rrf" }
-        : { enabled: true, vectorWeight: 0, textWeight: 1, ftsQueryMode: "or" },
+    ...embeddingConfig(embeddings),
     query: { maxResults: topK, minScore: 0 },
     watch: { enabled: false },
   });
   await mm.sync({ reason: "ingest" });
   state.mm = mm;
 
+  const provider = new MinimemSearchProvider({
+    search: (query, options) => mm.search(query, { ...options, skipStaleCheck: true }),
+  });
   state.kb.setSearchProvider(
-    new MinimemSearchProvider({
-      search: (query, options) => mm.search(query, { ...options, skipStaleCheck: true }),
-    }),
+    keywordExpansion
+      ? new KeywordExpandingSearchProvider(provider, keywordExpansion)
+      : provider,
   );
 }
 
