@@ -24,6 +24,7 @@ import { Memory } from "mem0ai/oss";
 
 import { buildAnswerPrompt, type RetrievedExcerpt } from "../judge.js";
 import type {
+  AnswerResult,
   LocomoConversation,
   LocomoQuestion,
   LocomoSession,
@@ -174,7 +175,7 @@ export class Mem0Adapter implements MemorySystemAdapter {
     };
   }
 
-  async answer(question: LocomoQuestion): Promise<{ text: string } & UsageStats> {
+  async answer(question: LocomoQuestion): Promise<AnswerResult> {
     if (!this.memory) throw new Error("ingest() must run before answer()");
 
     const res = await this.memory.search(question.question, {
@@ -189,7 +190,7 @@ export class Mem0Adapter implements MemorySystemAdapter {
 
     const prompt = buildAnswerPrompt(question, excerpts);
     const { text, usage } = await this.llm.chat([{ role: "user", content: prompt }]);
-    return { text: text.trim(), ...usage };
+    return { text: text.trim(), retrieved: excerpts, ...usage };
   }
 
   async reset(): Promise<void> {

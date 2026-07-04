@@ -14,6 +14,7 @@ import path from "node:path";
 import { Minimem } from "../../../src/index.js";
 import { buildAnswerPrompt, type RetrievedExcerpt } from "../judge.js";
 import type {
+  AnswerResult,
   LocomoConversation,
   LocomoQuestion,
   MemorySystemAdapter,
@@ -90,7 +91,7 @@ export class MinimemAloneAdapter implements MemorySystemAdapter {
 
   async answer(
     question: LocomoQuestion,
-  ): Promise<{ text: string } & UsageStats> {
+  ): Promise<AnswerResult> {
     if (!this.mm) throw new Error("ingest() must run before answer()");
 
     const hits = await this.mm.search(question.question, {
@@ -111,7 +112,7 @@ export class MinimemAloneAdapter implements MemorySystemAdapter {
 
     const prompt = buildAnswerPrompt(question, excerpts);
     const { text, usage } = await this.llm.chat([{ role: "user", content: prompt }]);
-    return { text: text.trim(), ...usage };
+    return { text: text.trim(), retrieved: excerpts, ...usage };
   }
 
   async reset(): Promise<void> {

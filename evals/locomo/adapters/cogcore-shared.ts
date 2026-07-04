@@ -16,7 +16,7 @@ import { KnowledgeBankConfigSchema } from "cognitive-core";
 import { Minimem } from "../../../src/index.js";
 import { buildAnswerPrompt, type RetrievedExcerpt } from "../judge.js";
 import type { LlmClient } from "../llm.js";
-import type { LocomoQuestion, UsageStats } from "../types.js";
+import type { AnswerResult, LocomoQuestion } from "../types.js";
 
 export type Embeddings = "local" | "none";
 
@@ -69,8 +69,51 @@ export async function indexAndInject(
 
 /** Retrieve relevant knowledge and have the LLM answer. */
 /** Hard cap on a single excerpt's characters (consolidated entity notes can be
- *  very large; this bounds prompt cost while keeping each note's leading facts). */
+ *  very large; this bounds prompt cost). Consolidated notes are relevance-ranked
+ *  per fact before truncation — see excerptForQuery. */
 const MAX_EXCERPT_CHARS = 1200;
+
+function tokenize(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2),
+  );
+}
+
+/**
+ * Build an excerpt for a note under a char budget.
+ *
+ * Consolidated entity/domain notes are a `# title` header followed by many
+ * `## <id>`-delimited fact sections in CHRONOLOGICAL order. Naive head-truncation
+ * keeps only the earliest (usually least relevant) facts and drops the ones that
+ * answer the question. Instead: keep the header, then greedily add the fact
+ * sections most similar (token overlap) to the question until the budget is hit.
+ * Non-consolidated notes (single turns/facts) fall back to head truncation.
+ */
+function excerptForQuery(body: string, question: string): string {
+  if (body.length <= MAX_EXCERPT_CHARS) return body;
+  const sections = body.split(/\n(?=##\s)/);
+  if (sections.length <= 1) return `${body.slice(0, MAX_EXCERPT_CHARS)}…`;
+
+  const header = /^##\s/.test(sections[0]) ? "" : sections.shift() ?? "";
+  const qTokens = tokenize(question);
+  const scored = sections.map((s) => {
+    let overlap = 0;
+    for (const t of tokenize(s)) if (qTokens.has(t)) overlap++;
+    return { s, overlap };
+  });
+  scored.sort((a, b) => b.overlap - a.overlap);
+
+  let out = header ? `${header.trim()}\n` : "";
+  for (const { s } of scored) {
+    if (out.length + s.length + 1 > MAX_EXCERPT_CHARS) continue;
+    out += `${s.trim()}\n`;
+  }
+  return out.trim();
+}
 /** Keep all topK notes (cognitive-core drops to 1 note under a tight budget);
  *  per-excerpt truncation above is what actually bounds prompt cost. */
 const MAX_KNOWLEDGE_TOKENS = 1_000_000;
@@ -80,21 +123,22 @@ export async function answerFromBank(
   llm: LlmClient,
   question: LocomoQuestion,
   topK: number,
-): Promise<{ text: string } & UsageStats> {
+): Promise<AnswerResult> {
   const matches = await state.kb.getRelevantKnowledge(
     { description: question.question },
     { maxNotes: topK, maxTokens: MAX_KNOWLEDGE_TOKENS },
   );
   const excerpts: RetrievedExcerpt[] = matches.map((m) => {
     const body = m.note.body ?? "";
+    const type = (m as { matchType?: string }).matchType ?? "semantic";
     return {
-      ref: m.note.frontmatter.id,
-      text: body.length > MAX_EXCERPT_CHARS ? `${body.slice(0, MAX_EXCERPT_CHARS)}…` : body,
+      ref: `${m.note.frontmatter.id} [${type}]`,
+      text: excerptForQuery(body, question.question),
     };
   });
   const prompt = buildAnswerPrompt(question, excerpts);
   const { text, usage } = await llm.chat([{ role: "user", content: prompt }]);
-  return { text: text.trim(), ...usage };
+  return { text: text.trim(), retrieved: excerpts, ...usage };
 }
 
 export async function closeBank(state: CogcoreState | null): Promise<void> {

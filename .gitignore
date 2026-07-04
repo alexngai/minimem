@@ -10,3 +10,6 @@ dist/
 .sessionlog/
 .sudocode/
 .vscode/
+
+# LOCOMO extraction cache (WS0)
+evals/locomo/.cache/

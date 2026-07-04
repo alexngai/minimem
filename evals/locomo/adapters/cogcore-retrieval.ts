@@ -22,6 +22,7 @@ import {
   type Embeddings,
 } from "./cogcore-shared.js";
 import type {
+  AnswerResult,
   LocomoConversation,
   LocomoQuestion,
   MemorySystemAdapter,
@@ -81,7 +82,7 @@ export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
     return { latencyMs: Date.now() - started, totalTokens: 0 };
   }
 
-  async answer(question: LocomoQuestion): Promise<{ text: string } & UsageStats> {
+  async answer(question: LocomoQuestion): Promise<AnswerResult> {
     if (!this.state) throw new Error("ingest() must run before answer()");
     return answerFromBank(this.state, this.llm, question, this.topK);
   }

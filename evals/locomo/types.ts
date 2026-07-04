@@ -127,6 +127,16 @@ export interface UsageStats {
   latencyMs: number;
 }
 
+/** A single retrieved context snippet handed to the answer prompt. */
+export interface RetrievedNote {
+  ref: string;
+  text: string;
+}
+
+/** What an adapter returns from `answer()`: the answer + usage + (for tracing)
+ *  the exact context it retrieved. */
+export type AnswerResult = { text: string; retrieved?: RetrievedNote[] } & UsageStats;
+
 /**
  * A memory system under test. Every arm (minimem+cogcore, mem0, letta,
  * minimem-alone) implements this so the runner and cost accounting are uniform.
@@ -142,7 +152,7 @@ export interface MemorySystemAdapter {
   answer(
     question: LocomoQuestion,
     conversation: LocomoConversation,
-  ): Promise<{ text: string } & UsageStats>;
+  ): Promise<AnswerResult>;
   /** Clear all state so the next conversation starts fresh. */
   reset(): Promise<void>;
   /** Release resources (db handles, servers, subprocesses). */
@@ -162,6 +172,8 @@ export interface QAResult {
   correct: boolean | null;
   judgeRaw?: string;
   usage: UsageStats;
+  /** Populated only in trace mode: the exact context handed to the answer LLM. */
+  retrieved?: RetrievedNote[];
 }
 
 export interface SystemRunResult {

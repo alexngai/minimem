@@ -43,6 +43,8 @@ interface Args {
   out?: string;
   /** Skip conversations already present in --out (mop up partial runs). */
   resume: boolean;
+  /** Persist each question's retrieved context into the QA rows (for debugging). */
+  trace: boolean;
 }
 
 /**
@@ -101,6 +103,7 @@ function parseArgs(argv: string[]): Args {
     embeddings: (get("--embeddings") ?? "local") === "none" ? "none" : "local",
     out: get("--out"),
     resume: argv.includes("--resume"),
+    trace: argv.includes("--trace"),
   };
 }
 
@@ -230,6 +233,7 @@ async function runSystem(
           correct,
           judgeRaw: judged.raw,
           usage: { latencyMs: ans.latencyMs, totalTokens: ans.totalTokens, promptTokens: ans.promptTokens, completionTokens: ans.completionTokens },
+          retrieved: args.trace ? ans.retrieved : undefined,
         };
         if (++done % 10 === 0) process.stderr.write(`  ...${done}/${questions.length}\n`);
         return { row, judgeStat };
