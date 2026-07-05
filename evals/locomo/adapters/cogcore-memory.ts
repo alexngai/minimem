@@ -56,6 +56,13 @@ export interface CogcoreMemoryOptions {
   keywordExpansion?: boolean;
   /** MMR diversity re-rank over a wide candidate pool (undefined = disabled). */
   mmr?: MmrConfig;
+  /**
+   * Also index the raw conversation turns alongside extracted facts (hybrid).
+   * Extraction summarizes away answerable specifics (e.g. "made their own pots"
+   * loses "a cup with a dog face"); keeping raw turns retrievable restores that
+   * verbatim detail while facts still provide consolidated/temporal signal.
+   */
+  hybridRawTurns?: boolean;
 }
 
 interface ExtractedFact {
@@ -221,6 +228,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
   private readonly cacheDir: string;
   private readonly keywordExpansion: boolean;
   private readonly mmr?: MmrConfig;
+  private readonly hybridRawTurns: boolean;
   private readonly llm: LlmClient;
   private state: CogcoreState | null = null;
 
@@ -235,6 +243,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
       opts?.cacheDir ?? path.resolve("evals/locomo/.cache/cogcore-extractions");
     this.keywordExpansion = opts?.keywordExpansion ?? false;
     this.mmr = opts?.mmr;
+    this.hybridRawTurns = opts?.hybridRawTurns ?? false;
   }
 
   /** LLM hook for keyword expansion (returns only the completion text). */
@@ -340,6 +349,31 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
           }),
         );
         n++;
+      }
+    }
+
+    // Hybrid: also index raw turns so extraction's dropped specifics stay
+    // retrievable (verbatim detail that facts summarize away).
+    if (this.hybridRawTurns) {
+      let r = 0;
+      for (const session of conversation.sessions) {
+        const when = session.dateTime ? `[${session.dateTime}] ` : "";
+        for (const turn of session.turns) {
+          const img = turn.imageCaption ? ` [shared image: ${turn.imageCaption}]` : "";
+          await state.kb.addObservation(
+            createObservation({
+              id: `t-${String(r).padStart(5, "0")}`,
+              title: turn.diaId,
+              body: `${when}${turn.speaker}: ${turn.text}${img}`,
+              domain: [conversation.sampleId],
+              entities: [],
+              tags: [`session-${session.index}`, "raw-turn"],
+              confidence: 0.7,
+              source: { origin: "imported" },
+            }),
+          );
+          r++;
+        }
       }
     }
 

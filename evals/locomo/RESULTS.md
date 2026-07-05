@@ -495,3 +495,42 @@ statistically-negligible +0.3pp overall. MMR is a *category-conditional* lever
 conv-26 and n=100 samples were both optimistic; only the full ladder is predictive.
 `MmrSearchProvider` and the `--mmr` flags are kept in-tree for future
 category-gated use, but off by default.
+
+## GAP DIAGNOSIS vs mem0 (why mem0@k16 leads)
+
+Disagreement matrix (join on questionId, full ladder) and a retrieval-vs-answer
+attribution on the mem0-right/cogcore-wrong "gap" questions (evidence coverage in
+top-k) showed:
+
+- The answerable gap is ~71 net questions: single_hop +37, multi_hop +18,
+  temporal +17, open_domain −1 (cogcore already wins open_domain).
+- **cogcore-memory gap losses were ~100% answer-loss** (evidence session retrieved,
+  wrong answer) — NOT retrieval loss. cogcore-retrieval was ~50/50.
+- Concrete cases: extraction **summarizes away the answerable specific** — stored
+  "made their own pots" and dropped "a cup with a dog face"; kept "a photo of a
+  group of dancers" and dropped "festival performers". This is why ccm (75.8)
+  trails even raw-turn ccr (76.9): extraction destroys detail raw turns preserve,
+  while mem0's atomic extraction keeps it.
+
+## FIX: hybrid retrieval (extracted facts + raw turns) — ADOPTED
+
+Index the extracted facts AND the raw turns together (`hybridRawTurns`): facts give
+consolidated/temporal signal, raw turns restore the verbatim specifics extraction
+drops. Full ladder, N=1540, topK=16:
+
+| arm | answerable | CI95 | single | multi | temporal | open | advers |
+|---|---|---|---|---|---|---|---|
+| cogcore-retrieval | 76.9 | [74.9,79.0] | 85.1 | 57.4 | 79.4 | 54.2 | 13.2 |
+| cogcore-memory | 75.8 | [73.5,77.9] | 83.4 | 55.3 | 81.6 | 50.0 | 22.2 |
+| **cogcore-hybrid** | **79.9** | [77.9,81.8] | 89.4 | 57.4 | 82.6 | 54.2 | 15.7 |
+| mem0 | 81.6 | [79.6,83.5] | 89.5 | 63.8 | 84.7 | 53.1 | 22.6 |
+
+**Hybrid = +4.1pp over ccm, +3.0 over ccr → 79.9%.** Gap to mem0 shrinks from
+~4.7pp to 1.7pp (CIs heavily overlap). Matches mem0 on single_hop (89.4 vs 89.5),
+wins open_domain. **The entire remaining gap is multi_hop** (57.4 vs 63.8, −6.4pp)
++ temporal (−2.1) — categories needing cross-fact *synthesis*, which raw turns
+don't help and mem0's consolidation does. Caveat: hybrid regresses adversarial
+refusal (22.2→15.7) — raw turns encourage over-answering unanswerable questions.
+
+**Next lever: multi_hop synthesis** (iterative/multi-query retrieval, or stronger
+entity-centric fact linking) — the sole remaining source of mem0's edge.

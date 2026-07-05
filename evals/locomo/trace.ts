@@ -175,6 +175,18 @@ async function makeAdapter(
         mmr: args.mmr,
       });
     }
+    case "cogcore-hybrid": {
+      const { CogcoreMemoryAdapter } = await import("./adapters/cogcore-memory.js");
+      const a = new CogcoreMemoryAdapter(llm, {
+        topK: args.topk,
+        embeddings: args.embeddings,
+        keywordExpansion: args.keywordExpansion,
+        mmr: args.mmr,
+        hybridRawTurns: true,
+      });
+      (a as unknown as { name: string }).name = "cogcore-hybrid";
+      return a;
+    }
     case "mem0": {
       const { Mem0Adapter } = await import("./adapters/mem0.js");
       return new Mem0Adapter(llm, { topK: args.topk });
