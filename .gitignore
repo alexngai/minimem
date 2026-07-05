@@ -13,3 +13,6 @@ dist/
 
 # LOCOMO extraction cache (WS0)
 evals/locomo/.cache/
+
+# LOCOMO diagnostic checkpoints (transient resume state)
+evals/locomo/results/*.ckpt.json

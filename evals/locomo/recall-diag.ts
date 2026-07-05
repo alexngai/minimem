@@ -242,7 +242,22 @@ async function main(): Promise<void> {
   const catSet = (cat: string): RecallSet => (agg.byCat[cat] ??= mkSet());
   const lines: string[] = [];
 
+  // Per-conversation checkpoint so a machine sleep / kill never loses the whole
+  // run (each conversation's stores take minutes to build). Resume skips convs
+  // already accumulated into the checkpoint.
+  const ckptPath = `${path.resolve(args.out)}.ckpt.json`;
+  const doneConvs = new Set<string>();
+  try {
+    const ck = JSON.parse(await fs.readFile(ckptPath, "utf-8")) as { agg: typeof agg; done: string[] };
+    Object.assign(agg, ck.agg);
+    for (const c of ck.done) doneConvs.add(c);
+    if (doneConvs.size) console.error(`[diag] resume: ${doneConvs.size} conversations already done`);
+  } catch {
+    // No checkpoint — fresh run.
+  }
+
   for (const conv of conversations) {
+    if (doneConvs.has(conv.sampleId)) continue;
     const cachePath = path.resolve("evals/locomo/.cache/cogcore-extractions", `${conv.sampleId}.json`);
     const cache = JSON.parse(await fs.readFile(cachePath, "utf-8")) as ExtractionCache;
     const factsBySession = factCountsBySession(cache);
@@ -297,6 +312,11 @@ async function main(): Promise<void> {
     }
     await closeBank(ccr);
     await closeBank(ccm);
+
+    doneConvs.add(conv.sampleId);
+    await fs.mkdir(path.dirname(ckptPath), { recursive: true });
+    await fs.writeFile(ckptPath, JSON.stringify({ agg, done: [...doneConvs] }), "utf-8");
+    console.error(`[diag] checkpointed after ${conv.sampleId} (${doneConvs.size} done)`);
   }
 
   const pct = (h: number, t: number): string => (t ? `${((100 * h) / t).toFixed(1)}% (${h}/${t})` : "n/a");
