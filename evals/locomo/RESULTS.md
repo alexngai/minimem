@@ -387,3 +387,33 @@ extraction bucket is essentially eliminated. Net on this sample: ccm went
 66.7% (topk8/v2) → **95.8%** (topk16/v3). Single conversation (n=24) so the
 absolute number is optimistic/noisy, but the mechanism is real; full-ladder
 run (topK=16 + v3) in progress for the headline.
+
+## FULL LADDER — all 10 conversations, answerable QA (topK=16 + v3)
+
+`overallN=1540` = answerable questions (single_hop+multi_hop+temporal+open_domain).
+Adversarial (446, refusal test) reported separately.
+
+| arm | topK | **answerable** | single_hop | multi_hop | temporal | open_domain | adversarial |
+|---|---|---|---|---|---|---|---|
+| minimem-alone | 16 | 68.5% | 78.7 | 44.3 | 67.9 | 52.1 | 15.0 |
+| cogcore-retrieval | 16 | 76.9% | 85.1 | 57.4 | 79.4 | 54.2 | 13.2 |
+| cogcore-memory (v3) | 16 | 75.8% | 83.4 | 55.3 | **81.6** | 50.0 | **22.2** |
+| mem0 | 8¹ | **78.2%** | 86.1 | 56.7 | 84.4 | 52.1 | 22.9 |
+
+¹ mem0 is the prior Jul-3 run at topK=8 (its ingest is topK-independent; only the
+answer-time retrieval budget differs). A topK=16 mem0 rerun is needed for a fully
+apples-to-apples headline.
+
+**Readout:**
+- topK=16 + v3 extraction lifted the cogcore arms from trailing badly to
+  **within ~1–2pp of mem0**. cogcore-retrieval 76.9%, cogcore-memory 75.8%.
+- cogcore-memory leads on **temporal** (81.6, +1.7 vs ccr) and **adversarial
+  refusal** (22.2, +9 vs ccr) — the entity-consolidation + dated-fact extraction
+  paying off — but trails ccr on single/multi/open, netting ≈ ccr overall.
+- The conv-26 sample (ccm 95.8%) was **wildly optimistic** — conv-26 is an easy
+  conversation. Full-set ccm is 75.8%. Lesson: single-conversation samples are
+  not predictive of the full distribution; validate levers on ≥1 conv but trust
+  only the full ladder for headlines.
+- cogcore has NOT yet overtaken mem0 on the full set. Remaining levers (all
+  measured as helpful but not yet default-on): query distillation
+  (KeywordExpandingSearchProvider), higher topK, MMR diversity in retrieval.
