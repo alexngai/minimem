@@ -39,6 +39,10 @@ export interface LlmClientOptions {
   maxCompletionTokens?: number;
   /** Retries on 429 / 5xx. */
   maxRetries?: number;
+  /** Per-request wall-clock timeout (ms). node fetch has NO default timeout, so
+   *  a stuck connection would hang forever — fatal during ingest extraction,
+   *  which (unlike answer()) has no outer timeout. On abort we retry. */
+  requestTimeoutMs?: number;
 }
 
 export class LlmClient {
@@ -46,6 +50,7 @@ export class LlmClient {
   private readonly apiKey: string;
   private readonly maxCompletionTokens: number;
   private readonly maxRetries: number;
+  private readonly requestTimeoutMs: number;
   readonly deployment: string;
 
   /** Cumulative usage across all calls for this client instance. */
@@ -65,6 +70,7 @@ export class LlmClient {
     this.url = `${base.replace(/\/$/, "")}/openai/deployments/${this.deployment}/chat/completions?api-version=${apiVersion}`;
     this.maxCompletionTokens = opts?.maxCompletionTokens ?? 4096;
     this.maxRetries = opts?.maxRetries ?? 4;
+    this.requestTimeoutMs = opts?.requestTimeoutMs ?? 150_000;
   }
 
   async chat(messages: LlmMessage[]): Promise<LlmResult> {
@@ -76,11 +82,14 @@ export class LlmClient {
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       const started = Date.now();
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), this.requestTimeoutMs);
       try {
         const res = await fetch(this.url, {
           method: "POST",
           headers: { "api-key": this.apiKey, "content-type": "application/json" },
           body,
+          signal: ac.signal,
         });
 
         if (res.status === 429 || res.status >= 500) {
@@ -124,8 +133,12 @@ export class LlmClient {
 
         return { text: json.choices[0]?.message?.content ?? "", usage };
       } catch (err) {
-        lastErr = err;
+        lastErr = err instanceof Error && err.name === "AbortError"
+          ? new Error(`request timeout after ${this.requestTimeoutMs}ms`)
+          : err;
         await sleep(Math.min(30000, 1000 * 2 ** attempt));
+      } finally {
+        clearTimeout(timer);
       }
     }
     throw new Error(
