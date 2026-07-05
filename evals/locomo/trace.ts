@@ -39,6 +39,7 @@ interface TraceArgs {
   concurrency: number;
   embeddings: "local" | "none" | "nomic";
   keywordExpansion: boolean;
+  mmr?: { lambda: number; poolSize: number };
   out: string;
 }
 
@@ -76,6 +77,9 @@ function parseArgs(argv: string[]): TraceArgs {
     concurrency: Number(get("--concurrency") ?? 6),
     embeddings: parseEmbeddings(get("--embeddings")),
     keywordExpansion: argv.includes("--keyword-expansion"),
+    mmr: argv.includes("--mmr")
+      ? { lambda: Number(get("--mmr-lambda") ?? 0.7), poolSize: Number(get("--mmr-pool") ?? 50) }
+      : undefined,
     out: get("--out") ?? "evals/locomo/results/trace",
   };
 }
@@ -159,6 +163,7 @@ async function makeAdapter(
         topK: args.topk,
         embeddings: args.embeddings,
         keywordExpansion: args.keywordExpansion,
+        mmr: args.mmr,
       });
     }
     case "cogcore-memory": {
@@ -167,6 +172,7 @@ async function makeAdapter(
         topK: args.topk,
         embeddings: args.embeddings,
         keywordExpansion: args.keywordExpansion,
+        mmr: args.mmr,
       });
     }
     case "mem0": {

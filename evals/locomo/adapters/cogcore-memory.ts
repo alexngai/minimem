@@ -26,6 +26,7 @@ import {
   openBank,
   type CogcoreState,
   type Embeddings,
+  type MmrConfig,
 } from "./cogcore-shared.js";
 import type {
   AnswerResult,
@@ -53,6 +54,8 @@ export interface CogcoreMemoryOptions {
   cacheDir?: string;
   /** Distill each question to keywords via the LLM before retrieval. */
   keywordExpansion?: boolean;
+  /** MMR diversity re-rank over a wide candidate pool (undefined = disabled). */
+  mmr?: MmrConfig;
 }
 
 interface ExtractedFact {
@@ -217,6 +220,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
   private readonly cache: boolean;
   private readonly cacheDir: string;
   private readonly keywordExpansion: boolean;
+  private readonly mmr?: MmrConfig;
   private readonly llm: LlmClient;
   private state: CogcoreState | null = null;
 
@@ -230,6 +234,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
     this.cacheDir =
       opts?.cacheDir ?? path.resolve("evals/locomo/.cache/cogcore-extractions");
     this.keywordExpansion = opts?.keywordExpansion ?? false;
+    this.mmr = opts?.mmr;
   }
 
   /** LLM hook for keyword expansion (returns only the completion text). */
@@ -341,7 +346,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
     // Heuristic consolidation → cross-session entity notes (no LLM).
     await state.kb.defragment();
 
-    await indexAndInject(state, this.embeddings, this.topK, this.keywordHook());
+    await indexAndInject(state, this.embeddings, this.topK, this.keywordHook(), this.mmr);
 
     return { latencyMs: Date.now() - started, promptTokens, completionTokens, totalTokens };
   }

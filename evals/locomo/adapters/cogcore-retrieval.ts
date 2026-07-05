@@ -20,6 +20,7 @@ import {
   openBank,
   type CogcoreState,
   type Embeddings,
+  type MmrConfig,
 } from "./cogcore-shared.js";
 import type {
   AnswerResult,
@@ -37,6 +38,8 @@ export interface CogcoreRetrievalOptions {
   embeddings?: Embeddings;
   /** Distill each question to keywords via the LLM before retrieval. */
   keywordExpansion?: boolean;
+  /** MMR diversity re-rank over a wide candidate pool (undefined = disabled). */
+  mmr?: MmrConfig;
 }
 
 export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
@@ -45,6 +48,7 @@ export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
   protected readonly scratchRoot: string;
   protected readonly embeddings: Embeddings;
   protected readonly keywordExpansion: boolean;
+  protected readonly mmr?: MmrConfig;
   protected readonly llm: LlmClient;
   protected state: CogcoreState | null = null;
 
@@ -54,6 +58,7 @@ export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
     this.scratchRoot = opts?.scratchRoot ?? defaultScratchRoot();
     this.embeddings = opts?.embeddings ?? "local";
     this.keywordExpansion = opts?.keywordExpansion ?? false;
+    this.mmr = opts?.mmr;
   }
 
   /** LLM hook for keyword expansion (returns only the completion text). */
@@ -88,7 +93,7 @@ export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
       }
     }
 
-    await indexAndInject(state, this.embeddings, this.topK, this.keywordHook());
+    await indexAndInject(state, this.embeddings, this.topK, this.keywordHook(), this.mmr);
     return { latencyMs: Date.now() - started, totalTokens: 0 };
   }
 

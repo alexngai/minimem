@@ -15,6 +15,10 @@ import {
   KeywordExpandingSearchProvider,
   MinimemSearchProvider,
 } from "cognitive-core/memory";
+import type {
+  SearchProvider,
+  SearchProviderResult,
+} from "cognitive-core/memory";
 import { KnowledgeBankConfigSchema } from "cognitive-core";
 
 import { Minimem } from "../../../src/index.js";
@@ -88,12 +92,14 @@ export async function indexAndInject(
   topK: number,
   /** When set, wrap retrieval in a keyword-expansion pass (question → keywords). */
   keywordExpansion?: CompletionFn,
+  /** When set, wrap retrieval in MMR diversity re-ranking over a wide pool. */
+  mmr?: MmrConfig,
 ): Promise<void> {
   const mm = await Minimem.create({
     memoryDir: state.memoryDir,
     dbPath: path.join(state.dir, "index.db"),
     ...embeddingConfig(embeddings),
-    query: { maxResults: topK, minScore: 0 },
+    query: { maxResults: mmr ? Math.max(mmr.poolSize, topK) : topK, minScore: 0 },
     watch: { enabled: false },
   });
   await mm.sync({ reason: "ingest" });
@@ -102,11 +108,14 @@ export async function indexAndInject(
   const provider = new MinimemSearchProvider({
     search: (query, options) => mm.search(query, { ...options, skipStaleCheck: true }),
   });
-  state.kb.setSearchProvider(
-    keywordExpansion
-      ? new KeywordExpandingSearchProvider(provider, keywordExpansion)
-      : provider,
-  );
+  let searchProvider: SearchProvider = provider;
+  if (keywordExpansion) {
+    searchProvider = new KeywordExpandingSearchProvider(searchProvider, keywordExpansion);
+  }
+  if (mmr) {
+    searchProvider = new MmrSearchProvider(searchProvider, mmr);
+  }
+  state.kb.setSearchProvider(searchProvider);
 }
 
 /** Retrieve relevant knowledge and have the LLM answer. */
@@ -123,6 +132,103 @@ function tokenize(s: string): Set<string> {
       .split(/\s+/)
       .filter((w) => w.length > 2),
   );
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/** Minimal note shape the MMR re-ranker needs (id + body for redundancy). */
+interface NoteLike {
+  frontmatter: { id: string };
+  body?: string;
+}
+
+export interface MmrConfig {
+  /** Relevance vs diversity trade-off (1 = pure relevance, 0 = pure diversity). */
+  lambda: number;
+  /** Candidate pool pulled from the inner provider before MMR selection. */
+  poolSize: number;
+}
+
+/**
+ * Maximal Marginal Relevance re-ranker (decorator over any SearchProvider).
+ *
+ * The recall diagnostic showed multi-hop evidence is retrievable (95% @k=50) but
+ * crowded out of the top-k by redundant near-duplicate hits (73% @k=10). MMR pulls
+ * a wide pool from the inner provider, then greedily selects k items maximizing
+ *   lambda * relevance - (1 - lambda) * max lexical similarity to already-picked,
+ * so a second-hop turn displaces a redundant restatement of the first hop.
+ *
+ * Redundancy is lexical (token Jaccard on note bodies) — no embedding access
+ * needed since the KnowledgeBank hands us the candidate notes directly.
+ */
+export class MmrSearchProvider implements SearchProvider {
+  readonly name: string;
+  constructor(
+    private readonly inner: SearchProvider,
+    private readonly config: MmrConfig,
+  ) {
+    this.name = `mmr(${inner.name})`;
+  }
+
+  async search(
+    query: string,
+    candidates: NoteLike[],
+    options?: { maxResults?: number },
+  ): Promise<SearchProviderResult[]> {
+    const k = options?.maxResults ?? 10;
+    const pool = await this.inner.search(query, candidates as never, {
+      ...options,
+      maxResults: Math.max(this.config.poolSize, k),
+    });
+    if (pool.length <= k) return pool;
+
+    const bodyById = new Map<string, string>();
+    for (const c of candidates) bodyById.set(c.frontmatter.id, c.body ?? "");
+    const tokCache = new Map<string, Set<string>>();
+    const toks = (id: string): Set<string> => {
+      let t = tokCache.get(id);
+      if (!t) {
+        t = tokenize(bodyById.get(id) ?? "");
+        tokCache.set(id, t);
+      }
+      return t;
+    };
+
+    // Normalize relevance to [0,1] across the pool so lambda is comparable to
+    // the [0,1] Jaccard redundancy term.
+    const scores = pool.map((p) => p.score);
+    const min = Math.min(...scores);
+    const range = Math.max(...scores) - min || 1;
+    const norm = (s: number): number => (s - min) / range;
+
+    const selected: SearchProviderResult[] = [];
+    const remaining = [...pool];
+    const { lambda } = this.config;
+    while (selected.length < k && remaining.length > 0) {
+      let bestIdx = 0;
+      let bestScore = -Infinity;
+      for (let i = 0; i < remaining.length; i++) {
+        const cand = remaining[i];
+        let maxSim = 0;
+        for (const sel of selected) {
+          const sim = jaccard(toks(cand.noteId), toks(sel.noteId));
+          if (sim > maxSim) maxSim = sim;
+        }
+        const mmr = lambda * norm(cand.score) - (1 - lambda) * maxSim;
+        if (mmr > bestScore) {
+          bestScore = mmr;
+          bestIdx = i;
+        }
+      }
+      selected.push(remaining.splice(bestIdx, 1)[0]);
+    }
+    return selected;
+  }
 }
 
 /**

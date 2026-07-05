@@ -393,27 +393,105 @@ run (topK=16 + v3) in progress for the headline.
 `overallN=1540` = answerable questions (single_hop+multi_hop+temporal+open_domain).
 Adversarial (446, refusal test) reported separately.
 
-| arm | topK | **answerable** | single_hop | multi_hop | temporal | open_domain | adversarial |
-|---|---|---|---|---|---|---|---|
-| minimem-alone | 16 | 68.5% | 78.7 | 44.3 | 67.9 | 52.1 | 15.0 |
-| cogcore-retrieval | 16 | 76.9% | 85.1 | 57.4 | 79.4 | 54.2 | 13.2 |
-| cogcore-memory (v3) | 16 | 75.8% | 83.4 | 55.3 | **81.6** | 50.0 | **22.2** |
-| mem0 | 8¹ | **78.2%** | 86.1 | 56.7 | 84.4 | 52.1 | 22.9 |
+**APPLES-TO-APPLES, all arms at topK=16** (mem0 reran at k16 on Jul-5):
 
-¹ mem0 is the prior Jul-3 run at topK=8 (its ingest is topK-independent; only the
-answer-time retrieval budget differs). A topK=16 mem0 rerun is needed for a fully
-apples-to-apples headline.
+| arm | topK | **answerable** | CI95 | single_hop | multi_hop | temporal | open_domain | adversarial |
+|---|---|---|---|---|---|---|---|---|
+| minimem-alone | 16 | 68.5% | [66.2,70.8] | 78.7 | 44.3 | 67.9 | 52.1 | 15.0 |
+| cogcore-retrieval | 16 | 76.9% | [74.9,79.0] | 85.1 | 57.4 | 79.4 | 54.2 | 13.2 |
+| cogcore-retrieval+MMR | 16 | 77.2% | [75.2,79.2] | 85.3 | 59.6 | 78.2 | 55.2 | 13.9 |
+| cogcore-memory (v3) | 16 | 75.8% | [73.5,77.9] | 83.4 | 55.3 | 81.6 | 50.0 | 22.2 |
+| **mem0** | **16** | **81.6%** | [79.6,83.5] | 89.5 | 63.8 | 84.7 | 53.1 | 22.6 |
 
-**Readout:**
-- topK=16 + v3 extraction lifted the cogcore arms from trailing badly to
-  **within ~1–2pp of mem0**. cogcore-retrieval 76.9%, cogcore-memory 75.8%.
-- cogcore-memory leads on **temporal** (81.6, +1.7 vs ccr) and **adversarial
-  refusal** (22.2, +9 vs ccr) — the entity-consolidation + dated-fact extraction
-  paying off — but trails ccr on single/multi/open, netting ≈ ccr overall.
-- The conv-26 sample (ccm 95.8%) was **wildly optimistic** — conv-26 is an easy
-  conversation. Full-set ccm is 75.8%. Lesson: single-conversation samples are
-  not predictive of the full distribution; validate levers on ≥1 conv but trust
-  only the full ladder for headlines.
-- cogcore has NOT yet overtaken mem0 on the full set. Remaining levers (all
-  measured as helpful but not yet default-on): query distillation
-  (KeywordExpandingSearchProvider), higher topK, MMR diversity in retrieval.
+**Readout (CORRECTED — the earlier "within 1–2pp of mem0" was a topK artifact):**
+- **mem0 gains +3.4pp from k8→k16** (78.2 → 81.6). The prior table compared
+  mem0@k8 to cogcore@k16, which flattered cogcore. At **equal k=16, mem0 leads
+  the best cogcore arm by ~4.4pp with near-disjoint CIs** — a real gap, not noise.
+- mem0 leads on the core memory categories: single_hop (89.5 vs 85.3), multi_hop
+  (63.8 vs 59.6), temporal (84.7 vs 78–82). cogcore only competes on open_domain
+  (ccr+MMR 55.2 vs 53.1) and ties adversarial refusal (ccm 22.2 vs 22.6).
+- **MMR did not close the gap** (+0.3pp overall; +2.1 multi_hop offset by −1.2
+  temporal). cogcore-memory (extraction) still trails cogcore-retrieval (raw
+  turns) overall — extraction only wins on temporal + adversarial.
+- The conv-26 sample (ccm 95.8%) and the n=100 sample (MMR +3) were **both
+  optimistic**. Lesson reinforced: trust only the full ladder for headlines.
+
+**Launch-messaging implication:** we cannot currently claim LOCOMO parity or
+superiority vs mem0. Either (a) lead on other differentiators (file-based/local,
+transparency/inspectable notes, plugin ergonomics) rather than a benchmark win, or
+(b) invest in extraction+retrieval quality to close the ~4pp gap before making a
+benchmark claim. mem0's edge is concentrated in single/multi/temporal, pointing at
+its extraction+consolidation quality as the thing to match.
+
+## Lever experiments (stratified cross-conv sample, 10 conv × 10 q = 100, topK=10, seed=1)
+
+Same fixed sample across all arms; cogcore ingest is deterministic (raw turns) /
+cache-backed (extractions), so baseline-vs-variant deltas isolate the lever
+(no run-to-run variance — only sampling noise, ±~4.6pp at n=100).
+
+### Full-set retrieval-recall sweep (recall-diag, 297 evidence questions, all 10 conv)
+
+Does retrieval surface the gold evidence turn/session in top-k?
+
+| k | ccr turn-recall | ccr session-recall | ccm session-recall |
+|---|---|---|---|
+| 5 | 63.0% | 88.6% | 84.2% |
+| 10 | 71.4% | 94.6% | 92.3% |
+| 16 | 75.4% | 98.0% | 95.6% |
+| 50 | 87.9% | 99.3% | 98.3% |
+
+ccr turn-recall by category: multi_hop 73.2→95.1 (k10→k50), open_domain 47.8→71.6,
+single_hop 76.0→88.0, temporal 86.3→94.5. **Extraction coverage 100% (489/489)** —
+v3 chunking generalized across all 10 conv, not just conv-26.
+
+**Finding:** multi_hop is strongly *retrieval-bound* (evidence exists @k50 but
+crowded out of top-10 → 22pp recoverable gap); temporal is *answer-bound* (recall
+flat across k); open_domain is retrieval-bound but low-similarity.
+
+### #2 Keyword expansion (query distillation) — verdict: NEUTRAL, skip
+
+| arm | baseline | keyword-on |
+|---|---|---|
+| cogcore-retrieval | 70% | 69% (−1) |
+| cogcore-memory | 72% | 74% (+2) |
+
+Only real move: ccm multi_hop 58%→65% (+2 questions), within noise. Costs an extra
+LLM call/query, flat-to-worse on retrieval. Not worth default-on.
+
+### MMR diversity re-rank (λ=0.5, pool=50) — verdict: ADOPT for raw-turn path only
+
+| arm | baseline | MMR-on |
+|---|---|---|
+| **cogcore-retrieval** (raw turns) | 70% | **73%** (+3) |
+| cogcore-memory (consolidated) | 72% | 71% (−1) |
+
+Per-category: ccr open_domain 56→63 (+2), ccr multi_hop 58→61 (+1); ccm multi_hop
+58→52 (−2), ccm single_hop 81→86 (+1).
+
+**Sample finding:** MMR helps the raw-turn arm (redundant chatter → diversity
+surfaces crowded-out evidence) but *hurts* the consolidated-memory arm on multi_hop
+(consolidated facts aren't redundant, so the anti-redundancy penalty strips
+co-relevant facts). Implemented as `MmrSearchProvider` (lexical-Jaccard redundancy,
+no vector access) wired via `--mmr`/`--mmr-lambda`/`--mmr-pool`.
+
+### MMR FULL-LADDER validation — cogcore-retrieval, N=1540 (λ=0.5, pool=50)
+
+The n=100 sample's +3pp did NOT hold at scale:
+
+| category | no-MMR | MMR | Δ |
+|---|---|---|---|
+| **overall answerable** | 76.9% | **77.2%** | +0.3pp (CI [74.9, 79.0]) |
+| multi_hop | 57.4 | 59.6 | **+2.1pp** (162→168) |
+| open_domain | 54.2 | 55.2 | +1.0 |
+| single_hop | 85.1 | 85.3 | +0.1 |
+| temporal | 79.4 | 78.2 | **−1.2pp** (255→251) |
+| adversarial | 13.2 | 13.9 | +0.7 |
+
+**Revised decision: do NOT default-on MMR.** The mechanism prediction held (real
++2.1pp on the retrieval-bound multi_hop category), but it's mostly cancelled by a
+−1.2pp temporal regression (diversity strips co-relevant dated turns), netting a
+statistically-negligible +0.3pp overall. MMR is a *category-conditional* lever
+(apply for multi_hop, off for temporal), not a blanket win. Lesson reinforced: the
+conv-26 and n=100 samples were both optimistic; only the full ladder is predictive.
+`MmrSearchProvider` and the `--mmr` flags are kept in-tree for future
+category-gated use, but off by default.

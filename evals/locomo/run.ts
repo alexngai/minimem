@@ -41,6 +41,7 @@ interface Args {
   concurrency: number;
   embeddings: "local" | "none" | "nomic";
   keywordExpansion: boolean;
+  mmr?: { lambda: number; poolSize: number };
   out?: string;
   /** Skip conversations already present in --out (mop up partial runs). */
   resume: boolean;
@@ -103,6 +104,9 @@ function parseArgs(argv: string[]): Args {
     concurrency: Number(get("--concurrency") ?? 6),
     embeddings: parseEmbeddings(get("--embeddings")),
     keywordExpansion: argv.includes("--keyword-expansion"),
+    mmr: argv.includes("--mmr")
+      ? { lambda: Number(get("--mmr-lambda") ?? 0.5), poolSize: Number(get("--mmr-pool") ?? 50) }
+      : undefined,
     out: get("--out"),
     resume: argv.includes("--resume"),
     trace: argv.includes("--trace"),
@@ -170,6 +174,7 @@ async function makeAdapter(name: string, llm: LlmClient, args: Args): Promise<Me
         topK: args.topk,
         embeddings: args.embeddings,
         keywordExpansion: args.keywordExpansion,
+        mmr: args.mmr,
       });
     }
     case "cogcore-memory": {
@@ -178,6 +183,7 @@ async function makeAdapter(name: string, llm: LlmClient, args: Args): Promise<Me
         topK: args.topk,
         embeddings: args.embeddings,
         keywordExpansion: args.keywordExpansion,
+        mmr: args.mmr,
       });
     }
     case "mem0": {
