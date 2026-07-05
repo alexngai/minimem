@@ -224,15 +224,22 @@ async function main(): Promise<void> {
     }
   }
 
+  type Cell = { hit: number; tot: number };
+  const mkK = (): Record<number, Cell> =>
+    Object.fromEntries(K_VALUES.map((k) => [k, { hit: 0, tot: 0 }])) as Record<number, Cell>;
+  type RecallSet = { ccrTurn: Record<number, Cell>; ccrSession: Record<number, Cell>; ccmSession: Record<number, Cell> };
+  const mkSet = (): RecallSet => ({ ccrTurn: mkK(), ccrSession: mkK(), ccmSession: mkK() });
+
   const agg = {
-    ccrTurn: Object.fromEntries(K_VALUES.map((k) => [k, { hit: 0, tot: 0 }])) as Record<number, { hit: number; tot: number }>,
-    ccrSession: Object.fromEntries(K_VALUES.map((k) => [k, { hit: 0, tot: 0 }])) as Record<number, { hit: number; tot: number }>,
-    ccmSession: Object.fromEntries(K_VALUES.map((k) => [k, { hit: 0, tot: 0 }])) as Record<number, { hit: number; tot: number }>,
+    ...mkSet(),
+    /** Same recall counters, split by question category. */
+    byCat: {} as Record<string, RecallSet>,
     extractionCoverage: { hit: 0, tot: 0 },
     // 2x2 at k=10, using the trace correctness if available.
     ccm: { retOK_ans: [0, 0], retMISS_ans: [0, 0] }, // [wrong, right]
     ccr: { retOK_ans: [0, 0], retMISS_ans: [0, 0] },
   };
+  const catSet = (cat: string): RecallSet => (agg.byCat[cat] ??= mkSet());
   const lines: string[] = [];
 
   for (const conv of conversations) {
@@ -272,9 +279,10 @@ async function main(): Promise<void> {
         const ccrSessHit = [...goldSessions].some((s) => rSessR.has(s));
         const ccmSessHit = [...goldSessions].some((s) => rSessM.has(s));
 
-        agg.ccrTurn[k].tot++; if (ccrTurnHit) agg.ccrTurn[k].hit++;
-        agg.ccrSession[k].tot++; if (ccrSessHit) agg.ccrSession[k].hit++;
-        agg.ccmSession[k].tot++; if (ccmSessHit) agg.ccmSession[k].hit++;
+        const cat = catSet(q.category);
+        agg.ccrTurn[k].tot++; cat.ccrTurn[k].tot++; if (ccrTurnHit) { agg.ccrTurn[k].hit++; cat.ccrTurn[k].hit++; }
+        agg.ccrSession[k].tot++; cat.ccrSession[k].tot++; if (ccrSessHit) { agg.ccrSession[k].hit++; cat.ccrSession[k].hit++; }
+        agg.ccmSession[k].tot++; cat.ccmSession[k].tot++; if (ccmSessHit) { agg.ccmSession[k].hit++; cat.ccmSession[k].hit++; }
 
         if (k === 10) {
           const c = correctness[q.id];
@@ -301,6 +309,21 @@ async function main(): Promise<void> {
     lines.push(`| ${k} | ${pct(agg.ccrTurn[k].hit, agg.ccrTurn[k].tot)} | ${pct(agg.ccrSession[k].hit, agg.ccrSession[k].tot)} | ${pct(agg.ccmSession[k].hit, agg.ccmSession[k].tot)} |`);
   }
   lines.push(`\n**Extraction coverage** (evidence sessions with ≥1 extracted fact): ${pct(agg.extractionCoverage.hit, agg.extractionCoverage.tot)}`);
+
+  // Per-category recall — the signal for whether a weak category is retrieval-bound.
+  const cats = Object.keys(agg.byCat).sort();
+  for (const [label, pick] of [
+    ["ccr turn-recall", (s: RecallSet) => s.ccrTurn],
+    ["ccm session-recall", (s: RecallSet) => s.ccmSession],
+  ] as const) {
+    lines.push(`\n### ${label} by category (does more k surface the evidence?)\n`);
+    lines.push(`| category | ${K_VALUES.map((k) => `k=${k}`).join(" | ")} |`);
+    lines.push(`|---|${K_VALUES.map(() => "---").join("|")}|`);
+    for (const cat of cats) {
+      const cells = pick(agg.byCat[cat]);
+      lines.push(`| ${cat} | ${K_VALUES.map((k) => pct(cells[k].hit, cells[k].tot)).join(" | ")} |`);
+    }
+  }
   lines.push("\n## Attribution @k=10 (retrieval hit × answer correctness)\n");
   lines.push("| arm | retrieved✓ & wrong | retrieved✓ & right | retrieved✗ & wrong | retrieved✗ & right |");
   lines.push("|---|---|---|---|---|");
