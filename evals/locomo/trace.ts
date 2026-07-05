@@ -71,7 +71,7 @@ function parseArgs(argv: string[]): TraceArgs {
     systems: (get("--systems") ?? "cogcore-retrieval,cogcore-memory")
       .split(",")
       .map((s) => s.trim()),
-    topk: Number(get("--topk") ?? 8),
+    topk: Number(get("--topk") ?? 10),
     seed: Number(get("--seed") ?? 1),
     concurrency: Number(get("--concurrency") ?? 6),
     embeddings: parseEmbeddings(get("--embeddings")),

@@ -135,7 +135,7 @@ export class Mem0Adapter implements MemorySystemAdapter {
 
   constructor(llm: LlmClient, opts?: Mem0Options) {
     this.llm = llm;
-    this.topK = opts?.topK ?? 8;
+    this.topK = opts?.topK ?? 10;
     this.cfg = buildMem0Config(
       {
         ollamaUrl: opts?.ollamaUrl ?? process.env.OLLAMA_URL ?? "http://localhost:11434",

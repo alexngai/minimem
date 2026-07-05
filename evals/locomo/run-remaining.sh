@@ -9,7 +9,7 @@ set -u
 CONV=${CONV:-10}
 Q=${Q:-0}
 CONC=${CONC:-8}
-TOPK=${TOPK:-16}
+TOPK=${TOPK:-10}
 SYSTEMS=${SYSTEMS:-"cogcore-retrieval cogcore-memory mem0"}
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-10}
 OUT_DIR="evals/locomo/results"

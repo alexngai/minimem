@@ -12,7 +12,7 @@
  *   --conversations N   conversations to run (default 1)
  *   --questions N       max questions per conversation, stratified (0 = all; default 30)
  *   --systems a,b       arms: minimem-alone (default)
- *   --topk N            excerpts retrieved per question (default 8)
+ *   --topk N            excerpts retrieved per question (default 10, the Mem0-paper LOCOMO convention)
  *   --seed N            sampling seed (default 1)
  *   --out path.json     write raw results JSON
  */
@@ -98,7 +98,7 @@ function parseArgs(argv: string[]): Args {
     conversations: Number(get("--conversations") ?? 1),
     questions: Number(get("--questions") ?? 30),
     systems: (get("--systems") ?? "minimem-alone").split(",").map((s) => s.trim()),
-    topk: Number(get("--topk") ?? 8),
+    topk: Number(get("--topk") ?? 10),
     seed: Number(get("--seed") ?? 1),
     concurrency: Number(get("--concurrency") ?? 6),
     embeddings: parseEmbeddings(get("--embeddings")),

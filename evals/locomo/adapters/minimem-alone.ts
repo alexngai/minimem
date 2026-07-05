@@ -47,7 +47,7 @@ export class MinimemAloneAdapter implements MemorySystemAdapter {
 
   constructor(llm: LlmClient, opts?: MinimemAloneOptions) {
     this.llm = llm;
-    this.topK = opts?.topK ?? 8;
+    this.topK = opts?.topK ?? 10;
     this.scratchRoot = opts?.scratchRoot ?? os.tmpdir();
   }
 

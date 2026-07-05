@@ -222,7 +222,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
 
   constructor(llm: LlmClient, opts?: CogcoreMemoryOptions) {
     this.llm = llm;
-    this.topK = opts?.topK ?? 16;
+    this.topK = opts?.topK ?? 10;
     this.scratchRoot = opts?.scratchRoot ?? defaultScratchRoot();
     this.embeddings = opts?.embeddings ?? "local";
     this.extractConcurrency = opts?.extractConcurrency ?? 4;

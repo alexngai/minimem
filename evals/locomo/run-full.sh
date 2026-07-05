@@ -9,7 +9,7 @@ set -u
 CONV=${CONV:-10}
 Q=${Q:-0}            # 0 = all questions (stratified sample disabled)
 CONC=${CONC:-8}
-TOPK=${TOPK:-16}     # recall diagnostic: 16 beats 8 across arms (see RESULTS.md)
+TOPK=${TOPK:-10}     # Mem0-paper LOCOMO convention; sweep k separately (see RESULTS.md)
 SYSTEMS=${SYSTEMS:-"minimem-alone cogcore-retrieval cogcore-memory mem0"}
 OUT_DIR="evals/locomo/results"
 mkdir -p "$OUT_DIR"

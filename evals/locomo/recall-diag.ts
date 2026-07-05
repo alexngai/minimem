@@ -35,7 +35,7 @@ import {
 } from "./adapters/cogcore-shared.js";
 import type { LocomoConversation, LocomoQuestion } from "./types.js";
 
-const K_VALUES = [8, 16, 24];
+const K_VALUES = [5, 10, 16, 50];
 const MAX_TOKENS = 1_000_000;
 
 interface Args {
@@ -229,7 +229,7 @@ async function main(): Promise<void> {
     ccrSession: Object.fromEntries(K_VALUES.map((k) => [k, { hit: 0, tot: 0 }])) as Record<number, { hit: number; tot: number }>,
     ccmSession: Object.fromEntries(K_VALUES.map((k) => [k, { hit: 0, tot: 0 }])) as Record<number, { hit: number; tot: number }>,
     extractionCoverage: { hit: 0, tot: 0 },
-    // 2x2 at k=8, using the trace correctness if available.
+    // 2x2 at k=10, using the trace correctness if available.
     ccm: { retOK_ans: [0, 0], retMISS_ans: [0, 0] }, // [wrong, right]
     ccr: { retOK_ans: [0, 0], retMISS_ans: [0, 0] },
   };
@@ -276,7 +276,7 @@ async function main(): Promise<void> {
         agg.ccrSession[k].tot++; if (ccrSessHit) agg.ccrSession[k].hit++;
         agg.ccmSession[k].tot++; if (ccmSessHit) agg.ccmSession[k].hit++;
 
-        if (k === 8) {
+        if (k === 10) {
           const c = correctness[q.id];
           if (c) {
             const ccmRight = c["cogcore-memory"] ? 1 : 0;
@@ -301,7 +301,7 @@ async function main(): Promise<void> {
     lines.push(`| ${k} | ${pct(agg.ccrTurn[k].hit, agg.ccrTurn[k].tot)} | ${pct(agg.ccrSession[k].hit, agg.ccrSession[k].tot)} | ${pct(agg.ccmSession[k].hit, agg.ccmSession[k].tot)} |`);
   }
   lines.push(`\n**Extraction coverage** (evidence sessions with ≥1 extracted fact): ${pct(agg.extractionCoverage.hit, agg.extractionCoverage.tot)}`);
-  lines.push("\n## Attribution @k=8 (retrieval hit × answer correctness)\n");
+  lines.push("\n## Attribution @k=10 (retrieval hit × answer correctness)\n");
   lines.push("| arm | retrieved✓ & wrong | retrieved✓ & right | retrieved✗ & wrong | retrieved✗ & right |");
   lines.push("|---|---|---|---|---|");
   lines.push(`| cogcore-memory | ${agg.ccm.retOK_ans[0]} | ${agg.ccm.retOK_ans[1]} | ${agg.ccm.retMISS_ans[0]} | ${agg.ccm.retMISS_ans[1]} |`);

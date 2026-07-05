@@ -50,7 +50,7 @@ export class CogcoreRetrievalAdapter implements MemorySystemAdapter {
 
   constructor(llm: LlmClient, opts?: CogcoreRetrievalOptions) {
     this.llm = llm;
-    this.topK = opts?.topK ?? 16;
+    this.topK = opts?.topK ?? 10;
     this.scratchRoot = opts?.scratchRoot ?? defaultScratchRoot();
     this.embeddings = opts?.embeddings ?? "local";
     this.keywordExpansion = opts?.keywordExpansion ?? false;
