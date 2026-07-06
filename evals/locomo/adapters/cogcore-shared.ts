@@ -289,6 +289,122 @@ export async function answerFromBank(
   return { text: text.trim(), retrieved: excerpts, ...usage };
 }
 
+/** A retrieval match with the fields the multi-query merge needs. */
+interface KnowMatch {
+  note: { body?: string; frontmatter: { id: string } };
+  matchType?: string;
+  score?: number;
+}
+
+/**
+ * Decompose a question into the minimal set of standalone lookup queries needed
+ * to answer it. Multi-hop questions ("which city did BOTH X and Y visit?") need
+ * each hop retrieved separately — a single embedding of the whole question tends
+ * to surface one hop and bury the other. Returns the original question plus any
+ * sub-queries (deduped). Falls back to just the original on any LLM/parse error.
+ */
+async function decomposeQuestion(llm: LlmClient, question: string): Promise<string[]> {
+  try {
+    const { text } = await llm.chat([
+      {
+        role: "user",
+        content: [
+          "Decide whether a question needs MULTIPLE separate memory lookups to answer.",
+          "Most questions do NOT — return them unchanged as a single-element array.",
+          "ONLY split when the answer requires combining facts about DIFFERENT subjects/events",
+          "that would be stored separately (comparisons, intersections, or two distinct people/things).",
+          "When you split, write one self-contained query per hop (resolve pronouns to names). Max 4.",
+          "",
+          "Examples:",
+          'Q: "What kind of pot did Mel make?" → ["What kind of pot did Mel make?"]',
+          'Q: "When did Caroline join the support group?" → ["When did Caroline join the support group?"]',
+          'Q: "Which city did both Ann and Bob visit?" → ["Which cities has Ann visited?", "Which cities has Bob visited?"]',
+          'Q: "What hobby do Jon and his daughter share?" → ["What are Jon\'s hobbies?", "What are Jon\'s daughter\'s hobbies?"]',
+          "",
+          "Return ONLY a JSON array of strings.",
+          "",
+          `Question: ${question}`,
+        ].join("\n"),
+      },
+    ]);
+    const arr = JSON.parse(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
+    if (Array.isArray(arr)) {
+      const qs = arr.filter((s): s is string => typeof s === "string" && s.trim().length > 0);
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const q of [question, ...qs]) {
+        const k = q.trim().toLowerCase();
+        if (!seen.has(k)) {
+          seen.add(k);
+          out.push(q.trim());
+        }
+      }
+      return out.slice(0, 5);
+    }
+  } catch {
+    // Fall back to single-query.
+  }
+  return [question];
+}
+
+/**
+ * Multi-query variant of {@link answerFromBank}: decompose the question, retrieve
+ * for each sub-query, then interleave-dedupe (round-robin) so EACH hop is
+ * represented in the final top-`topK` context even at a fixed budget. This targets
+ * multi_hop, where single-query retrieval surfaces one hop and buries the other.
+ */
+export async function answerFromBankMultiQuery(
+  state: CogcoreState,
+  llm: LlmClient,
+  question: LocomoQuestion,
+  topK: number,
+): Promise<AnswerResult> {
+  const subQueries = await decomposeQuestion(llm, question.question);
+  // Single query → identical to the plain path (avoids extra retrieval cost).
+  if (subQueries.length === 1) return answerFromBank(state, llm, question, topK);
+
+  const perQuery = await Promise.all(
+    subQueries.map((q) =>
+      state.kb.getRelevantKnowledge(
+        { description: q },
+        { maxNotes: topK, maxTokens: MAX_KNOWLEDGE_TOKENS },
+      ) as Promise<KnowMatch[]>,
+    ),
+  );
+
+  // Round-robin interleave across sub-queries, deduping by note id, until topK.
+  const seen = new Set<string>();
+  const merged: KnowMatch[] = [];
+  for (let rank = 0; merged.length < topK; rank++) {
+    let advanced = false;
+    for (const list of perQuery) {
+      if (rank < list.length) {
+        advanced = true;
+        const m = list[rank];
+        const id = m.note.frontmatter.id;
+        if (!seen.has(id)) {
+          seen.add(id);
+          merged.push(m);
+          if (merged.length >= topK) break;
+        }
+      }
+    }
+    if (!advanced) break;
+  }
+
+  const excerpts: RetrievedExcerpt[] = merged.map((m) => {
+    const body = m.note.body ?? "";
+    const type = m.matchType ?? "semantic";
+    return {
+      ref: `${m.note.frontmatter.id} [${type}]`,
+      text: excerptForQuery(body, question.question),
+    };
+  });
+  const prompt = buildAnswerPrompt(question, excerpts);
+  const { text, usage } = await llm.chat([{ role: "user", content: prompt }]);
+  return { text: text.trim(), retrieved: excerpts, ...usage };
+}
+
 export async function closeBank(state: CogcoreState | null): Promise<void> {
   if (!state) return;
   await state.kb.close?.();

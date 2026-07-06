@@ -534,3 +534,36 @@ refusal (22.2→15.7) — raw turns encourage over-answering unanswerable questi
 
 **Next lever: multi_hop synthesis** (iterative/multi-query retrieval, or stronger
 entity-centric fact linking) — the sole remaining source of mem0's edge.
+
+## Multi-query retrieval (decompose + interleave) — verdict: NO GAIN, do not adopt
+
+Hypothesis: multi_hop trails because a single embedding of the whole question
+surfaces one hop and buries the other. Fix (`multiQuery`, arm `cogcore-hybrid-mq`):
+an LLM decomposes each question into per-hop lookup queries, we retrieve for each,
+then round-robin interleave-dedupe so every hop is represented in the top-K context.
+Decomposition is conservative (single-fact questions pass through unchanged → plain
+path), which on a 5-conv sample removed an earlier single_hop regression while
+lifting sample multi_hop +4.7pp.
+
+Full ladder, N=1540, topK=16:
+
+| arm | answerable | single | multi | temporal | open | advers |
+|---|---|---|---|---|---|---|
+| cogcore-hybrid | 79.9 | 89.4 | 57.4 | 82.6 | 54.2 | 15.7 |
+| **cogcore-hybrid-mq** | 79.9 | 89.3 | 57.8 | 83.2 | 51.0 | 15.2 |
+| mem0 | 81.6 | 89.5 | 63.8 | 84.7 | 53.1 | 22.6 |
+
+**Overall identical (79.9%); multi_hop +0.4pp = ONE question (162→163/282).** The
+sample gains were small-n noise. open_domain regresses −3.2pp. Cost: +1 LLM call/q.
+
+**Why it fails:** multi-query improves retrieval *coverage*, but the multi_hop
+bottleneck is *synthesis*, not coverage — recall@16 for multi_hop is already ~79%
+(evidence is retrieved; the answerer just can't combine it). Decomposing the query
+doesn't help the LLM reason across facts. Confirms mem0's edge is write-time fact
+*linking/consolidation*, not retrieval breadth. Code kept as opt-in (`--` off by
+default) arm `cogcore-hybrid-mq` for reference; **not enabled**.
+
+**Next lever (synthesis-side): entity-centric fact linking** — connect related
+facts at write time (relationship edges on entity notes) so one retrieval surfaces
+a pre-linked structure the answerer can read directly, instead of asking it to
+re-derive the join at answer time.

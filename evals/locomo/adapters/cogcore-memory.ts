@@ -20,6 +20,7 @@ import { createObservation } from "cognitive-core";
 
 import {
   answerFromBank,
+  answerFromBankMultiQuery,
   closeBank,
   defaultScratchRoot,
   indexAndInject,
@@ -63,6 +64,12 @@ export interface CogcoreMemoryOptions {
    * verbatim detail while facts still provide consolidated/temporal signal.
    */
   hybridRawTurns?: boolean;
+  /**
+   * Decompose each question into per-hop sub-queries, retrieve for each, and
+   * interleave results so every hop is represented in the context. Targets the
+   * multi_hop gap where single-query retrieval buries the second hop.
+   */
+  multiQuery?: boolean;
 }
 
 interface ExtractedFact {
@@ -229,6 +236,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
   private readonly keywordExpansion: boolean;
   private readonly mmr?: MmrConfig;
   private readonly hybridRawTurns: boolean;
+  private readonly multiQuery: boolean;
   private readonly llm: LlmClient;
   private state: CogcoreState | null = null;
 
@@ -244,6 +252,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
     this.keywordExpansion = opts?.keywordExpansion ?? false;
     this.mmr = opts?.mmr;
     this.hybridRawTurns = opts?.hybridRawTurns ?? false;
+    this.multiQuery = opts?.multiQuery ?? false;
   }
 
   /** LLM hook for keyword expansion (returns only the completion text). */
@@ -387,7 +396,9 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
 
   async answer(question: LocomoQuestion): Promise<AnswerResult> {
     if (!this.state) throw new Error("ingest() must run before answer()");
-    return answerFromBank(this.state, this.llm, question, this.topK);
+    return this.multiQuery
+      ? answerFromBankMultiQuery(this.state, this.llm, question, this.topK)
+      : answerFromBank(this.state, this.llm, question, this.topK);
   }
 
   async reset(): Promise<void> {
