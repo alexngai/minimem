@@ -17,6 +17,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { createObservation } from "cognitive-core";
+import { createLlmMemoryEvolver, type MemoryEvolutionPlan } from "cognitive-core/memory";
 
 import {
   answerFromBank,
@@ -37,7 +38,7 @@ import type {
   MemorySystemAdapter,
   UsageStats,
 } from "../types.js";
-import type { LlmClient } from "../llm.js";
+import { LlmClient } from "../llm.js";
 
 export interface CogcoreMemoryOptions {
   topK?: number;
@@ -70,6 +71,14 @@ export interface CogcoreMemoryOptions {
    * multi_hop gap where single-query retrieval buries the second hop.
    */
   multiQuery?: boolean;
+  /**
+   * Run the agentic memory evolver at ingest (after extraction + defrag): an LLM
+   * proposes merge/link/supersede actions over the extracted facts, applied via
+   * cognitive-core's evolve() to pre-compute cross-fact structure for multi_hop.
+   * Raw-turn observations are excluded from the evolver's snapshot (they remain
+   * a retrievable detail floor).
+   */
+  evolve?: boolean;
 }
 
 interface ExtractedFact {
@@ -237,6 +246,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
   private readonly mmr?: MmrConfig;
   private readonly hybridRawTurns: boolean;
   private readonly multiQuery: boolean;
+  private readonly evolveMemory: boolean;
   private readonly llm: LlmClient;
   private state: CogcoreState | null = null;
 
@@ -253,6 +263,7 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
     this.mmr = opts?.mmr;
     this.hybridRawTurns = opts?.hybridRawTurns ?? false;
     this.multiQuery = opts?.multiQuery ?? false;
+    this.evolveMemory = opts?.evolve ?? false;
   }
 
   /** LLM hook for keyword expansion (returns only the completion text). */
@@ -284,6 +295,29 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
     const payload: ExtractionCache = { version: EXTRACTION_CACHE_VERSION, sampleId, sessions };
     await fs.mkdir(this.cacheDir, { recursive: true });
     await fs.writeFile(this.cachePath(sampleId), JSON.stringify(payload), "utf-8");
+  }
+
+  private planPath(sampleId: string): string {
+    return path.join(this.cacheDir, "..", "cogcore-evolve-plans", `${sampleId}.json`);
+  }
+
+  private async loadPlan(sampleId: string): Promise<MemoryEvolutionPlan | null> {
+    if (!this.cache) return null;
+    try {
+      const raw = await fs.readFile(this.planPath(sampleId), "utf-8");
+      const parsed = JSON.parse(raw) as { version: number; plan: MemoryEvolutionPlan };
+      if (parsed.version === EXTRACTION_CACHE_VERSION) return parsed.plan;
+    } catch {
+      // Miss — re-evolve.
+    }
+    return null;
+  }
+
+  private async savePlan(sampleId: string, plan: MemoryEvolutionPlan): Promise<void> {
+    if (!this.cache) return;
+    const p = this.planPath(sampleId);
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    await fs.writeFile(p, JSON.stringify({ version: EXTRACTION_CACHE_VERSION, plan }), "utf-8");
   }
 
   async ingest(conversation: LocomoConversation): Promise<UsageStats> {
@@ -388,6 +422,43 @@ export class CogcoreMemoryAdapter implements MemorySystemAdapter {
 
     // Heuristic consolidation → cross-session entity notes (no LLM).
     await state.kb.defragment();
+
+    // Agentic evolution: an LLM proposes merge/link/supersede over the extracted
+    // facts (raw turns excluded from its view but kept as a detail floor),
+    // pre-computing cross-fact structure so multi_hop answers from one lookup.
+    if (this.evolveMemory) {
+      // Cache the evolution plan (keyed by sampleId) so re-runs reuse a byte-
+      // identical evolved bank — deterministic, LLM-free A/B of read-side changes
+      // without re-extracting or re-evolving. Note ids are stable (padded ingest
+      // order over cached facts), so a cached plan's references stay valid.
+      let plan = await this.loadPlan(conversation.sampleId);
+      if (!plan) {
+        // Dedicated client with a large completion budget: the plan is a big JSON
+        // doc and GPT-5.5's reasoning tokens count against the budget — 4096 gets
+        // fully consumed by reasoning, yielding empty output. 16384 leaves room.
+        const evolveLlm = new LlmClient({ maxCompletionTokens: 16384 });
+        const evolver = createLlmMemoryEvolver(
+          async (prompt: string) => {
+            const { text, usage } = await evolveLlm.chat([{ role: "user", content: prompt }]);
+            promptTokens += usage.promptTokens;
+            completionTokens += usage.completionTokens;
+            totalTokens += usage.totalTokens;
+            return text;
+          },
+          { excludeTags: ["raw-turn"] },
+        );
+        plan = await evolver({
+          notes: await state.kb.getAllNotes(),
+          domains: await state.kb.listDomains(),
+          entities: await state.kb.listEntities(),
+        });
+        await this.savePlan(conversation.sampleId, plan);
+      }
+      const evo = await state.kb.applyEvolutionPlan(plan);
+      process.stderr.write(
+        `[cogcore-evolve] ${conversation.sampleId}: merged=${evo.merged} linked=${evo.linked} superseded=${evo.superseded} skipped=${evo.skipped}\n`,
+      );
+    }
 
     await indexAndInject(state, this.embeddings, this.topK, this.keywordHook(), this.mmr);
 

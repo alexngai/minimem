@@ -200,6 +200,19 @@ async function makeAdapter(
       (a as unknown as { name: string }).name = "cogcore-hybrid-mq";
       return a;
     }
+    case "cogcore-evolve": {
+      const { CogcoreMemoryAdapter } = await import("./adapters/cogcore-memory.js");
+      const a = new CogcoreMemoryAdapter(llm, {
+        topK: args.topk,
+        embeddings: args.embeddings,
+        keywordExpansion: args.keywordExpansion,
+        mmr: args.mmr,
+        hybridRawTurns: true,
+        evolve: true,
+      });
+      (a as unknown as { name: string }).name = "cogcore-evolve";
+      return a;
+    }
     case "mem0": {
       const { Mem0Adapter } = await import("./adapters/mem0.js");
       return new Mem0Adapter(llm, { topK: args.topk });

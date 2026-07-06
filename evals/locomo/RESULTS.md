@@ -567,3 +567,38 @@ default) arm `cogcore-hybrid-mq` for reference; **not enabled**.
 facts at write time (relationship edges on entity notes) so one retrieval surfaces
 a pre-linked structure the answerer can read directly, instead of asking it to
 re-derive the join at answer time.
+
+## Agentic memory evolution (write-time consolidation) — arm `cogcore-evolve`
+
+Implements the synthesis-side lever. cognitive-core gained a real evolution path:
+`KnowledgeBank.evolve(evolver)` where the evolver (LLM- or agent-backed) proposes a
+`MemoryEvolutionPlan` of `merge` / `link` / `supersede` actions applied via existing
+primitives (recordContradiction, consolidated entity notes, graph edges). Eval binding
+`createLlmMemoryEvolver` runs at ingest on the hybrid floor (raw turns excluded from the
+evolver's view but kept retrievable). Types + apply-path unit-tested (5 pass).
+
+**Token-budget bug (fixed):** the plan is a large JSON doc; GPT-5.5 reasoning tokens
+count against `max_completion_tokens`. At 4096 the model consumed the entire budget on
+reasoning → empty output → 0 actions. Dedicated evolve client at 16384 → healthy plans
+(3–8 merges + 11–18 links/conv, 0 skipped).
+
+Sample A/B (5-conv, seed=1, N=150, topK=16) vs `cogcore-hybrid`:
+
+| arm | overall | single | multi | temporal | open |
+|---|---|---|---|---|---|
+| cogcore-hybrid | 68.7 | 76.3 | 54.8 | 94.7 | 46.9 |
+| cogcore-evolve | 68.7 | 76.3 | **57.1** | 94.7 | 43.8 |
+
+Overall flat; multi_hop +2.3pp = +1 net question (within noise). **Root cause: the
+read side does not consume the evolved structure:**
+1. **Merged notes are suppressed.** `isEntityIndexRecord` flags *any* entity note with
+   an entity-layer link as a content-free index record and `search()` excludes it before
+   scoring. Merge notes carry `part-of` (entity-layer) links, so their dense consolidated
+   body — the multi_hop payload — is never embedded/retrieved.
+2. **Links aren't traversed.** `getRelevantKnowledge` uses only entity-layer *index*
+   links for boosting; the evolver's dominant output (`co-occurred`/`led-to`/`related-to`
+   edges) is never followed, so it is inert for retrieval.
+
+**Next: read-side consumption** — (A) gate `isEntityIndexRecord` on a trivial body so
+content-bearing consolidated notes stay retrievable; (B) optional 1-hop link expansion in
+`getRelevantKnowledge` so a match pulls in its linked neighbors. Then re-test the sample.
