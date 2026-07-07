@@ -4,6 +4,6 @@
     "rootDir": "..",
     "noEmit": true
   },
-  "include": ["datasets/**/*.ts", "harness/**/*.ts", "locomo/**/*.ts", "cli.ts"],
-  "exclude": ["node_modules", "datasets/cache", "locomo/cache"]
+  "include": ["datasets/**/*.ts", "harness/**/*.ts", "locomo/**/*.ts", "longmemeval/**/*.ts", "cli.ts"],
+  "exclude": ["node_modules", "datasets/cache", "locomo/cache", "longmemeval/cache"]
 }
