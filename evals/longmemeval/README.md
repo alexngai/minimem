@@ -58,6 +58,26 @@ Flags: `--per-category N` (stratified sample size per question type, default 10)
 `--no-abstain` (exclude abstention questions), `--sample N` (retrieval runner
 only — total instances), `--ks a,b,c` (k-sweep, reuses built indexes).
 
+## Results (LongMemEval_S, stratified sample)
+
+Curated headline numbers; regenerate full per-category/per-run breakdowns via
+the CLIs (raw `RESULTS-*.md` are gitignored).
+
+Retrieval recall@k (n=100):
+
+| arm            | k=5   | k=10  | k=20  |
+|----------------|-------|-------|-------|
+| `none` (BM25)  | 79.0% | 86.0% | 88.0% |
+| `local` (hybrid)| 89.0% | 92.0% | 97.0% |
+
+Hybrid's gains concentrate in the semantically-expressed categories where
+lexical search is weakest (recall@5, local vs BM25): single-session-preference
++25pp, multi-session +19pp, temporal-reasoning +13pp; knowledge-update and
+single-session-assistant are already saturated for BM25.
+
+QA accuracy (BM25 `none`, n=60, k=10): **81.7%** overall (multi-session weakest
+at 60%); abstention 1/1 refused. `local` QA A/B pending.
+
 ## Files
 
 - `dataset.ts` — cached loader over `swarmkit-eval`'s `loadLongMemEval` + stratified sampler.
