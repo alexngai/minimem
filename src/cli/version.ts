@@ -14,21 +14,42 @@ import { fileURLToPath } from "node:url";
  * This reads from the package.json at runtime to ensure the CLI
  * version always matches the published package version.
  */
-function getPackageVersion(): string {
+function getModuleDir(): string | null {
+  // ESM: derive from import.meta.url. In the CJS bundle, bundlers rewrite
+  // import.meta to an empty object, so url is undefined there.
   try {
-    // In ESM, we need to get __dirname equivalent
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = dirname(__filename);
-
-    // Navigate from src/cli/ to package root
-    const packagePath = join(__dirname, "../../package.json");
-    const packageJson = JSON.parse(readFileSync(packagePath, "utf-8"));
-    return packageJson.version || "0.0.0";
+    const url = import.meta.url;
+    if (url) return dirname(fileURLToPath(url));
   } catch {
-    // Fallback if we can't read package.json
-    // This might happen in bundled builds where path resolution differs
-    return "0.0.0";
+    // import.meta unavailable
   }
+  // CJS fallback
+  if (typeof __dirname !== "undefined") return __dirname;
+  return null;
+}
+
+function getPackageVersion(): string {
+  let dir = getModuleDir();
+  if (!dir) return "0.0.0";
+
+  // Walk up from the compiled file until we find minimem's package.json.
+  // The depth differs between source (src/cli/), the CLI bundle (dist/cli/),
+  // and the library bundle (dist/), so probe each ancestor.
+  for (let i = 0; i < 4; i++) {
+    try {
+      const packageJson = JSON.parse(
+        readFileSync(join(dir, "package.json"), "utf-8"),
+      );
+      if (packageJson.name === "minimem" && packageJson.version) {
+        return packageJson.version;
+      }
+    } catch {
+      // No package.json at this level — keep walking up
+    }
+    dir = dirname(dir);
+  }
+
+  return "0.0.0";
 }
 
 export const VERSION = getPackageVersion();

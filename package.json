@@ -72,9 +72,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "cognitive-core": "^0.2.5",
+    "mem0ai": "^3.0.13",
     "publint": "^0.3.21",
-    "swarmkit-eval": "^0.0.4",
+    "swarmkit-eval": "^0.0.9",
     "tsup": "^8.0.0",
+    "tsx": "^4.22.5",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
   }

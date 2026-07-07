@@ -34,6 +34,8 @@ program
   .description("Initialize a memory directory")
   .option("-g, --global", "Use ~/.minimem as global memory directory")
   .option("-f, --force", "Reinitialize even if already initialized")
+  .option("-p, --provider <name>", "Embedding provider (openai, gemini, local, none, auto); skips prompt")
+  .option("-y, --yes", "Accept defaults without prompting (non-interactive)")
   .action(init);
 
 // minimem search <query>
@@ -114,14 +116,14 @@ program
   .option("--unset <key>", "Remove a config value")
   .action(config);
 
-// minimem sync init-central <path>
+// minimem sync:init-central <path>
 program
   .command("sync:init-central <path>")
   .description("Initialize a central repository for syncing memories")
   .option("-f, --force", "Force creation even if directory exists")
   .action(syncInitCentral);
 
-// minimem sync init
+// minimem sync:init
 program
   .command("sync:init")
   .description("Initialize sync for a memory directory")

@@ -2,6 +2,9 @@
 # minimem SessionEnd (Stop) hook
 # Auto-summarizes the session by appending a note to today's daily log.
 # Uses the transcript path to determine what was worked on.
+#
+# Opt-in: disabled unless hooks.sessionEnd is true in a minimem config.
+# Enable with: minimem config --set hooks.sessionEnd=true [--global]
 
 set -euo pipefail
 
@@ -18,10 +21,12 @@ if [ "$STOP_ACTIVE" = "true" ]; then
   exit 0
 fi
 
-# Only proceed if minimem is initialized (local or global)
+# Detect initialized memory directories.
+# Contained layout: config.json + MEMORY.md at the memory root.
+# Legacy layouts: .minimem/ or .swarm/minimem/ subdirectory.
 HAS_LOCAL=""
 HAS_GLOBAL=""
-if [ -d ".minimem" ]; then
+if { [ -f "config.json" ] && [ -f "MEMORY.md" ]; } || [ -d ".minimem" ] || [ -f ".swarm/minimem/config.json" ]; then
   HAS_LOCAL="1"
 fi
 if [ -d "$HOME/.minimem" ]; then
@@ -32,13 +37,24 @@ if [ -z "$HAS_LOCAL" ] && [ -z "$HAS_GLOBAL" ]; then
   exit 0
 fi
 
-# Check config to see if this hook is enabled (defaults to true)
+# Check config to see if this hook is enabled (opt-in; defaults to false).
+# Reads the same config locations as the CLI: contained (config.json at the
+# memory root), then .swarm/minimem/, then legacy .minimem/. Local overrides global.
 HOOK_ENABLED=$(node -e "
   const fs = require('fs');
   const path = require('path');
-  const configs = [];
-  try { configs.push(JSON.parse(fs.readFileSync(path.join(process.env.HOME, '.minimem', '.minimem', 'config.json'), 'utf-8'))); } catch {}
-  try { configs.push(JSON.parse(fs.readFileSync('.minimem/config.json', 'utf-8'))); } catch {}
+  const load = (dir) => {
+    const candidates = [
+      path.join(dir, 'config.json'),
+      path.join(dir, '.swarm', 'minimem', 'config.json'),
+      path.join(dir, '.minimem', 'config.json'),
+    ];
+    for (const p of candidates) {
+      try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch {}
+    }
+    return null;
+  };
+  const configs = [load(path.join(process.env.HOME, '.minimem')), load('.')].filter(Boolean);
   // Last config wins (local overrides global)
   for (const c of configs.reverse()) {
     if (c.hooks && typeof c.hooks.sessionEnd === 'boolean') {
@@ -49,7 +65,7 @@ HOOK_ENABLED=$(node -e "
   console.log('false');
 " 2>/dev/null) || echo "false"
 
-if [ "$HOOK_ENABLED" = "false" ]; then
+if [ "$HOOK_ENABLED" != "true" ]; then
   exit 0
 fi
 

@@ -6,8 +6,8 @@
  * - Anthropic Claude tool use
  * - OpenAI function calling
  *
- * Note: Only memory_search is provided since the memory system is file-based.
- * Agents can use filesystem tools directly for read/write operations.
+ * Read tools only (search + retrieval + knowledge graph) — the memory system
+ * is file-based, so agents use filesystem tools directly for write operations.
  */
 
 import type { Minimem, MinimemSearchResult } from "../minimem.js";

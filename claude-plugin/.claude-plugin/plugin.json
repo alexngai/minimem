@@ -1,7 +1,7 @@
 {
   "name": "minimem",
   "description": "Lightweight file-based memory system with semantic search for AI agents. Store and recall context across sessions.",
-  "version": "0.0.3",
+  "version": "0.1.3",
   "author": {
     "name": "Alex Ngai"
   },
