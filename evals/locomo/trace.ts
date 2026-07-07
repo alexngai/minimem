@@ -22,7 +22,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { loadLocomo, turnCount } from "./dataset.js";
-import { judgeAnswer } from "./judge.js";
+import { isRefusal, judgeAnswer } from "./judge.js";
 import { LlmClient } from "./llm.js";
 import type {
   LocomoQuestion,
@@ -40,6 +40,10 @@ interface TraceArgs {
   embeddings: "local" | "none" | "nomic";
   keywordExpansion: boolean;
   mmr?: { lambda: number; poolSize: number };
+  /** When set, trace exactly these question ids (comma-separated), bypassing the
+   *  stratified sample AND the adversarial exclusion. Conversations are narrowed
+   *  to those containing a listed id. */
+  questionIds: string[];
   out: string;
 }
 
@@ -80,6 +84,10 @@ function parseArgs(argv: string[]): TraceArgs {
     mmr: argv.includes("--mmr")
       ? { lambda: Number(get("--mmr-lambda") ?? 0.7), poolSize: Number(get("--mmr-pool") ?? 50) }
       : undefined,
+    questionIds: (get("--question-ids") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     out: get("--out") ?? "evals/locomo/results/trace",
   };
 }
@@ -301,7 +309,15 @@ async function main(): Promise<void> {
   const keepAlive = setInterval(() => {}, 1 << 30);
 
   const all = await loadLocomo();
-  const conversations = all.slice(0, args.conversations);
+  const targetIds = new Set(args.questionIds);
+  const conversations = targetIds.size
+    ? all.filter((c) => c.questions.some((q) => targetIds.has(q.id)))
+    : all.slice(0, args.conversations);
+  if (targetIds.size) {
+    process.stderr.write(
+      `[trace] targeting ${targetIds.size} question id(s) across ${conversations.length} conversation(s)\n`,
+    );
+  }
 
   // question map keyed by questionId, filled per system.
   const qmap = new Map<string, TraceQuestion>();
@@ -315,12 +331,16 @@ async function main(): Promise<void> {
       await adapter.reset();
       await adapter.ingest(conv);
 
-      const questions = sampleQuestions(conv.questions, args.questions, args.seed);
+      const questions = targetIds.size
+        ? conv.questions.filter((q) => targetIds.has(q.id))
+        : sampleQuestions(conv.questions, args.questions, args.seed);
       process.stderr.write(`[${sysName}] tracing ${questions.length} questions...\n`);
 
       await mapPool(questions, args.concurrency, async (q) => {
         const ans = await adapter.answer(q, conv);
         const judged = await judgeAnswer(llm, q.question, q.answer, ans.text);
+        // Adversarial is scored on refusal, not gold-match (mirrors run.ts:280).
+        const correct = q.isAdversarial ? isRefusal(ans.text) : judged.correct;
         const key = q.id;
         let tq = qmap.get(key);
         if (!tq) {
@@ -338,7 +358,7 @@ async function main(): Promise<void> {
         tq.bySystem[sysName] = {
           system: sysName,
           predicted: ans.text,
-          correct: judged.correct,
+          correct,
           retrieved: ans.retrieved ?? [],
           judgeRaw: judged.raw,
         };
