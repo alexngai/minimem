@@ -13,14 +13,16 @@
 import fs from "node:fs/promises";
 
 import {
-  evaluateMemoryQARetrieval,
+  instanceToDocuments,
+  scopedTurnId,
   compareMemoryQARetrieval,
   formatMemoryQARetrievalAB,
+  type MemQAInstance,
   type MemoryQARetrievalReport,
 } from "swarmkit-eval";
 
 import { loadLongMemEvalCached, sampleInstances } from "./dataset.js";
-import { createMinimemSearch, type Embeddings } from "./minimem-search.js";
+import { createMinimemSearch, type Embeddings, type MinimemSearch } from "./minimem-search.js";
 
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
@@ -52,6 +54,86 @@ function parseArms(spec: string | boolean | undefined): Embeddings[] {
 }
 
 const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
+
+interface Acc {
+  hits: number;
+  rr: number;
+  n: number;
+}
+const emptyAcc = (): Acc => ({ hits: 0, rr: 0, n: 0 });
+const finalizeAcc = (a: Acc) => ({ recallAtK: a.n ? a.hits / a.n : 0, mrr: a.n ? a.rr / a.n : 0, n: a.n });
+
+/**
+ * Score recall@k / MRR for every k in `ks` with ONE retrieval per instance.
+ *
+ * Unlike calling `evaluateMemoryQARetrieval` once per k (which relies on the
+ * adapter keeping every index resident so later k's reuse them — a memory bomb
+ * for the `local`/`nomic` arms, each of which holds a loaded embedding model),
+ * this retrieves a single deep ranked list per instance, EVICTS the index
+ * immediately (freeing the model), and derives every k from that one list.
+ * Live embedding models are thus bounded to ~1. Mirrors the grader's evidence
+ * matching (turn ids via `scopedTurnId`, else session ids) exactly.
+ */
+async function scoreSweep(
+  instances: MemQAInstance[],
+  provider: string,
+  searcher: MinimemSearch,
+  ks: number[],
+): Promise<Map<number, MemoryQARetrievalReport>> {
+  const maxK = Math.max(...ks);
+  const overall = new Map<number, Acc>(ks.map((k) => [k, emptyAcc()]));
+  const byCat = new Map<string, Map<number, Acc>>();
+
+  for (const instance of instances) {
+    const docs = instanceToDocuments(instance);
+    const docToSession = new Map(docs.map((d) => [d.id, d.sessionId]));
+
+    for (const q of instance.questions) {
+      const hasTurnEvidence = q.evidenceTurnIds.length > 0;
+      const hasSessionEvidence = q.evidenceSessionIds.length > 0;
+      if (!hasTurnEvidence && !hasSessionEvidence) continue;
+
+      const ranked = await searcher.search(q.question, docs, { maxResults: maxK });
+      const evTurns = new Set(q.evidenceTurnIds.map((id) => scopedTurnId(instance.id, id)));
+      const evSessions = new Set(q.evidenceSessionIds);
+
+      // First matching rank in the shared ranked list; recall@k = (rank<=k).
+      let matchRank = 0;
+      for (let i = 0; i < ranked.length; i++) {
+        const id = ranked[i]!.id;
+        const matchTurn = hasTurnEvidence && evTurns.has(id);
+        const matchSession = !hasTurnEvidence && hasSessionEvidence && evSessions.has(docToSession.get(id) ?? "");
+        if (matchTurn || matchSession) {
+          matchRank = i + 1;
+          break;
+        }
+      }
+
+      const catAccs = byCat.get(q.category) ?? new Map<number, Acc>(ks.map((k) => [k, emptyAcc()]));
+      byCat.set(q.category, catAccs);
+      for (const k of ks) {
+        const hit = matchRank > 0 && matchRank <= k;
+        for (const acc of [overall.get(k)!, catAccs.get(k)!]) {
+          acc.n++;
+          if (hit) {
+            acc.hits++;
+            acc.rr += 1 / matchRank;
+          }
+        }
+      }
+    }
+    // Free the embedding model before moving to the next instance.
+    await searcher.evict(instance.id);
+  }
+
+  const out = new Map<number, MemoryQARetrievalReport>();
+  for (const k of ks) {
+    const byCategory: Record<string, ReturnType<typeof finalizeAcc>> = {};
+    for (const [cat, accs] of byCat) byCategory[cat] = finalizeAcc(accs.get(k)!);
+    out.set(k, { provider, k, overall: finalizeAcc(overall.get(k)!), byCategory });
+  }
+  return out;
+}
 
 function formatReport(report: MemoryQARetrievalReport): string {
   const cats = Object.keys(report.byCategory).sort();
@@ -94,14 +176,15 @@ async function main(): Promise<void> {
       },
     });
     try {
-      const perK = new Map<number, MemoryQARetrievalReport>();
-      for (const kk of ks) {
-        const started = Date.now();
-        const report = await evaluateMemoryQARetrieval(instances, arm, searcher.search, { k: kk });
-        perK.set(kk, report);
-        log(`  [${arm}] k=${kk}: recall ${pct(report.overall.recallAtK)} MRR ${report.overall.mrr.toFixed(3)} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
-      }
+      const started = Date.now();
+      // One retrieval per instance (evicted immediately) → all ks derived from it.
+      const perK = await scoreSweep(instances, arm, searcher, ks);
       reports.set(arm, perK);
+      for (const kk of ks) {
+        const r = perK.get(kk)!;
+        log(`  [${arm}] k=${kk}: recall ${pct(r.overall.recallAtK)} MRR ${r.overall.mrr.toFixed(3)}`);
+      }
+      log(`  [${arm}] done in ${((Date.now() - started) / 1000).toFixed(0)}s`);
       sections.push(`## arm: ${arm}\n`);
       for (const kk of ks) sections.push("```\n" + formatReport(perK.get(kk)!) + "\n```\n");
     } finally {
