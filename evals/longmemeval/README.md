@@ -75,8 +75,17 @@ lexical search is weakest (recall@5, local vs BM25): single-session-preference
 +25pp, multi-session +19pp, temporal-reasoning +13pp; knowledge-update and
 single-session-assistant are already saturated for BM25.
 
-QA accuracy (BM25 `none`, n=60, k=10): **81.7%** overall (multi-session weakest
-at 60%); abstention 1/1 refused. `local` QA A/B pending.
+QA accuracy (full 500-question LongMemEval_S, k=10):
+
+| arm             | accuracy | multi-session | preference | abstention |
+|-----------------|----------|---------------|------------|------------|
+| `none` (BM25)   | 76.2%    | 56%           | 57%        | 27/30 refused |
+| `local` (hybrid)| **81.6%**| **68%**       | **77%**    | 27/30 refused |
+
+Paired McNemar: local fixed 46 BM25 misses and broke 19 BM25 hits,
+**+5.4pp**, p=0.001. The run saw transient Azure HTTP 500s after retries
+(2 BM25 records, 2 local records), so the absolute scores are slightly noisy;
+the paired lift remains significant.
 
 ## Files
 
