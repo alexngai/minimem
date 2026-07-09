@@ -9,6 +9,7 @@ export type EmbeddingProvider = {
   model: string;
   embedQuery: (text: string) => Promise<number[]>;
   embedBatch: (texts: string[]) => Promise<number[][]>;
+  close?: () => void | Promise<void>;
 };
 
 export type EmbeddingProviderResult = {
@@ -96,9 +97,22 @@ function isMissingApiKeyError(err: unknown): boolean {
   return message.includes("API key") || message.includes("apiKey");
 }
 
-async function importNodeLlamaCpp() {
+async function importNodeLlamaCpp(): Promise<typeof import("node-llama-cpp")> {
   const llama = await import("node-llama-cpp");
   return llama;
+}
+
+let sharedLocalLlamaPromise: Promise<Llama> | null = null;
+
+function getSharedLocalLlama(llamaCpp: typeof import("node-llama-cpp")): Promise<Llama> {
+  if (!sharedLocalLlamaPromise) {
+    const promise = llamaCpp.getLlama({ logLevel: llamaCpp.LlamaLogLevel.error });
+    sharedLocalLlamaPromise = promise.catch((err) => {
+      if (sharedLocalLlamaPromise === promise) sharedLocalLlamaPromise = null;
+      throw err;
+    });
+  }
+  return sharedLocalLlamaPromise;
 }
 
 async function createLocalEmbeddingProvider(
@@ -107,24 +121,37 @@ async function createLocalEmbeddingProvider(
   const modelPath = options.local?.modelPath?.trim() || DEFAULT_LOCAL_MODEL;
   const modelCacheDir = options.local?.modelCacheDir?.trim();
 
-  const { getLlama, resolveModelFile, LlamaLogLevel } = await importNodeLlamaCpp();
+  const llamaCpp = await importNodeLlamaCpp();
 
-  let llama: Llama | null = null;
   let embeddingModel: LlamaModel | null = null;
   let embeddingContext: LlamaEmbeddingContext | null = null;
+  let closed = false;
 
   const ensureContext = async () => {
-    if (!llama) {
-      llama = await getLlama({ logLevel: LlamaLogLevel.error });
-    }
+    if (closed) throw new Error("Local embedding provider is closed");
+    const llama = await getSharedLocalLlama(llamaCpp);
     if (!embeddingModel) {
-      const resolved = await resolveModelFile(modelPath, modelCacheDir || undefined);
+      const resolved = await llamaCpp.resolveModelFile(modelPath, modelCacheDir || undefined);
       embeddingModel = await llama.loadModel({ modelPath: resolved });
     }
     if (!embeddingContext) {
       embeddingContext = await embeddingModel.createEmbeddingContext();
     }
     return embeddingContext;
+  };
+
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    const context = embeddingContext;
+    const model = embeddingModel;
+    embeddingContext = null;
+    embeddingModel = null;
+    try {
+      await context?.dispose();
+    } finally {
+      await model?.dispose();
+    }
   };
 
   return {
@@ -145,6 +172,7 @@ async function createLocalEmbeddingProvider(
       );
       return embeddings;
     },
+    close,
   };
 }
 

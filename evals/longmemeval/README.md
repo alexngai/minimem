@@ -31,6 +31,21 @@ npx tsx evals/longmemeval/dataset.ts
 | `local` | minimem hybrid RRF, embeddinggemma-300M via node-llama-cpp |
 | `nomic` | minimem hybrid RRF, Ollama `nomic-embed-text` (OpenAI-compatible) |
 
+## Arms (cognitive-core)
+
+| arm | memory path |
+|-----|-------------|
+| `cogcore-memory` | extracted facts in cognitive-core KnowledgeBank |
+| `cogcore-hybrid` | extracted facts plus raw turns in KnowledgeBank |
+| `cogcore-hybrid-mq` | `cogcore-hybrid` plus multi-query retrieval |
+| `cogcore-evolve` | `cogcore-hybrid` plus LLM memory evolution |
+| `cogcore-system` | `cogcore-hybrid` plus session-level ExperienceMemory |
+| `cogcore-system-evolve` | `cogcore-system` plus LLM memory evolution |
+
+System arms keep KnowledgeBank as the primary context channel and reserve only
+`min(4, floor(k/4))` final slots for ExperienceMemory, so session-level episodic
+matches supplement rather than displace high-ranked fact/raw-turn evidence.
+
 ## Retrieval-only grader
 
 Scores minimem's raw-turn retrieval against turn/session evidence labels
@@ -54,9 +69,26 @@ npx tsx evals/longmemeval/qa.ts --arms none,local --per-category 10 --k 10 \
   --concurrency 4 --out evals/longmemeval/RESULTS-qa.md
 ```
 
-Flags: `--per-category N` (stratified sample size per question type, default 10),
-`--no-abstain` (exclude abstention questions), `--sample N` (retrieval runner
-only — total instances), `--ks a,b,c` (k-sweep, reuses built indexes).
+QA flags: `--per-category N` (stratified sample size per question type, default
+10), `--sample N` (round-robin total question cap across categories),
+`--categories a,b,c` (restrict the stratified sample to those question types),
+`--category-offset N` (deterministic head-slice offset within each category),
+`--no-abstain` (exclude abstention questions), `--retrieval-only` (skip
+answer/judge and score whether retrieved context covers all gold evidence turn
+ids), and `--details-out path.jsonl` (`run` metadata, per-question
+answer/retrieval/evidence-coverage details, and per-arm cost summary). Add
+`--debug-all` on diagnostic runs to include
+question/gold/evidence-matching extracted facts and evolution actions even when
+the answer is correct.
+System-arm ExperienceMemory tuning flags: `--experience-granularity session|chunk|turn`,
+`--experience-chunk-turns N`, `--experience-embedding none|hash`,
+`--experience-scope knowledge-sessions|all`, `--experience-pool-size N`,
+`--experience-slots N`, and `--experience-min-score X`.
+Retrieval flags: `--ks a,b,c` (k-sweep, reuses built indexes).
+
+For cognitive-core arms, run the staged funnel in
+[`COGCORE-FUNNEL.md`](./COGCORE-FUNNEL.md): micro category smoke, targeted hard
+set, then balanced decision set before full 500.
 
 ## Results (LongMemEval_S, stratified sample)
 

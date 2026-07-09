@@ -1393,9 +1393,11 @@ export class Minimem {
     return getPathBetween(this.db, fromId, toId, maxDepth);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+
+    const providerClose = this.provider.close?.();
 
     if (this.watchTimer) {
       clearTimeout(this.watchTimer);
@@ -1411,6 +1413,12 @@ export class Minimem {
       this.db.close();
     } catch (err) {
       logError("dbClose", err, this.debug);
+    }
+
+    try {
+      await providerClose;
+    } catch (err) {
+      logError("providerClose", err, this.debug);
     }
   }
 }

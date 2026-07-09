@@ -16,9 +16,11 @@ evals/locomo/.cache/
 
 # LongMemEval dataset cache (277MB, download on demand — see evals/longmemeval/README.md)
 evals/longmemeval/cache/
+evals/longmemeval/.cache/
 
 # LongMemEval per-run outputs (regenerate via the CLIs; not curated docs)
 evals/longmemeval/RESULTS-*.md
+evals/longmemeval/DETAILS-*.jsonl
 
 # LOCOMO diagnostic checkpoints (transient resume state)
 evals/locomo/results/*.ckpt.json

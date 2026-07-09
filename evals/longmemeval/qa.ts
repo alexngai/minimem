@@ -1,13 +1,14 @@
 /**
- * LongMemEval full QA harness — ingest → retrieve → GPT-5.5 answer → mem0-judge,
+ * LongMemEval full QA harness — ingest → retrieve/answer → mem0-judge,
  * with abstention scoring, on swarmkit-eval's memory-QA harness.
  *
  *   npx tsx evals/longmemeval/qa.ts --arms local --per-category 10 --k 10 --out lme-qa.md
  *   npx tsx evals/longmemeval/qa.ts --arms none,local --per-category 8 --concurrency 4
  *
- * Per question: build a minimem index over the haystack turns, retrieve top-k,
- * evict the index (frees the embedding model before the LLM phase), have GPT-5.5
- * answer from the retrieved excerpts, then judge.
+ * Raw minimem arms build an index over the haystack turns, retrieve top-k,
+ * evict the index, have GPT-5.5 answer from the retrieved excerpts, then judge.
+ * Cogcore arms ingest the haystack into cognitive-core first, then answer from
+ * retrieved cognitive-core notes.
  *   - answerable questions → mem0 J-judge (generous, LoCoMo-leaderboard prompt)
  *   - abstention questions (`*_abs`) → scored on refusal, not gold-match
  *
@@ -16,6 +17,7 @@
  */
 
 import fs from "node:fs/promises";
+import path from "node:path";
 
 import {
   instanceToDocuments,
@@ -32,7 +34,21 @@ import {
 } from "swarmkit-eval";
 
 import { loadLongMemEvalCached } from "./dataset.js";
+import {
+  CogcoreLongMemEvalAdapter,
+  COGCORE_EXTRACTION_CACHE_VERSION,
+  defaultSystemExperienceSlots,
+  type ExperienceEmbedding,
+  type ExperienceGranularity,
+  type ExperienceScope,
+  type CogcoreLongMemEvalArm,
+} from "./cogcore-memory.js";
 import { createMinimemSearch, type Embeddings } from "./minimem-search.js";
+import {
+  buildLongMemEvalAnswerPrompt,
+  LME_ANSWER_PROMPT_VERSION,
+  type LongMemEvalAnswerExcerpt,
+} from "./prompt.js";
 import { LlmClient } from "../locomo/llm.js";
 
 function parseArgs(argv: string[]): Record<string, string | boolean> {
@@ -50,37 +66,427 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
   return out;
 }
 
-const KNOWN_ARMS: Embeddings[] = ["none", "local", "nomic"];
+type RetrievalArm = Embeddings;
+type Arm = RetrievalArm | CogcoreLongMemEvalArm;
+type QAJudgedBy = MemoryQARecord["judgedBy"] | "retrieval-only";
 
-function parseArms(spec: string | boolean | undefined): Embeddings[] {
+const RETRIEVAL_ARMS: RetrievalArm[] = ["none", "local", "nomic"];
+const COGCORE_ARMS: CogcoreLongMemEvalArm[] = [
+  "cogcore-memory",
+  "cogcore-hybrid",
+  "cogcore-hybrid-mq",
+  "cogcore-evolve",
+  "cogcore-system",
+  "cogcore-system-evolve",
+];
+const KNOWN_ARMS: Arm[] = [...RETRIEVAL_ARMS, ...COGCORE_ARMS];
+const RETRIEVAL_ONLY_ANSWER = "[retrieval-only]";
+const RETRIEVAL_ONLY_JUDGED_BY = "retrieval-only" as QAJudgedBy;
+
+function isRetrievalArm(arm: Arm): arm is RetrievalArm {
+  return RETRIEVAL_ARMS.includes(arm as RetrievalArm);
+}
+
+function isCogcoreArm(arm: Arm): arm is CogcoreLongMemEvalArm {
+  return COGCORE_ARMS.includes(arm as CogcoreLongMemEvalArm);
+}
+
+function parseArms(spec: string | boolean | undefined): Arm[] {
   if (!spec || spec === true) return ["local"];
-  const arms = String(spec).split(",").map((s) => s.trim()).filter(Boolean) as Embeddings[];
+  const arms = String(spec).split(",").map((s) => s.trim()).filter(Boolean) as Arm[];
   for (const a of arms) {
     if (!KNOWN_ARMS.includes(a)) throw new Error(`Unknown arm '${a}'. Use ${KNOWN_ARMS.join("|")}.`);
   }
   return arms;
 }
 
-/** LongMemEval answer prompt: excerpts carry `[speaker @ date]`; the question has
- *  its own ask-date (temporal reasoning). Instruct "Not mentioned" so absent-info
- *  and abstention questions produce a refusal the scorer can detect. */
-function buildLmeAnswerPrompt(question: string, questionDate: string | undefined, excerpts: MemQADocument[]): string {
-  const body = excerpts.map((e) => `- ${e.text}`).join("\n");
-  return [
-    "You are answering a question using ONLY the memory excerpts below, drawn from the user's past chat sessions.",
-    "Each excerpt is prefixed with its speaker (user/assistant) and the session date.",
-    "Answer concisely and directly. Use the dates to reason about timing and ordering when relevant.",
-    'If the excerpts do not contain enough information to answer, reply exactly: "Not mentioned".',
-    "",
-    questionDate ? `The question is asked on: ${questionDate}` : "",
-    "Memory excerpts:",
-    body,
-    "",
-    `Question: ${question}`,
-    "Answer:",
-  ]
-    .filter((l) => l !== "")
-    .join("\n");
+function parseExperienceGranularity(spec: string | boolean | undefined): ExperienceGranularity {
+  const value = spec && spec !== true ? String(spec) : "session";
+  if (value === "session" || value === "chunk" || value === "turn") return value;
+  throw new Error(`Unknown --experience-granularity '${value}'. Use session|chunk|turn.`);
+}
+
+function parseExperienceEmbedding(spec: string | boolean | undefined): ExperienceEmbedding {
+  const value = spec && spec !== true ? String(spec) : "none";
+  if (value === "none" || value === "hash") return value;
+  throw new Error(`Unknown --experience-embedding '${value}'. Use none|hash.`);
+}
+
+function parseExperienceScope(spec: string | boolean | undefined): ExperienceScope {
+  const value = spec && spec !== true ? String(spec) : "knowledge-sessions";
+  if (value === "knowledge-sessions" || value === "all") return value;
+  throw new Error(`Unknown --experience-scope '${value}'. Use knowledge-sessions|all.`);
+}
+
+function parseCategories(spec: string | boolean | undefined): string[] {
+  if (!spec || spec === true) return [];
+  return String(spec).split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+interface RetrievedDetail {
+  rank: number;
+  ref: string;
+  text: string;
+  channel?: "raw" | "knowledge" | "experience";
+  score?: number;
+  sourceRank?: number;
+  sourceScore?: number;
+  query?: string;
+  noteId?: string;
+  matchType?: string;
+  experienceId?: string;
+  turnIds?: string[];
+  selectedBy?: string;
+  docId?: string;
+  sessionId?: string;
+  turnId?: string;
+  speaker?: string;
+  date?: string;
+}
+
+interface EvidenceHit {
+  turnId: string;
+  sessionId?: string;
+  rank?: number;
+  ref?: string;
+  channel?: RetrievedDetail["channel"];
+  method: "turn-id" | "text-overlap" | "missing";
+  overlap?: number;
+  threshold?: number;
+}
+
+interface EvidenceCoverage {
+  total: number;
+  hit: number;
+  allHit: boolean;
+  missingTurnIds: string[];
+  maxHitRank?: number;
+  hits: EvidenceHit[];
+}
+
+interface MatchingFact {
+  index: number;
+  overlap: number;
+  fact: string;
+  entities: string[];
+}
+
+interface MatchingAction {
+  index: number;
+  overlap: number;
+  action: unknown;
+}
+
+interface CogcoreDebugArtifacts {
+  extraction?: {
+    path: string;
+    facts: number;
+    matchingFacts?: MatchingFact[];
+  };
+  evolution?: {
+    path: string;
+    actions: number;
+    matchingActions?: MatchingAction[];
+  };
+}
+
+interface QADetailRecord {
+  type: "record";
+  arm: Arm;
+  instanceId: string;
+  questionId: string;
+  category: string;
+  abstain: boolean;
+  question: string;
+  questionDate?: string;
+  gold: string;
+  answer: string;
+  correct: boolean;
+  judgedBy: QAJudgedBy;
+  evidenceTurnIds: string[];
+  evidenceSessionIds: string[];
+  evidenceCoverage: EvidenceCoverage;
+  retrieved: RetrievedDetail[];
+  debug?: CogcoreDebugArtifacts;
+  error?: string;
+}
+
+interface ArmRunResult {
+  report: MemoryQAReport;
+  details: QADetailRecord[];
+}
+
+interface RunMetadataRecord {
+  type: "run";
+  createdAt: string;
+  promptVersion: string;
+  dataset: string;
+  args: {
+    arms: Arm[];
+    k: number;
+    perCategory: number;
+    sample?: number;
+    targetCategories?: string[];
+    categoryOffset?: number;
+    includeAbstain: boolean;
+    abstainN: number;
+    concurrency: number;
+    cogcoreConcurrency: number;
+    extractConcurrency: number;
+    chunkTurns: number;
+    maxFactsPerChunk: number;
+    extractionCacheVersion: number;
+    systemExperienceSlots?: number;
+    experienceGranularity?: ExperienceGranularity;
+    experienceChunkTurns?: number;
+    experienceEmbedding?: ExperienceEmbedding;
+    experienceScope?: ExperienceScope;
+    experiencePoolSize?: number;
+    experienceMinScore?: number;
+    maxCompletionTokens: number;
+    retrievalOnly: boolean;
+    debugAll: boolean;
+  };
+  questionIds: string[];
+  categories: Record<string, number>;
+  command: string[];
+}
+
+interface ArmSummaryRecord {
+  type: "arm-summary";
+  arm: Arm;
+  accuracy: number;
+  n: number;
+  calls: number;
+  tokens: number;
+  wallMs: number;
+}
+
+type DetailJsonlRecord = RunMetadataRecord | QADetailRecord | ArmSummaryRecord;
+
+const STOPWORDS = new Set([
+  "about",
+  "after",
+  "also",
+  "and",
+  "are",
+  "but",
+  "can",
+  "did",
+  "does",
+  "for",
+  "from",
+  "had",
+  "has",
+  "have",
+  "how",
+  "into",
+  "need",
+  "not",
+  "out",
+  "the",
+  "their",
+  "then",
+  "there",
+  "they",
+  "this",
+  "was",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "with",
+  "you",
+  "your",
+]);
+
+function safeFileName(s: string): string {
+  return s.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function tokenizeForDebug(...parts: Array<string | undefined>): Set<string> {
+  const tokens = new Set<string>();
+  for (const part of parts) {
+    for (const tok of String(part ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)) {
+      if (tok.length > 2 && !STOPWORDS.has(tok)) tokens.add(tok);
+    }
+  }
+  return tokens;
+}
+
+function overlapScore(text: string, terms: Set<string>): number {
+  let n = 0;
+  const seen = new Set<string>();
+  for (const tok of tokenizeForDebug(text)) {
+    if (terms.has(tok) && !seen.has(tok)) {
+      seen.add(tok);
+      n++;
+    }
+  }
+  return n;
+}
+
+async function readJsonIfExists<T>(file: string): Promise<T | null> {
+  try {
+    return JSON.parse(await fs.readFile(file, "utf-8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function loadCogcoreDebugArtifacts(
+  instanceId: string,
+  question: string,
+  gold: string,
+  evidenceTexts: string[],
+  includeMatches: boolean,
+  includeEvolution: boolean,
+): Promise<CogcoreDebugArtifacts | undefined> {
+  const terms = tokenizeForDebug(question, gold, ...evidenceTexts);
+  const extractionPath = path.resolve(
+    "evals/longmemeval/.cache/cogcore-extractions",
+    `${safeFileName(instanceId)}.json`,
+  );
+  const evolutionPath = path.resolve(
+    "evals/longmemeval/.cache/cogcore-evolve-plans",
+    `${safeFileName(instanceId)}.json`,
+  );
+
+  const out: CogcoreDebugArtifacts = {};
+  const extraction = await readJsonIfExists<{
+    facts?: Array<{ fact?: string; entities?: string[] }>;
+  }>(extractionPath);
+  if (Array.isArray(extraction?.facts)) {
+    const scored = extraction.facts
+      .map((f, index) => ({
+        index,
+        overlap: overlapScore(f.fact ?? "", terms),
+        fact: f.fact ?? "",
+        entities: Array.isArray(f.entities) ? f.entities : [],
+      }))
+      .filter((f) => f.fact && f.overlap > 0)
+      .sort((a, b) => b.overlap - a.overlap || a.index - b.index)
+      .slice(0, 20);
+    out.extraction = {
+      path: extractionPath,
+      facts: extraction.facts.length,
+      ...(includeMatches ? { matchingFacts: scored } : {}),
+    };
+  }
+
+  const evolution = includeEvolution
+    ? await readJsonIfExists<{ plan?: { actions?: unknown[] } }>(evolutionPath)
+    : null;
+  if (Array.isArray(evolution?.plan?.actions)) {
+    const scored = evolution.plan.actions
+      .map((action, index) => ({
+        index,
+        overlap: overlapScore(JSON.stringify(action), terms),
+        action,
+      }))
+      .filter((a) => a.overlap > 0)
+      .sort((a, b) => b.overlap - a.overlap || a.index - b.index)
+      .slice(0, 20);
+    out.evolution = {
+      path: evolutionPath,
+      actions: evolution.plan.actions.length,
+      ...(includeMatches ? { matchingActions: scored } : {}),
+    };
+  }
+
+  return out.extraction || out.evolution ? out : undefined;
+}
+
+function evidenceTextsForQuestion(
+  instance: SampledMemQuestion["instance"],
+  evidenceTurnIds: string[],
+): string[] {
+  const wanted = new Set(evidenceTurnIds);
+  const out: string[] = [];
+  for (const session of instance.sessions) {
+    for (const turn of session.turns) {
+      if (wanted.has(turn.id)) out.push(turn.text);
+    }
+  }
+  return out;
+}
+
+function buildEvidenceCoverage(
+  instance: SampledMemQuestion["instance"],
+  evidenceTurnIds: string[],
+  retrieved: RetrievedDetail[],
+): EvidenceCoverage {
+  const turnById = new Map<string, { text: string; sessionId: string }>();
+  for (const session of instance.sessions) {
+    for (const turn of session.turns) turnById.set(turn.id, { text: turn.text, sessionId: session.id });
+  }
+
+  const hits = evidenceTurnIds.map((turnId): EvidenceHit => {
+    const turn = turnById.get(turnId);
+    const exact = retrieved.find(
+      (r) =>
+        r.turnId === turnId ||
+        r.turnIds?.includes(turnId) ||
+        r.ref.includes(turnId) ||
+        r.text.includes(turnId),
+    );
+    if (exact) {
+      return {
+        turnId,
+        sessionId: turn?.sessionId,
+        rank: exact.rank,
+        ref: exact.ref,
+        channel: exact.channel,
+        method: "turn-id",
+      };
+    }
+
+    if (turn?.text) {
+      const terms = tokenizeForDebug(turn.text);
+      const threshold = Math.min(8, Math.max(3, Math.ceil(terms.size * 0.25)));
+      let best: { item: RetrievedDetail; overlap: number } | null = null;
+      for (const item of retrieved) {
+        const overlap = overlapScore(item.text, terms);
+        if (!best || overlap > best.overlap) best = { item, overlap };
+      }
+      if (best && best.overlap >= threshold) {
+        return {
+          turnId,
+          sessionId: turn.sessionId,
+          rank: best.item.rank,
+          ref: best.item.ref,
+          channel: best.item.channel,
+          method: "text-overlap",
+          overlap: best.overlap,
+          threshold,
+        };
+      }
+      return {
+        turnId,
+        sessionId: turn.sessionId,
+        method: "missing",
+        overlap: best?.overlap ?? 0,
+        threshold,
+      };
+    }
+
+    return { turnId, method: "missing" };
+  });
+
+  const hitRanks = hits.flatMap((h) => (h.rank !== undefined ? [h.rank] : []));
+  const missingTurnIds = hits.filter((h) => h.method === "missing").map((h) => h.turnId);
+  return {
+    total: hits.length,
+    hit: hits.length - missingTurnIds.length,
+    allHit: missingTurnIds.length === 0,
+    missingTurnIds,
+    ...(hitRanks.length > 0 ? { maxHitRank: Math.max(...hitRanks) } : {}),
+    hits,
+  };
 }
 
 /** Run a bounded-concurrency map over items. */
@@ -99,17 +505,18 @@ async function mapPool<T, R>(items: T[], concurrency: number, fn: (item: T, i: n
 }
 
 async function runArm(
-  arm: Embeddings,
+  arm: RetrievalArm,
   sampled: SampledMemQuestion[],
   llm: LlmClient,
   k: number,
   concurrency: number,
+  retrievalOnly: boolean,
   log: (m: string) => void,
-): Promise<MemoryQAReport> {
+): Promise<ArmRunResult> {
   const searcher = createMinimemSearch(arm);
   let done = 0;
   try {
-    const records = await mapPool(sampled, concurrency, async ({ instance, question }) => {
+    const results = await mapPool(sampled, concurrency, async ({ instance, question }) => {
       const docs = instanceToDocuments(instance);
       // Serialized build + retrieve, then free the embedding model immediately.
       const ranked = await searcher.search(question.question, docs, { maxResults: k });
@@ -117,29 +524,64 @@ async function runArm(
 
       const byId = new Map(docs.map((d) => [d.id, d]));
       const excerpts = ranked.slice(0, k).map((r) => byId.get(r.id)!).filter(Boolean);
+      const retrieved: RetrievedDetail[] = ranked
+        .slice(0, k)
+        .flatMap((r, i) => {
+          const doc = byId.get(r.id);
+          if (!doc) return [];
+          const detail: RetrievedDetail = {
+            rank: r.rank ?? i + 1,
+            ref: r.id,
+            text: doc.text,
+            channel: "raw",
+            sourceRank: r.rank ?? i + 1,
+            selectedBy: "raw-topk",
+            docId: r.id,
+            sessionId: doc.sessionId,
+            turnId: doc.turnId,
+            speaker: doc.speaker,
+          };
+          if (r.score !== undefined) detail.score = r.score;
+          if (r.score !== undefined) detail.sourceScore = r.score;
+          if (doc.date !== undefined) detail.date = doc.date;
+          return [detail];
+        });
+      const evidenceCoverage = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved);
 
       let answer = "";
-      let judgedBy: MemoryQARecord["judgedBy"] = "error";
+      let judgedBy: QAJudgedBy = "error";
       let correct = false;
-      try {
-        const { text } = await llm.chat([
-          { role: "user", content: buildLmeAnswerPrompt(question.question, question.date, excerpts) },
-        ]);
-        answer = text.trim();
-        if (question.abstain) {
-          correct = isMemoryQARefusal(answer);
-          judgedBy = "abstain-sentinel";
-        } else {
-          correct = await judgeMemoryQACorrect(
-            (p) => llm.complete(p),
-            question.question,
-            question.answer,
-            answer,
-          );
-          judgedBy = "mem0-judge";
+      let error: string | undefined;
+      if (retrievalOnly) {
+        answer = RETRIEVAL_ONLY_ANSWER;
+        correct = evidenceCoverage.allHit;
+        judgedBy = RETRIEVAL_ONLY_JUDGED_BY;
+      } else {
+        try {
+          const promptExcerpts: LongMemEvalAnswerExcerpt[] = excerpts.map((e) => ({ text: e.text }));
+          const { text } = await llm.chat([
+            {
+              role: "user",
+              content: buildLongMemEvalAnswerPrompt(question.question, question.date, promptExcerpts),
+            },
+          ]);
+          answer = text.trim();
+          if (question.abstain) {
+            correct = isMemoryQARefusal(answer);
+            judgedBy = "abstain-sentinel";
+          } else {
+            correct = await judgeMemoryQACorrect(
+              (p) => llm.complete(p),
+              question.question,
+              question.answer,
+              answer,
+            );
+            judgedBy = "mem0-judge";
+          }
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err);
+          log(`  [${arm}] error on ${question.id}: ${error}`);
         }
-      } catch (err) {
-        log(`  [${arm}] error on ${question.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
 
       done++;
@@ -151,58 +593,446 @@ async function runArm(
         answer,
         gold: question.answer,
         correct,
-        judgedBy,
+        judgedBy: judgedBy as MemoryQARecord["judgedBy"],
       };
-      return rec;
+      const detail: QADetailRecord = {
+        type: "record",
+        arm,
+        instanceId: instance.id,
+        questionId: question.id,
+        category: question.category,
+        abstain: question.abstain,
+        question: question.question,
+        questionDate: question.date,
+        gold: question.answer,
+        answer,
+        correct,
+        judgedBy,
+        evidenceTurnIds: question.evidenceTurnIds,
+        evidenceSessionIds: question.evidenceSessionIds,
+        evidenceCoverage,
+        retrieved,
+        ...(error ? { error } : {}),
+      };
+      return { record: rec, detail };
     });
-    return buildMemoryQAReport(arm, k, records);
+    const records = results.map((r) => r.record);
+    return { report: buildMemoryQAReport(arm, k, records), details: results.map((r) => r.detail) };
   } finally {
     await searcher.close();
   }
 }
 
+async function runCogcoreArm(
+  arm: CogcoreLongMemEvalArm,
+  sampled: SampledMemQuestion[],
+  llm: LlmClient,
+  k: number,
+  concurrency: number,
+  extractConcurrency: number,
+  chunkTurns: number,
+  maxFactsPerChunk: number,
+  debugAll: boolean,
+  experienceGranularity: ExperienceGranularity,
+  experienceChunkTurns: number,
+  experienceEmbedding: ExperienceEmbedding,
+  experienceScope: ExperienceScope,
+  experiencePoolSize: number,
+  systemExperienceSlots: number,
+  experienceMinScore: number | undefined,
+  retrievalOnly: boolean,
+  log: (m: string) => void,
+): Promise<ArmRunResult> {
+  let done = 0;
+  const results = await mapPool(sampled, concurrency, async ({ instance, question }) => {
+    const adapter = new CogcoreLongMemEvalAdapter(llm, arm, {
+      topK: k,
+      embeddings: "local",
+      extractConcurrency,
+      chunkTurns,
+      maxFactsPerChunk,
+      experienceGranularity,
+      experienceChunkTurns,
+      experienceEmbedding,
+      experienceScope,
+      experiencePoolSize,
+      experienceSlots: systemExperienceSlots,
+      ...(experienceMinScore !== undefined ? { experienceMinScore } : {}),
+      onProgress: (m) => log(`  [${arm}] ${instance.id}: ${m}`),
+    });
+    let answer = "";
+    let judgedBy: QAJudgedBy = "error";
+    let correct = false;
+    let retrieved: RetrievedDetail[] = [];
+    let error: string | undefined;
+    try {
+      await adapter.ingest(instance);
+      if (retrievalOnly) {
+        const excerpts = await adapter.retrieve(question);
+        answer = RETRIEVAL_ONLY_ANSWER;
+        retrieved = excerpts.map((e, i) => ({
+          rank: i + 1,
+          ref: e.ref,
+          text: e.text,
+          channel: e.channel,
+          sourceRank: e.sourceRank,
+          sourceScore: e.sourceScore,
+          query: e.query,
+          noteId: e.noteId,
+          matchType: e.matchType,
+          experienceId: e.experienceId,
+          sessionId: e.sessionId,
+          turnIds: e.turnIds,
+          date: e.date,
+          selectedBy: e.selectedBy,
+        }));
+      } else {
+        const res = await adapter.answer(question);
+        answer = res.answer;
+        retrieved = res.retrieved.map((e, i) => ({
+          rank: i + 1,
+          ref: e.ref,
+          text: e.text,
+          channel: e.channel,
+          sourceRank: e.sourceRank,
+          sourceScore: e.sourceScore,
+          query: e.query,
+          noteId: e.noteId,
+          matchType: e.matchType,
+          experienceId: e.experienceId,
+          sessionId: e.sessionId,
+          turnIds: e.turnIds,
+          date: e.date,
+          selectedBy: e.selectedBy,
+        }));
+      }
+      await adapter.close();
+      if (retrievalOnly) {
+        correct = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved).allHit;
+        judgedBy = RETRIEVAL_ONLY_JUDGED_BY;
+      } else if (question.abstain) {
+        correct = isMemoryQARefusal(answer);
+        judgedBy = "abstain-sentinel";
+      } else {
+        correct = await judgeMemoryQACorrect(
+          (p) => llm.complete(p),
+          question.question,
+          question.answer,
+          answer,
+        );
+        judgedBy = "mem0-judge";
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      log(`  [${arm}] error on ${question.id}: ${error}`);
+    } finally {
+      await adapter.close();
+    }
+
+    done++;
+    log(`  [${arm}] ${done}/${sampled.length} ${question.id} ${correct ? "✓" : "✗"}`);
+    const evidenceCoverage = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved);
+    const record: MemoryQARecord = {
+      id: question.id,
+      category: question.category,
+      question: question.question,
+      answer,
+      gold: question.answer,
+      correct,
+      judgedBy: judgedBy as MemoryQARecord["judgedBy"],
+    };
+    const detail: QADetailRecord = {
+      type: "record",
+      arm,
+      instanceId: instance.id,
+      questionId: question.id,
+      category: question.category,
+      abstain: question.abstain,
+      question: question.question,
+      questionDate: question.date,
+      gold: question.answer,
+      answer,
+      correct,
+      judgedBy,
+      evidenceTurnIds: question.evidenceTurnIds,
+      evidenceSessionIds: question.evidenceSessionIds,
+      evidenceCoverage,
+      retrieved,
+      debug: await loadCogcoreDebugArtifacts(
+        instance.id,
+        question.question,
+        question.answer,
+        evidenceTextsForQuestion(instance, question.evidenceTurnIds),
+        debugAll || !correct,
+        arm === "cogcore-evolve" || arm === "cogcore-system-evolve",
+      ),
+      ...(error ? { error } : {}),
+    };
+    return { record, detail };
+  });
+  const records = results.map((r) => r.record);
+  return { report: buildMemoryQAReport(arm, k, records), details: results.map((r) => r.detail) };
+}
+
 const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
+
+function takeRoundRobinByCategory(sampled: SampledMemQuestion[], n: number): SampledMemQuestion[] {
+  const byCategory = new Map<string, SampledMemQuestion[]>();
+  for (const item of sampled) {
+    const key = item.question.category;
+    let bucket = byCategory.get(key);
+    if (!bucket) {
+      bucket = [];
+      byCategory.set(key, bucket);
+    }
+    bucket.push(item);
+  }
+
+  const categories = [...byCategory.keys()];
+  const out: SampledMemQuestion[] = [];
+  while (out.length < n) {
+    let advanced = false;
+    for (const category of categories) {
+      const item = byCategory.get(category)?.shift();
+      if (!item) continue;
+      out.push(item);
+      advanced = true;
+      if (out.length >= n) break;
+    }
+    if (!advanced) break;
+  }
+  return out;
+}
+
+function categoryCounts(sampled: SampledMemQuestion[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const item of sampled) out[item.question.category] = (out[item.question.category] ?? 0) + 1;
+  return out;
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const arms = parseArms(args.arms);
   const k = args.k ? Number(args.k) : 10;
   const perCategory = args["per-category"] ? Number(args["per-category"]) : 10;
+  const sample = args.sample ? Number(args.sample) : undefined;
+  const targetCategories = parseCategories(args.categories);
+  const categoryOffset = args["category-offset"] ? Number(args["category-offset"]) : undefined;
   const includeAbstain = args["no-abstain"] ? false : true;
   const concurrency = args.concurrency ? Number(args.concurrency) : 4;
+  const cogcoreConcurrency = args["cogcore-concurrency"] ? Number(args["cogcore-concurrency"]) : 1;
+  const extractConcurrency = args["extract-concurrency"] ? Number(args["extract-concurrency"]) : 2;
+  const chunkTurns = args["chunk-turns"] ? Number(args["chunk-turns"]) : 40;
+  const maxFactsPerChunk = args["max-facts-per-chunk"] ? Number(args["max-facts-per-chunk"]) : 60;
+  const debugAll = Boolean(args["debug-all"]);
+  const retrievalOnly = Boolean(args["retrieval-only"]);
+  const experienceGranularity = parseExperienceGranularity(args["experience-granularity"]);
+  const experienceChunkTurns = args["experience-chunk-turns"] ? Number(args["experience-chunk-turns"]) : 8;
+  const experienceEmbedding = parseExperienceEmbedding(args["experience-embedding"]);
+  const experienceScope = parseExperienceScope(args["experience-scope"]);
+  const experiencePoolSize = args["experience-pool-size"] ? Number(args["experience-pool-size"]) : 64;
+  const experienceMinScore = args["experience-min-score"] ? Number(args["experience-min-score"]) : undefined;
+  const hasCogcoreArm = arms.some((a) => isCogcoreArm(a));
+  const hasCogcoreSystemArm = arms.some((a) => String(a).startsWith("cogcore-system"));
+  const systemExperienceSlots = args["experience-slots"]
+    ? Number(args["experience-slots"])
+    : defaultSystemExperienceSlots(k);
+  const maxCompletionTokens = args["max-completion-tokens"]
+    ? Number(args["max-completion-tokens"])
+    : hasCogcoreArm
+      ? 8192
+      : 2048;
 
   const log = (m: string) => process.stderr.write(`[lme-qa] ${m}\n`);
 
   const all = loadLongMemEvalCached();
-  const sampled = sampleMemoryQAStratified(all, perCategory, { includeAbstain });
+  const allCategories = new Set(all.flatMap((inst) => inst.questions.map((q) => q.category)));
+  const unknownCategories = targetCategories.filter((category) => !allCategories.has(category));
+  if (unknownCategories.length > 0) {
+    throw new Error(
+      `Unknown --categories value(s): ${unknownCategories.join(", ")}. Available: ${[...allCategories].sort().join(", ")}`,
+    );
+  }
+  const source =
+    targetCategories.length > 0
+      ? all.filter((inst) => inst.questions.some((q) => targetCategories.includes(q.category)))
+      : all;
+  let sampled = sampleMemoryQAStratified(source, perCategory, {
+    includeAbstain,
+    ...(categoryOffset !== undefined ? { categoryOffset } : {}),
+  });
+  if (sample !== undefined) sampled = takeRoundRobinByCategory(sampled, sample);
   const abstainN = sampled.filter((s) => s.question.abstain).length;
   log(
-    `loaded ${all.length} instances → ${sampled.length} questions ` +
-      `(perCategory=${perCategory}, abstain=${abstainN}, arms=${arms.join(",")}, k=${k}, conc=${concurrency})`,
+    `loaded ${all.length} instances${source.length !== all.length ? ` (${source.length} targeted)` : ""} → ${sampled.length} questions ` +
+      `(perCategory=${perCategory}, sample=${sample ?? "off"}, abstain=${abstainN}, ` +
+      `categories=${targetCategories.length > 0 ? targetCategories.join(",") : "all"}, ` +
+      `categoryOffset=${categoryOffset ?? "stride"}, ` +
+      `arms=${arms.join(",")}, k=${k}, conc=${concurrency}, cogConc=${cogcoreConcurrency}, ` +
+      `extractConc=${extractConcurrency}, chunkTurns=${chunkTurns}, maxFactsPerChunk=${maxFactsPerChunk}, ` +
+      `retrievalOnly=${retrievalOnly}, debugAll=${debugAll}, ` +
+      `maxCompletionTokens=${maxCompletionTokens}${
+        hasCogcoreSystemArm
+          ? `, systemExperienceSlots=${systemExperienceSlots}, experienceGranularity=${experienceGranularity}, ` +
+            `experienceChunkTurns=${experienceChunkTurns}, experienceEmbedding=${experienceEmbedding}, ` +
+            `experienceScope=${experienceScope}, experiencePoolSize=${experiencePoolSize}, ` +
+            `experienceMinScore=${experienceMinScore ?? "off"}`
+          : ""
+      })`,
   );
 
-  const llm = new LlmClient({ maxCompletionTokens: 2048 });
+  const llm = new LlmClient({ maxCompletionTokens });
 
-  const reports = new Map<Embeddings, MemoryQAReport>();
-  const sections: string[] = [`# LongMemEval QA (n=${sampled.length}, k=${k})\n`];
+  const reports = new Map<Arm, MemoryQAReport>();
+  const detailRecords: DetailJsonlRecord[] = [
+    {
+      type: "run",
+      createdAt: new Date().toISOString(),
+      promptVersion: LME_ANSWER_PROMPT_VERSION,
+      dataset: "LongMemEval_S",
+      args: {
+        arms,
+        k,
+        perCategory,
+        ...(sample !== undefined ? { sample } : {}),
+        ...(targetCategories.length > 0 ? { targetCategories } : {}),
+        ...(categoryOffset !== undefined ? { categoryOffset } : {}),
+        includeAbstain,
+        abstainN,
+        concurrency,
+        cogcoreConcurrency,
+        extractConcurrency,
+        chunkTurns,
+        maxFactsPerChunk,
+        extractionCacheVersion: COGCORE_EXTRACTION_CACHE_VERSION,
+        ...(hasCogcoreSystemArm
+          ? {
+              systemExperienceSlots,
+              experienceGranularity,
+              experienceChunkTurns,
+              experienceEmbedding,
+              experienceScope,
+              experiencePoolSize,
+              ...(experienceMinScore !== undefined ? { experienceMinScore } : {}),
+            }
+          : {}),
+        maxCompletionTokens,
+        retrievalOnly,
+        debugAll,
+      },
+      questionIds: sampled.map((s) => s.question.id),
+      categories: categoryCounts(sampled),
+      command: process.argv,
+    },
+  ];
+
+  const sections: string[] = [
+    `# LongMemEval ${retrievalOnly ? "Retrieval Coverage" : "QA"} (n=${sampled.length}, k=${k})\n`,
+  ];
+  if (retrievalOnly) {
+    sections.push(
+      "Retrieval-only mode: answers and judges are skipped; `accuracy` means all gold evidence turn ids were covered by the retrieved context.\n",
+    );
+  }
+  sections.push("## run config\n");
+  sections.push(
+    "```json\n" +
+      JSON.stringify(
+        {
+          promptVersion: LME_ANSWER_PROMPT_VERSION,
+          arms,
+          k,
+          perCategory,
+          sample: sample ?? null,
+          targetCategories: targetCategories.length > 0 ? targetCategories : null,
+          categoryOffset: categoryOffset ?? null,
+          includeAbstain,
+          abstainN,
+          concurrency,
+          cogcoreConcurrency,
+          extractConcurrency,
+          chunkTurns,
+          maxFactsPerChunk,
+          extractionCacheVersion: COGCORE_EXTRACTION_CACHE_VERSION,
+          ...(hasCogcoreSystemArm
+            ? {
+                systemExperienceSlots,
+                experienceGranularity,
+                experienceChunkTurns,
+                experienceEmbedding,
+                experienceScope,
+                experiencePoolSize,
+                ...(experienceMinScore !== undefined ? { experienceMinScore } : {}),
+              }
+            : {}),
+          maxCompletionTokens,
+          retrievalOnly,
+          debugAll,
+          questionIds: sampled.map((s) => s.question.id),
+          categories: categoryCounts(sampled),
+        },
+        null,
+        2,
+      ) +
+      "\n```\n",
+  );
 
   for (const arm of arms) {
     const started = Date.now();
     const before = { ...llm.totals };
-    const report = await runArm(arm, sampled, llm, k, concurrency, log);
+    const run = isRetrievalArm(arm)
+      ? await runArm(arm, sampled, llm, k, concurrency, retrievalOnly, log)
+      : isCogcoreArm(arm)
+        ? await runCogcoreArm(
+            arm,
+            sampled,
+            llm,
+            k,
+            Math.min(concurrency, cogcoreConcurrency),
+            extractConcurrency,
+            chunkTurns,
+            maxFactsPerChunk,
+            debugAll,
+            experienceGranularity,
+            experienceChunkTurns,
+            experienceEmbedding,
+            experienceScope,
+            experiencePoolSize,
+            systemExperienceSlots,
+            experienceMinScore,
+            retrievalOnly,
+            log,
+          )
+        : (() => {
+            throw new Error(`Unhandled arm: ${arm}`);
+          })();
+    const report = run.report;
     reports.set(arm, report);
+    detailRecords.push(...run.details);
     const tokens = llm.totals.totalTokens - before.totalTokens;
     const calls = llm.totals.calls - before.calls;
+    const wallMs = Date.now() - started;
+    detailRecords.push({
+      type: "arm-summary",
+      arm,
+      accuracy: report.overall.accuracy,
+      n: report.overall.n,
+      calls,
+      tokens,
+      wallMs,
+    });
     log(
       `  [${arm}] overall ${pct(report.overall.accuracy)} ` +
-        `(${((Date.now() - started) / 1000).toFixed(0)}s, ${calls} llm calls, ${tokens} tokens)`,
+        `(${(wallMs / 1000).toFixed(0)}s, ${calls} llm calls, ${tokens} tokens)`,
     );
 
     sections.push(`## arm: ${arm}\n`);
     sections.push("```\n" + formatMemoryQA(report) + "\n```\n");
     // Abstention questions are folded into their question_type category; report
     // their refusal accuracy explicitly.
-    const absRecords = report.records.filter((r) => sampled.find((s) => s.question.id === r.id)?.question.abstain);
+    const absRecords = retrievalOnly
+      ? []
+      : report.records.filter((r) => sampled.find((s) => s.question.id === r.id)?.question.abstain);
     if (absRecords.length > 0) {
       const refused = absRecords.filter((r) => isMemoryQARefusal(r.answer)).length;
       sections.push(
@@ -240,6 +1070,14 @@ async function main(): Promise<void> {
     log(`wrote ${String(args.out)}`);
   } else {
     process.stdout.write(md + "\n");
+  }
+
+  if (args["details-out"]) {
+    await fs.writeFile(
+      String(args["details-out"]),
+      `${detailRecords.map((r) => JSON.stringify(r)).join("\n")}\n`,
+    );
+    log(`wrote ${String(args["details-out"])}`);
   }
 }
 

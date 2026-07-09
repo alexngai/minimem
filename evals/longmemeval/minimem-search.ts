@@ -189,13 +189,13 @@ export function createMinimemSearch(
     const idx = built.get(instanceId);
     if (!idx) return;
     built.delete(instanceId);
-    idx.mm.close?.();
+    await idx.mm.close?.();
     await fs.rm(idx.dir, { recursive: true, force: true }).catch(() => {});
   }
 
   async function close(): Promise<void> {
     for (const idx of built.values()) {
-      idx.mm.close?.();
+      await idx.mm.close?.();
       await fs.rm(idx.dir, { recursive: true, force: true }).catch(() => {});
     }
     built.clear();

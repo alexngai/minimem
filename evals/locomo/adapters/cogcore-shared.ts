@@ -408,7 +408,7 @@ export async function answerFromBankMultiQuery(
 export async function closeBank(state: CogcoreState | null): Promise<void> {
   if (!state) return;
   await state.kb.close?.();
-  state.mm?.close?.();
+  await state.mm?.close?.();
   await fs.rm(state.dir, { recursive: true, force: true }).catch(() => {});
 }
 
