@@ -23,6 +23,7 @@ import path from "node:path";
 import type { MemQADocument, MemoryQARankedResult } from "swarmkit-eval";
 
 import { Minimem } from "../../src/index.js";
+import { acquireLocalEmbeddingLease, type LocalEmbeddingLease } from "../local-embedding-lock.js";
 
 /**
  * Retrieval embedding backend (mirrors the cogcore arms):
@@ -63,6 +64,7 @@ function embeddingConfig(embeddings: Embeddings): Pick<MinimemArgs, "embedding" 
 interface BuiltIndex {
   dir: string;
   mm: Minimem;
+  lease: LocalEmbeddingLease | null;
   /** note basename → document id (resolve search hits back to the doc id). */
   byBase: Map<string, string>;
 }
@@ -108,10 +110,6 @@ export function createMinimemSearch(
   const minFetch = opts.minFetch ?? 50;
   const built = new Map<string, BuiltIndex>();
   const inflight = new Map<string, Promise<BuiltIndex>>();
-  // Serialize the embedding-heavy build phase: local (node-llama-cpp) models are
-  // memory-heavy, and two concurrent embedders have OOM'd before. Only ONE index
-  // builds at a time; the LLM answer/judge phase downstream stays concurrent.
-  let buildChain: Promise<unknown> = Promise.resolve();
 
   async function buildIndex(instanceId: string, docs: MemQADocument[]): Promise<BuiltIndex> {
     const dir = await fs.mkdtemp(path.join(scratchRoot, "lme-mm-"));
@@ -127,19 +125,34 @@ export function createMinimemSearch(
       n++;
     }
 
-    const mm = await Minimem.create({
-      memoryDir: dir,
-      dbPath: path.join(dir, "index.db"),
-      ...embeddingConfig(embeddings),
-      query: { maxResults: Math.max(minFetch, docs.length), minScore: 0 },
-      watch: { enabled: false },
+    const lease = await acquireLocalEmbeddingLease(embeddings, {
+      label: `longmemeval:${instanceId}`,
     });
-    await mm.sync({ reason: "ingest" });
+    let mm: Minimem | null = null;
+    try {
+      mm = await Minimem.create({
+        memoryDir: dir,
+        dbPath: path.join(dir, "index.db"),
+        ...embeddingConfig(embeddings),
+        query: { maxResults: Math.max(minFetch, docs.length), minScore: 0 },
+        watch: { enabled: false },
+      });
+      await mm.sync({ reason: "ingest" });
 
-    const idx: BuiltIndex = { dir, mm, byBase };
-    built.set(instanceId, idx);
-    opts.onIndexBuilt?.(instanceId, docs.length);
-    return idx;
+      const idx: BuiltIndex = { dir, mm, lease, byBase };
+      built.set(instanceId, idx);
+      opts.onIndexBuilt?.(instanceId, docs.length);
+      return idx;
+    } catch (err) {
+      try {
+        await mm?.close?.();
+      } catch {
+        // Preserve the original build failure.
+      }
+      await lease?.release();
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
   }
 
   /** Get (or build) an index, deduping concurrent requests for the same instance
@@ -150,9 +163,7 @@ export function createMinimemSearch(
     const pending = inflight.get(instanceId);
     if (pending) return pending;
 
-    const p = buildChain.then(() => buildIndex(instanceId, docs));
-    // Keep the chain alive regardless of this build's outcome.
-    buildChain = p.catch(() => undefined);
+    const p = buildIndex(instanceId, docs);
     inflight.set(instanceId, p);
     p.finally(() => inflight.delete(instanceId));
     return p;
@@ -189,13 +200,21 @@ export function createMinimemSearch(
     const idx = built.get(instanceId);
     if (!idx) return;
     built.delete(instanceId);
-    await idx.mm.close?.();
+    try {
+      await idx.mm.close?.();
+    } finally {
+      await idx.lease?.release();
+    }
     await fs.rm(idx.dir, { recursive: true, force: true }).catch(() => {});
   }
 
   async function close(): Promise<void> {
     for (const idx of built.values()) {
-      await idx.mm.close?.();
+      try {
+        await idx.mm.close?.();
+      } finally {
+        await idx.lease?.release();
+      }
       await fs.rm(idx.dir, { recursive: true, force: true }).catch(() => {});
     }
     built.clear();

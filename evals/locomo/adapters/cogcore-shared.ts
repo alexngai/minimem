@@ -22,6 +22,7 @@ import type {
 import { KnowledgeBankConfigSchema } from "cognitive-core";
 
 import { Minimem } from "../../../src/index.js";
+import { acquireLocalEmbeddingLease, type LocalEmbeddingLease } from "../../local-embedding-lock.js";
 import { buildAnswerPrompt, type RetrievedExcerpt } from "../judge.js";
 import type { LlmClient } from "../llm.js";
 import type { AnswerResult, LocomoQuestion } from "../types.js";
@@ -70,6 +71,7 @@ export interface CogcoreState {
   memoryDir: string;
   kb: InstanceType<typeof KnowledgeBank>;
   mm: Minimem | null;
+  embeddingLease?: LocalEmbeddingLease | null;
 }
 
 /** Create a scratch dir + an initialized, memory-only KnowledgeBank. */
@@ -95,15 +97,30 @@ export async function indexAndInject(
   /** When set, wrap retrieval in MMR diversity re-ranking over a wide pool. */
   mmr?: MmrConfig,
 ): Promise<void> {
-  const mm = await Minimem.create({
-    memoryDir: state.memoryDir,
-    dbPath: path.join(state.dir, "index.db"),
-    ...embeddingConfig(embeddings),
-    query: { maxResults: mmr ? Math.max(mmr.poolSize, topK) : topK, minScore: 0 },
-    watch: { enabled: false },
+  const lease = await acquireLocalEmbeddingLease(embeddings, {
+    label: `cogcore:${path.basename(state.dir)}`,
   });
-  await mm.sync({ reason: "ingest" });
-  state.mm = mm;
+  let mm: Minimem | null = null;
+  try {
+    mm = await Minimem.create({
+      memoryDir: state.memoryDir,
+      dbPath: path.join(state.dir, "index.db"),
+      ...embeddingConfig(embeddings),
+      query: { maxResults: mmr ? Math.max(mmr.poolSize, topK) : topK, minScore: 0 },
+      watch: { enabled: false },
+    });
+    await mm.sync({ reason: "ingest" });
+    state.mm = mm;
+    state.embeddingLease = lease;
+  } catch (err) {
+    try {
+      await mm?.close?.();
+    } catch {
+      // Preserve the original index failure.
+    }
+    await lease?.release();
+    throw err;
+  }
 
   const provider = new MinimemSearchProvider({
     search: (query, options) => mm.search(query, { ...options, skipStaleCheck: true }),
@@ -407,9 +424,20 @@ export async function answerFromBankMultiQuery(
 
 export async function closeBank(state: CogcoreState | null): Promise<void> {
   if (!state) return;
-  await state.kb.close?.();
-  await state.mm?.close?.();
-  await fs.rm(state.dir, { recursive: true, force: true }).catch(() => {});
+  try {
+    try {
+      await state.kb.close?.();
+    } finally {
+      try {
+        await state.mm?.close?.();
+      } finally {
+        await state.embeddingLease?.release();
+        state.embeddingLease = null;
+      }
+    }
+  } finally {
+    await fs.rm(state.dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 export function defaultScratchRoot(): string {

@@ -36,11 +36,14 @@ import {
 import { loadLongMemEvalCached } from "./dataset.js";
 import {
   CogcoreLongMemEvalAdapter,
+  CogcoreLiveLongMemEvalAdapter,
   COGCORE_EXTRACTION_CACHE_VERSION,
   defaultSystemExperienceSlots,
+  type LiveAnswerTrace,
   type ExperienceEmbedding,
   type ExperienceGranularity,
   type ExperienceScope,
+  type CogcoreLiveLongMemEvalArm,
   type CogcoreLongMemEvalArm,
 } from "./cogcore-memory.js";
 import { createMinimemSearch, type Embeddings } from "./minimem-search.js";
@@ -67,7 +70,7 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 }
 
 type RetrievalArm = Embeddings;
-type Arm = RetrievalArm | CogcoreLongMemEvalArm;
+type Arm = RetrievalArm | CogcoreLongMemEvalArm | CogcoreLiveLongMemEvalArm;
 type QAJudgedBy = MemoryQARecord["judgedBy"] | "retrieval-only";
 
 const RETRIEVAL_ARMS: RetrievalArm[] = ["none", "local", "nomic"];
@@ -79,7 +82,8 @@ const COGCORE_ARMS: CogcoreLongMemEvalArm[] = [
   "cogcore-system",
   "cogcore-system-evolve",
 ];
-const KNOWN_ARMS: Arm[] = [...RETRIEVAL_ARMS, ...COGCORE_ARMS];
+const COGCORE_LIVE_ARMS: CogcoreLiveLongMemEvalArm[] = ["cogcore-live"];
+const KNOWN_ARMS: Arm[] = [...RETRIEVAL_ARMS, ...COGCORE_ARMS, ...COGCORE_LIVE_ARMS];
 const RETRIEVAL_ONLY_ANSWER = "[retrieval-only]";
 const RETRIEVAL_ONLY_JUDGED_BY = "retrieval-only" as QAJudgedBy;
 
@@ -89,6 +93,10 @@ function isRetrievalArm(arm: Arm): arm is RetrievalArm {
 
 function isCogcoreArm(arm: Arm): arm is CogcoreLongMemEvalArm {
   return COGCORE_ARMS.includes(arm as CogcoreLongMemEvalArm);
+}
+
+function isCogcoreLiveArm(arm: Arm): arm is CogcoreLiveLongMemEvalArm {
+  return COGCORE_LIVE_ARMS.includes(arm as CogcoreLiveLongMemEvalArm);
 }
 
 function parseArms(spec: string | boolean | undefined): Arm[] {
@@ -123,11 +131,23 @@ function parseCategories(spec: string | boolean | undefined): string[] {
   return String(spec).split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+function sampleByQuestionIds(source: ReturnType<typeof loadLongMemEvalCached>, questionIds: string[]): SampledMemQuestion[] {
+  const byId = new Map<string, SampledMemQuestion>();
+  for (const instance of source) {
+    for (const question of instance.questions) {
+      if (questionIds.includes(question.id)) byId.set(question.id, { instance, question });
+    }
+  }
+  const missing = questionIds.filter((id) => !byId.has(id));
+  if (missing.length > 0) throw new Error(`Unknown --question-ids value(s): ${missing.join(", ")}`);
+  return questionIds.map((id) => byId.get(id)!);
+}
+
 interface RetrievedDetail {
   rank: number;
   ref: string;
   text: string;
-  channel?: "raw" | "knowledge" | "experience";
+  channel?: "raw" | "knowledge" | "experience" | "tool";
   score?: number;
   sourceRank?: number;
   sourceScore?: number;
@@ -190,6 +210,16 @@ interface CogcoreDebugArtifacts {
   };
 }
 
+interface QATimingMs {
+  total: number;
+  ingest?: number;
+  retrieve?: number;
+  answer?: number;
+  adapterClose?: number;
+  judge?: number;
+  debug?: number;
+}
+
 interface QADetailRecord {
   type: "record";
   arm: Arm;
@@ -208,6 +238,8 @@ interface QADetailRecord {
   evidenceCoverage: EvidenceCoverage;
   retrieved: RetrievedDetail[];
   debug?: CogcoreDebugArtifacts;
+  liveTrace?: LiveAnswerTrace;
+  timingMs?: QATimingMs;
   error?: string;
 }
 
@@ -243,6 +275,8 @@ interface RunMetadataRecord {
     experienceScope?: ExperienceScope;
     experiencePoolSize?: number;
     experienceMinScore?: number;
+    liveToolQueries?: number;
+    liveToolResults?: number;
     maxCompletionTokens: number;
     retrievalOnly: boolean;
     debugAll: boolean;
@@ -665,10 +699,16 @@ async function runCogcoreArm(
     let correct = false;
     let retrieved: RetrievedDetail[] = [];
     let error: string | undefined;
+    const totalStarted = Date.now();
+    const timingMs: QATimingMs = { total: 0 };
     try {
+      const ingestStarted = Date.now();
       await adapter.ingest(instance);
+      timingMs.ingest = Date.now() - ingestStarted;
       if (retrievalOnly) {
+        const retrieveStarted = Date.now();
         const excerpts = await adapter.retrieve(question);
+        timingMs.retrieve = Date.now() - retrieveStarted;
         answer = RETRIEVAL_ONLY_ANSWER;
         retrieved = excerpts.map((e, i) => ({
           rank: i + 1,
@@ -687,7 +727,9 @@ async function runCogcoreArm(
           selectedBy: e.selectedBy,
         }));
       } else {
+        const answerStarted = Date.now();
         const res = await adapter.answer(question);
+        timingMs.answer = Date.now() - answerStarted;
         answer = res.answer;
         retrieved = res.retrieved.map((e, i) => ({
           rank: i + 1,
@@ -706,27 +748,35 @@ async function runCogcoreArm(
           selectedBy: e.selectedBy,
         }));
       }
+      const closeStarted = Date.now();
       await adapter.close();
+      timingMs.adapterClose = (timingMs.adapterClose ?? 0) + Date.now() - closeStarted;
       if (retrievalOnly) {
         correct = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved).allHit;
         judgedBy = RETRIEVAL_ONLY_JUDGED_BY;
       } else if (question.abstain) {
+        const judgeStarted = Date.now();
         correct = isMemoryQARefusal(answer);
+        timingMs.judge = Date.now() - judgeStarted;
         judgedBy = "abstain-sentinel";
       } else {
+        const judgeStarted = Date.now();
         correct = await judgeMemoryQACorrect(
           (p) => llm.complete(p),
           question.question,
           question.answer,
           answer,
         );
+        timingMs.judge = Date.now() - judgeStarted;
         judgedBy = "mem0-judge";
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       log(`  [${arm}] error on ${question.id}: ${error}`);
     } finally {
+      const closeStarted = Date.now();
       await adapter.close();
+      timingMs.adapterClose = (timingMs.adapterClose ?? 0) + Date.now() - closeStarted;
     }
 
     done++;
@@ -741,6 +791,17 @@ async function runCogcoreArm(
       correct,
       judgedBy: judgedBy as MemoryQARecord["judgedBy"],
     };
+    const debugStarted = Date.now();
+    const debug = await loadCogcoreDebugArtifacts(
+      instance.id,
+      question.question,
+      question.answer,
+      evidenceTextsForQuestion(instance, question.evidenceTurnIds),
+      debugAll || !correct,
+      arm === "cogcore-evolve" || arm === "cogcore-system-evolve",
+    );
+    timingMs.debug = Date.now() - debugStarted;
+    timingMs.total = Date.now() - totalStarted;
     const detail: QADetailRecord = {
       type: "record",
       arm,
@@ -758,14 +819,183 @@ async function runCogcoreArm(
       evidenceSessionIds: question.evidenceSessionIds,
       evidenceCoverage,
       retrieved,
-      debug: await loadCogcoreDebugArtifacts(
-        instance.id,
-        question.question,
-        question.answer,
-        evidenceTextsForQuestion(instance, question.evidenceTurnIds),
-        debugAll || !correct,
-        arm === "cogcore-evolve" || arm === "cogcore-system-evolve",
-      ),
+      debug,
+      timingMs,
+      ...(error ? { error } : {}),
+    };
+    return { record, detail };
+  });
+  const records = results.map((r) => r.record);
+  return { report: buildMemoryQAReport(arm, k, records), details: results.map((r) => r.detail) };
+}
+
+async function runCogcoreLiveArm(
+  arm: CogcoreLiveLongMemEvalArm,
+  sampled: SampledMemQuestion[],
+  llm: LlmClient,
+  k: number,
+  concurrency: number,
+  extractConcurrency: number,
+  chunkTurns: number,
+  maxFactsPerChunk: number,
+  debugAll: boolean,
+  experienceGranularity: ExperienceGranularity,
+  experienceChunkTurns: number,
+  experienceEmbedding: ExperienceEmbedding,
+  experienceScope: ExperienceScope,
+  experiencePoolSize: number,
+  liveToolQueries: number,
+  liveToolResults: number,
+  retrievalOnly: boolean,
+  log: (m: string) => void,
+): Promise<ArmRunResult> {
+  let done = 0;
+  const results = await mapPool(sampled, concurrency, async ({ instance, question }) => {
+    const adapter = new CogcoreLiveLongMemEvalAdapter(llm, arm, {
+      topK: k,
+      embeddings: "local",
+      extractConcurrency,
+      chunkTurns,
+      maxFactsPerChunk,
+      experienceGranularity,
+      experienceChunkTurns,
+      experienceEmbedding,
+      experienceScope,
+      experiencePoolSize,
+      liveToolQueries,
+      liveToolResults,
+      onProgress: (m) => log(`  [${arm}] ${instance.id}: ${m}`),
+    });
+    let answer = "";
+    let judgedBy: QAJudgedBy = "error";
+    let correct = false;
+    let retrieved: RetrievedDetail[] = [];
+    let liveTrace: LiveAnswerTrace | undefined;
+    let error: string | undefined;
+    const totalStarted = Date.now();
+    const timingMs: QATimingMs = { total: 0 };
+    try {
+      const ingestStarted = Date.now();
+      await adapter.ingest(instance);
+      timingMs.ingest = Date.now() - ingestStarted;
+      if (retrievalOnly) {
+        const retrieveStarted = Date.now();
+        const excerpts = await adapter.retrieve(question);
+        timingMs.retrieve = Date.now() - retrieveStarted;
+        answer = RETRIEVAL_ONLY_ANSWER;
+        retrieved = excerpts.map((e, i) => ({
+          rank: i + 1,
+          ref: e.ref,
+          text: e.text,
+          channel: e.channel,
+          sourceRank: e.sourceRank,
+          sourceScore: e.sourceScore,
+          query: e.query,
+          noteId: e.noteId,
+          matchType: e.matchType,
+          experienceId: e.experienceId,
+          sessionId: e.sessionId,
+          turnIds: e.turnIds,
+          date: e.date,
+          selectedBy: e.selectedBy,
+        }));
+      } else {
+        const answerStarted = Date.now();
+        const res = await adapter.answer(question);
+        timingMs.answer = Date.now() - answerStarted;
+        answer = res.answer;
+        liveTrace = res.liveTrace;
+        retrieved = res.retrieved.map((e, i) => ({
+          rank: i + 1,
+          ref: e.ref,
+          text: e.text,
+          channel: e.channel,
+          sourceRank: e.sourceRank,
+          sourceScore: e.sourceScore,
+          query: e.query,
+          noteId: e.noteId,
+          matchType: e.matchType,
+          experienceId: e.experienceId,
+          sessionId: e.sessionId,
+          turnIds: e.turnIds,
+          date: e.date,
+          selectedBy: e.selectedBy,
+        }));
+      }
+      const closeStarted = Date.now();
+      await adapter.close();
+      timingMs.adapterClose = (timingMs.adapterClose ?? 0) + Date.now() - closeStarted;
+      if (retrievalOnly) {
+        correct = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved).allHit;
+        judgedBy = RETRIEVAL_ONLY_JUDGED_BY;
+      } else if (question.abstain) {
+        const judgeStarted = Date.now();
+        correct = isMemoryQARefusal(answer);
+        timingMs.judge = Date.now() - judgeStarted;
+        judgedBy = "abstain-sentinel";
+      } else {
+        const judgeStarted = Date.now();
+        correct = await judgeMemoryQACorrect(
+          (p) => llm.complete(p),
+          question.question,
+          question.answer,
+          answer,
+        );
+        timingMs.judge = Date.now() - judgeStarted;
+        judgedBy = "mem0-judge";
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      log(`  [${arm}] error on ${question.id}: ${error}`);
+    } finally {
+      const closeStarted = Date.now();
+      await adapter.close();
+      timingMs.adapterClose = (timingMs.adapterClose ?? 0) + Date.now() - closeStarted;
+    }
+
+    done++;
+    log(`  [${arm}] ${done}/${sampled.length} ${question.id} ${correct ? "✓" : "✗"}`);
+    const evidenceCoverage = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved);
+    const record: MemoryQARecord = {
+      id: question.id,
+      category: question.category,
+      question: question.question,
+      answer,
+      gold: question.answer,
+      correct,
+      judgedBy: judgedBy as MemoryQARecord["judgedBy"],
+    };
+    const debugStarted = Date.now();
+    const debug = await loadCogcoreDebugArtifacts(
+      instance.id,
+      question.question,
+      question.answer,
+      evidenceTextsForQuestion(instance, question.evidenceTurnIds),
+      debugAll || !correct,
+      false,
+    );
+    timingMs.debug = Date.now() - debugStarted;
+    timingMs.total = Date.now() - totalStarted;
+    const detail: QADetailRecord = {
+      type: "record",
+      arm,
+      instanceId: instance.id,
+      questionId: question.id,
+      category: question.category,
+      abstain: question.abstain,
+      question: question.question,
+      questionDate: question.date,
+      gold: question.answer,
+      answer,
+      correct,
+      judgedBy,
+      evidenceTurnIds: question.evidenceTurnIds,
+      evidenceSessionIds: question.evidenceSessionIds,
+      evidenceCoverage,
+      retrieved,
+      debug,
+      timingMs,
+      ...(liveTrace ? { liveTrace } : {}),
       ...(error ? { error } : {}),
     };
     return { record, detail };
@@ -817,6 +1047,7 @@ async function main(): Promise<void> {
   const perCategory = args["per-category"] ? Number(args["per-category"]) : 10;
   const sample = args.sample ? Number(args.sample) : undefined;
   const targetCategories = parseCategories(args.categories);
+  const questionIdsFilter = parseCategories(args["question-ids"]);
   const categoryOffset = args["category-offset"] ? Number(args["category-offset"]) : undefined;
   const includeAbstain = args["no-abstain"] ? false : true;
   const concurrency = args.concurrency ? Number(args.concurrency) : 4;
@@ -832,8 +1063,10 @@ async function main(): Promise<void> {
   const experienceScope = parseExperienceScope(args["experience-scope"]);
   const experiencePoolSize = args["experience-pool-size"] ? Number(args["experience-pool-size"]) : 64;
   const experienceMinScore = args["experience-min-score"] ? Number(args["experience-min-score"]) : undefined;
-  const hasCogcoreArm = arms.some((a) => isCogcoreArm(a));
-  const hasCogcoreSystemArm = arms.some((a) => String(a).startsWith("cogcore-system"));
+  const liveToolQueries = args["live-tool-queries"] ? Number(args["live-tool-queries"]) : 2;
+  const liveToolResults = args["live-tool-results"] ? Number(args["live-tool-results"]) : Math.min(8, k);
+  const hasCogcoreArm = arms.some((a) => isCogcoreArm(a) || isCogcoreLiveArm(a));
+  const hasCogcoreSystemArm = arms.some((a) => String(a).startsWith("cogcore-system") || isCogcoreLiveArm(a));
   const systemExperienceSlots = args["experience-slots"]
     ? Number(args["experience-slots"])
     : defaultSystemExperienceSlots(k);
@@ -857,16 +1090,20 @@ async function main(): Promise<void> {
     targetCategories.length > 0
       ? all.filter((inst) => inst.questions.some((q) => targetCategories.includes(q.category)))
       : all;
-  let sampled = sampleMemoryQAStratified(source, perCategory, {
-    includeAbstain,
-    ...(categoryOffset !== undefined ? { categoryOffset } : {}),
-  });
-  if (sample !== undefined) sampled = takeRoundRobinByCategory(sampled, sample);
+  let sampled =
+    questionIdsFilter.length > 0
+      ? sampleByQuestionIds(source, questionIdsFilter)
+      : sampleMemoryQAStratified(source, perCategory, {
+          includeAbstain,
+          ...(categoryOffset !== undefined ? { categoryOffset } : {}),
+        });
+  if (sample !== undefined && questionIdsFilter.length === 0) sampled = takeRoundRobinByCategory(sampled, sample);
   const abstainN = sampled.filter((s) => s.question.abstain).length;
   log(
     `loaded ${all.length} instances${source.length !== all.length ? ` (${source.length} targeted)` : ""} → ${sampled.length} questions ` +
       `(perCategory=${perCategory}, sample=${sample ?? "off"}, abstain=${abstainN}, ` +
       `categories=${targetCategories.length > 0 ? targetCategories.join(",") : "all"}, ` +
+      `questionIds=${questionIdsFilter.length > 0 ? questionIdsFilter.length : "off"}, ` +
       `categoryOffset=${categoryOffset ?? "stride"}, ` +
       `arms=${arms.join(",")}, k=${k}, conc=${concurrency}, cogConc=${cogcoreConcurrency}, ` +
       `extractConc=${extractConcurrency}, chunkTurns=${chunkTurns}, maxFactsPerChunk=${maxFactsPerChunk}, ` +
@@ -876,7 +1113,8 @@ async function main(): Promise<void> {
           ? `, systemExperienceSlots=${systemExperienceSlots}, experienceGranularity=${experienceGranularity}, ` +
             `experienceChunkTurns=${experienceChunkTurns}, experienceEmbedding=${experienceEmbedding}, ` +
             `experienceScope=${experienceScope}, experiencePoolSize=${experiencePoolSize}, ` +
-            `experienceMinScore=${experienceMinScore ?? "off"}`
+            `experienceMinScore=${experienceMinScore ?? "off"}, liveToolQueries=${liveToolQueries}, ` +
+            `liveToolResults=${liveToolResults}`
           : ""
       })`,
   );
@@ -896,6 +1134,7 @@ async function main(): Promise<void> {
         perCategory,
         ...(sample !== undefined ? { sample } : {}),
         ...(targetCategories.length > 0 ? { targetCategories } : {}),
+        ...(questionIdsFilter.length > 0 ? { questionIdsFilter } : {}),
         ...(categoryOffset !== undefined ? { categoryOffset } : {}),
         includeAbstain,
         abstainN,
@@ -914,6 +1153,7 @@ async function main(): Promise<void> {
               experienceScope,
               experiencePoolSize,
               ...(experienceMinScore !== undefined ? { experienceMinScore } : {}),
+              ...(arms.some((a) => isCogcoreLiveArm(a)) ? { liveToolQueries, liveToolResults } : {}),
             }
           : {}),
         maxCompletionTokens,
@@ -945,6 +1185,7 @@ async function main(): Promise<void> {
           perCategory,
           sample: sample ?? null,
           targetCategories: targetCategories.length > 0 ? targetCategories : null,
+          questionIdsFilter: questionIdsFilter.length > 0 ? questionIdsFilter : null,
           categoryOffset: categoryOffset ?? null,
           includeAbstain,
           abstainN,
@@ -963,6 +1204,7 @@ async function main(): Promise<void> {
                 experienceScope,
                 experiencePoolSize,
                 ...(experienceMinScore !== undefined ? { experienceMinScore } : {}),
+                ...(arms.some((a) => isCogcoreLiveArm(a)) ? { liveToolQueries, liveToolResults } : {}),
               }
             : {}),
           maxCompletionTokens,
@@ -1003,6 +1245,27 @@ async function main(): Promise<void> {
             retrievalOnly,
             log,
           )
+        : isCogcoreLiveArm(arm)
+          ? await runCogcoreLiveArm(
+              arm,
+              sampled,
+              llm,
+              k,
+              Math.min(concurrency, cogcoreConcurrency),
+              extractConcurrency,
+              chunkTurns,
+              maxFactsPerChunk,
+              debugAll,
+              experienceGranularity,
+              experienceChunkTurns,
+              experienceEmbedding,
+              experienceScope,
+              experiencePoolSize,
+              liveToolQueries,
+              liveToolResults,
+              retrievalOnly,
+              log,
+            )
         : (() => {
             throw new Error(`Unhandled arm: ${arm}`);
           })();

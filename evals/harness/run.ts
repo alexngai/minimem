@@ -17,6 +17,7 @@ import path from "node:path";
 
 import { Minimem, type MinimemConfig } from "../../src/index.js";
 import type { BeirDataset } from "../datasets/types.js";
+import { acquireLocalEmbeddingLease } from "../local-embedding-lock.js";
 import { materializeCorpus, type CorpusMaps } from "./materialize.js";
 
 /** Hybrid knobs under test. Mirrors MinimemConfig["hybrid"]. */
@@ -41,43 +42,68 @@ export interface OpenIndexOptions {
  * a degraded config never produces a silently-wrong number.
  */
 export async function openIndex(opts: OpenIndexOptions): Promise<Minimem> {
-  const mm = await Minimem.create({
-    memoryDir: opts.memoryDir,
-    embedding: opts.embedding,
-    watch: { enabled: false },
-    hybrid: opts.hybrid,
-    query: { minScore: 0 },
-    // Keep the whole corpus in the content-hash embedding cache (default prunes to 10k). The shared
-    // vector dir is persistent, so this makes a crashed/throttled run resume without re-embedding.
-    cache: { maxEntries: 5_000_000 },
-    // Concurrent corpus embedding. Default 4 concurrent single-text requests — the
-    // throttle-safe sweet spot for Bedrock Titan via LiteLLM (~520 emb/min, zero 429s;
-    // higher just trips the account's TPS cap). Override per-backend via env, e.g. a real
-    // OpenAI endpoint tolerates much more: MM_EMBED_CONCURRENCY=16 MM_EMBED_BATCH=16.
-    indexing: {
-      embedConcurrency: Number(process.env.MM_EMBED_CONCURRENCY) || 4,
-      embedBatchSize: Number(process.env.MM_EMBED_BATCH) || 1,
-    },
+  const lease = await acquireLocalEmbeddingLease(opts.embedding, {
+    label: `beir:${path.basename(opts.memoryDir)}`,
   });
+  let mm: Minimem | null = null;
+  try {
+    mm = await Minimem.create({
+      memoryDir: opts.memoryDir,
+      embedding: opts.embedding,
+      watch: { enabled: false },
+      hybrid: opts.hybrid,
+      query: { minScore: 0 },
+      // Keep the whole corpus in the content-hash embedding cache (default prunes to 10k). The shared
+      // vector dir is persistent, so this makes a crashed/throttled run resume without re-embedding.
+      cache: { maxEntries: 5_000_000 },
+      // Concurrent corpus embedding. Default 4 concurrent single-text requests — the
+      // throttle-safe sweet spot for Bedrock Titan via LiteLLM (~520 emb/min, zero 429s;
+      // higher just trips the account's TPS cap). Override per-backend via env, e.g. a real
+      // OpenAI endpoint tolerates much more: MM_EMBED_CONCURRENCY=16 MM_EMBED_BATCH=16.
+      indexing: {
+        embedConcurrency: Number(process.env.MM_EMBED_CONCURRENCY) || 4,
+        embedBatchSize: Number(process.env.MM_EMBED_BATCH) || 1,
+      },
+    });
 
-  await mm.sync();
-  const status = await mm.status();
+    await mm.sync();
+    const status = await mm.status();
 
-  if (!status.ftsAvailable) {
-    mm.close();
-    throw new Error(
-      "FTS5 unavailable — retrieval eval needs it (BM25/hybrid). Aborting rather than degrading silently.",
-    );
+    if (!status.ftsAvailable) {
+      await mm.close?.();
+      throw new Error(
+        "FTS5 unavailable — retrieval eval needs it (BM25/hybrid). Aborting rather than degrading silently.",
+      );
+    }
+    const requireVector = opts.requireVector ?? opts.embedding.provider !== "none";
+    if (requireVector && !status.vectorAvailable) {
+      await mm.close?.();
+      throw new Error(
+        "sqlite-vec unavailable — vector search would silently fall back. Aborting. " +
+          "Set embedding.provider to 'none' for an intentional BM25-only run.",
+      );
+    }
+    if (lease) {
+      const mmWithClose = mm as Minimem & { close?: () => Promise<void> | void };
+      const close = mmWithClose.close?.bind(mmWithClose);
+      mmWithClose.close = async () => {
+        try {
+          await close?.();
+        } finally {
+          await lease.release();
+        }
+      };
+    }
+    return mm;
+  } catch (err) {
+    try {
+      await mm?.close?.();
+    } catch {
+      // Preserve the original open/index failure.
+    }
+    await lease?.release();
+    throw err;
   }
-  const requireVector = opts.requireVector ?? opts.embedding.provider !== "none";
-  if (requireVector && !status.vectorAvailable) {
-    mm.close();
-    throw new Error(
-      "sqlite-vec unavailable — vector search would silently fall back. Aborting. " +
-        "Set embedding.provider to 'none' for an intentional BM25-only run.",
-    );
-  }
-  return mm;
 }
 
 export interface RunQueriesOptions {
