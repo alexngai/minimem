@@ -21,6 +21,7 @@ evals/longmemeval/.cache/
 # LongMemEval per-run outputs (regenerate via the CLIs; not curated docs)
 evals/longmemeval/RESULTS-*.md
 evals/longmemeval/DETAILS-*.jsonl
+evals/longmemeval/*.pid
 
 # LOCOMO diagnostic checkpoints (transient resume state)
 evals/locomo/results/*.ckpt.json
