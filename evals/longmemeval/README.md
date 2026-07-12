@@ -86,9 +86,11 @@ an `error` in a previous details file.
 Memory-profile flags: `--memory-profile standard|long-memory` chooses the
 default bundle before individual flags are applied. `cogcore-live` defaults to
 `long-memory`, which enables chunk ExperienceMemory with hash scoring,
-KnowledgeBank observation memory from the combined extraction pass, chronological
-observation-log context, and adaptive live tool use. Use `--memory-profile standard`
-to reproduce the older conservative defaults, or override any specific flag below.
+KnowledgeBank observation memory from the combined extraction pass, retrieved
+observation notes plus a bounded chronological observation log, and adaptive live
+tool use. The default injected observation log cap is 40,000 characters. Use
+`--memory-profile standard` to reproduce the older conservative defaults, or
+override any specific flag below.
 System-arm ExperienceMemory tuning flags: `--experience-granularity session|chunk|turn`,
 `--experience-chunk-turns N`, `--experience-embedding none|hash`,
 `--experience-scope knowledge-sessions|all`, `--experience-pool-size N`,
@@ -106,8 +108,10 @@ scoped KnowledgeBank notes at answer time.
 `--live-tool-policy auto|always|off` controls live-agent minimem tool use during
 answer synthesis. `auto` disables tools for log-context temporal questions,
 where the injected observation log is usually less noisy than a second search
-pass. `--live-tool-queries N` and `--live-tool-results N` tune the tool pass when
-the selected policy enables tools.
+pass, but keeps tools enabled for specialized temporal order/elapsed questions
+that need multiple same-date or raw-turn evidence items. `--live-tool-queries N`
+and `--live-tool-results N` tune the tool pass when the selected policy enables
+tools.
 Retrieval flags: `--ks a,b,c` (k-sweep, reuses built indexes).
 
 For cognitive-core arms, run the staged funnel in

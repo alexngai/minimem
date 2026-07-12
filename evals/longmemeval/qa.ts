@@ -117,7 +117,8 @@ const LONG_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
   experienceEmbedding: "hash",
   observationMemory: "kb",
   observationSource: "combined",
-  observationContext: "log",
+  observationContext: "both",
+  observationLogMaxChars: 40_000,
   liveToolResults: () => 6,
 };
 

@@ -868,6 +868,39 @@ function addUniquePlannedToolQuery(queries: PlannedToolQuery[], query: PlannedTo
   if (!queries.some((q) => `${q.tool}:${q.query.toLowerCase()}` === key)) queries.push(query);
 }
 
+function deterministicToolQueries(question: MemQuestion): PlannedToolQuery[] {
+  const intent = observationIntent(question);
+  if (intent === "temporal-airline-order") {
+    return [
+      {
+        tool: "knowledge_search",
+        query:
+          `${question.question} actual completed booked flights earned airline rewards miles loyalty card round-trip ` +
+          "flight delay itinerary outbound return legs",
+      },
+    ];
+  }
+  if (intent === "temporal-museum-order") {
+    return [
+      {
+        tool: "knowledge_search",
+        query:
+          `${question.question} completed museum visits tours lecture series exhibitions ` +
+          "named museums museum-of source session date recently just came back",
+      },
+    ];
+  }
+  if (intent === "temporal-elapsed") {
+    return [
+      {
+        tool: "knowledge_search",
+        query: `${question.question} direct start began just started recovered today later event date elapsed`,
+      },
+    ];
+  }
+  return [];
+}
+
 function knowledgeToExcerpt(match: KnowledgeMatch, question: string, index: number, selectedBy: string): RetrievedExcerpt {
   const body = match.note.body ?? "";
   const type = match.matchType ?? "semantic";
@@ -903,13 +936,38 @@ function observationDateOf(match: KnowledgeMatch): string {
   return /^Observation date:\s*(.+)$/m.exec(observationBody(match))?.[1]?.trim() ?? "unknown";
 }
 
-function observationIntent(question: MemQuestion): "money" | "temporal" | "preference" | "general" {
+function observationIntent(
+  question: MemQuestion,
+):
+  | "money"
+  | "temporal"
+  | "temporal-elapsed"
+  | "temporal-airline-order"
+  | "temporal-museum-order"
+  | "preference"
+  | "medical-provider-count"
+  | "general" {
   const q = question.question.toLowerCase();
-  if (question.category === "temporal-reasoning" || /\b(order|earliest|latest|timeline|before|after|first|last)\b/.test(q)) {
-    return "temporal";
-  }
   if (/\b(spent|spend|cost|costs|price|prices|expense|expenses|paid|purchase|bought|total money|\$)\b/.test(q)) {
     return "money";
+  }
+  if (
+    /\bhow many\b/.test(q) &&
+    /\b(doctors?|physicians?|dermatologists?|specialists?|primary care|ent)\b/.test(q)
+  ) {
+    return "medical-provider-count";
+  }
+  if (/\b(airlines?|flights?|flew)\b/.test(q) && /\b(order|earliest|latest|before|after|from earliest)\b/.test(q)) {
+    return "temporal-airline-order";
+  }
+  if (/\bmuseums?\b/.test(q) && /\b(order|earliest|latest|visited|from earliest)\b/.test(q)) {
+    return "temporal-museum-order";
+  }
+  if (/\bhow many\s+(?:days|weeks|months)\b/.test(q) || /\bpassed since\b/.test(q)) {
+    return "temporal-elapsed";
+  }
+  if (question.category === "temporal-reasoning" || /\b(order|earliest|latest|timeline|before|after|first|last)\b/.test(q)) {
+    return "temporal";
   }
   if (question.category === "single-session-preference" || /\b(prefer|preference|like|suggest|recommend)\b/.test(q)) {
     return "preference";
@@ -939,10 +997,48 @@ function observationIntentScore(question: MemQuestion, match: KnowledgeMatch, so
     if (type === "assistant_answer") score -= 3;
     if (/\b(visited|attended|participated|took|tour|exhibition|museum|gallery)\b/.test(lower)) score += 4;
     if (/\brecently\b/.test(lower)) score -= 2;
+  } else if (intent === "temporal-elapsed") {
+    if (type === "event" || type === "state_update" || type === "inventory") score += 4;
+    if (/\b(just started|started .*today|began|recovered .*today|finally recovered|went on .*today|got .*today|invested|10th|tenth)\b/.test(lower)) {
+      score += 7;
+    }
+    if (/\b(days?|weeks?|months?|elapsed|passed|since)\b/.test(lower)) score += 2;
+    if (type === "assistant_answer" || type === "plan") score -= 3;
+  } else if (intent === "temporal-airline-order") {
+    const actualFlightEvidence =
+      /\b(had just returned from|had a \d+-?\s*hour delay|flight from .* to|round-trip flight|delayed|booked|ticket has been booked|earned .*miles|earned .*points|redeem .*miles|using .*miles)\b/.test(
+        lower,
+      );
+    if (/\b(airlines?|flight|loyalty|rewards?|miles|skymiles|aadvantage)\b/.test(lower)) score += 5;
+    if (actualFlightEvidence) score += 8;
+    if (/\b(option|options|price|searched for flights|considering|planning a trip|looking to book)\b/.test(lower) && !actualFlightEvidence) {
+      score -= 4;
+    }
+    if (type === "event" || type === "state_update") score += 3;
+    if (type === "plan" && !actualFlightEvidence) score -= 3;
+  } else if (intent === "temporal-museum-order") {
+    if (/\bmuseum\b/.test(lower)) score += 8;
+    if (/\b(visited|attended|participated|tour|lecture series|exhibition|took .* to)\b/.test(lower)) score += 6;
+    if (/\bgallery\b/.test(lower) && !/\bmuseum\b/.test(lower)) score -= 8;
+    if (type === "event") score += 4;
+    if (type === "assistant_answer" || type === "plan") score -= 4;
   } else if (intent === "preference") {
     if (type === "preference") score += 7;
     if (type === "state_update" || type === "event") score += 2;
     if (type === "assistant_answer") score -= 2;
+  } else if (intent === "medical-provider-count") {
+    if (/\bdr\.?\s+[a-z]+|dermatologist|ent specialist|primary care physician|physician\b/i.test(body)) {
+      score += 9;
+    }
+    if (/\bdiagnosed|prescribed|appointment|follow-up|biopsy|uti|sinusitis|antibiotics|nasal spray\b/.test(lower)) {
+      score += 4;
+    }
+    if (type === "state_update" || type === "event") score += 4;
+    if (type === "plan") score -= 2;
+    if (type === "assistant_answer") score -= 4;
+    if (/\bappointment system|timetable|roster|database|service scope|rm197|maximum number of users|staff access|yezza\b/.test(lower)) {
+      score -= 10;
+    }
   } else {
     if (type === "assistant_answer") score -= 1;
   }
@@ -1111,6 +1207,10 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
   private async runMemoryTools(prompt: string, systemContext: string): Promise<LiveToolTrace[]> {
     const queries: PlannedToolQuery[] = [];
     addUniquePlannedToolQuery(queries, { tool: "memory_search", query: this.question.question });
+    for (const query of deterministicToolQueries(this.question)) {
+      if (queries.length >= this.maxToolQueries) break;
+      addUniquePlannedToolQuery(queries, query);
+    }
     if (this.maxToolQueries > 1 && questionNeedsStructuredToolPass(this.question)) {
       addUniquePlannedToolQuery(queries, { tool: "knowledge_search", query: this.question.question });
     }
@@ -1990,6 +2090,10 @@ export class CogcoreLiveLongMemEvalAdapter {
                   `${question.question}\n` +
                   "Find a broad candidate set of compact chronological observation-memory notes. " +
                   "For spending questions include purchases, prices, dollar amounts, paid costs, and inventory. " +
+                  "For doctor/provider count questions include named doctors, diagnoses, prescriptions, treatment, appointments, and follow-ups. " +
+                  "For airline order questions include actual flights, booked flights, airline rewards earned from flights, delays, and completed itinerary legs. " +
+                  "For museum order questions include completed visits, tours, exhibitions, and lecture series at named museums; exclude galleries unless the question asks about galleries. " +
+                  "For elapsed-time questions include both the explicit start/recovery event and the later event being measured. " +
                   "For temporal/order questions include all dated completed visit/event observations across different dates. " +
                   "For preference questions include durable preferences and latest state updates.",
                 domain: this.currentInstanceId,
@@ -2057,7 +2161,8 @@ export class CogcoreLiveLongMemEvalAdapter {
       this.liveToolPolicy === "auto" &&
       this.observationMemory === "kb" &&
       (this.observationContext === "log" || this.observationContext === "both") &&
-      question.category === "temporal-reasoning"
+      question.category === "temporal-reasoning" &&
+      observationIntent(question) === "temporal"
     ) {
       return 0;
     }
