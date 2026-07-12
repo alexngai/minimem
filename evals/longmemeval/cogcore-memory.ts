@@ -61,6 +61,7 @@ export type ObservationMemoryMode = "off" | "kb";
 export type ObservationExtractionSource = "chunks" | "combined";
 export type ObservationContextMode = "retrieved" | "log" | "both";
 export type LiveToolPolicy = "auto" | "always" | "off";
+export type CogcoreMemoryProfile = "standard" | "long-memory";
 
 export interface CogcoreLongMemEvalOptions {
   topK?: number;
@@ -99,6 +100,8 @@ export interface CogcoreLongMemEvalOptions {
   liveToolPolicy?: LiveToolPolicy;
   /** Maximum minimem results per live tool search. */
   liveToolResults?: number;
+  /** Cognitive-core Atlas memory default bundle. */
+  memoryProfile?: CogcoreMemoryProfile;
   /** Write Mastra-like distilled observations into KnowledgeBank during ingestion. */
   observationMemory?: ObservationMemoryMode;
   /** Cache directory for LLM-generated observation memory. */
@@ -1607,6 +1610,7 @@ export class CogcoreLiveLongMemEvalAdapter {
   private readonly liveToolQueries: number;
   private readonly liveToolPolicy: LiveToolPolicy;
   private readonly liveToolResults: number;
+  private readonly memoryProfile: CogcoreMemoryProfile;
   private readonly observationMemory: ObservationMemoryMode;
   private readonly observationCacheDir: string;
   private readonly observationSource: ObservationExtractionSource;
@@ -1647,6 +1651,7 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.liveToolQueries = opts.liveToolQueries ?? 2;
     this.liveToolPolicy = opts.liveToolPolicy ?? "auto";
     this.liveToolResults = opts.liveToolResults ?? Math.min(8, this.topK);
+    this.memoryProfile = opts.memoryProfile ?? "long-memory";
     this.observationMemory = opts.observationMemory ?? "off";
     this.observationCacheDir = opts.observationCacheDir ?? path.resolve("evals/longmemeval/.cache/cogcore-observations");
     this.observationSource = opts.observationSource ?? DEFAULT_OBSERVATION_SOURCE;
@@ -1739,6 +1744,7 @@ export class CogcoreLiveLongMemEvalAdapter {
     const dir = await fs.mkdtemp(path.join(this.scratchRoot, "lme-ccl-"));
     const baseDir = path.join(dir, "atlas");
     const config = {
+      memoryProfile: this.memoryProfile,
       storage: { baseDir },
       memory: {
         maxExperiences: this.topK,

@@ -77,6 +77,49 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 type RetrievalArm = Embeddings;
 type Arm = RetrievalArm | CogcoreLongMemEvalArm | CogcoreLiveLongMemEvalArm;
 type QAJudgedBy = MemoryQARecord["judgedBy"] | "retrieval-only";
+type MemoryProfile = "standard" | "long-memory";
+
+interface MemoryProfileDefaults {
+  experienceGranularity: ExperienceGranularity;
+  experienceEmbedding: ExperienceEmbedding;
+  experienceScope: ExperienceScope;
+  experiencePoolSize: number;
+  observationMemory: ObservationMemoryMode;
+  observationSource: ObservationExtractionSource;
+  observationContext: ObservationContextMode;
+  observationLogMaxChars: number;
+  observationMaxPerChunk: number;
+  observationSlots: number;
+  liveToolPolicy: LiveToolPolicy;
+  liveToolQueries: number;
+  liveToolResults: (k: number) => number;
+}
+
+const STANDARD_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
+  experienceGranularity: "session",
+  experienceEmbedding: "none",
+  experienceScope: "knowledge-sessions",
+  experiencePoolSize: 64,
+  observationMemory: "off",
+  observationSource: "chunks",
+  observationContext: "retrieved",
+  observationLogMaxChars: 80_000,
+  observationMaxPerChunk: 12,
+  observationSlots: 12,
+  liveToolPolicy: "auto",
+  liveToolQueries: 2,
+  liveToolResults: (k) => Math.min(8, k),
+};
+
+const LONG_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
+  ...STANDARD_MEMORY_PROFILE_DEFAULTS,
+  experienceGranularity: "chunk",
+  experienceEmbedding: "hash",
+  observationMemory: "kb",
+  observationSource: "combined",
+  observationContext: "log",
+  liveToolResults: () => 6,
+};
 
 const RETRIEVAL_ARMS: RetrievalArm[] = ["none", "local", "nomic"];
 const COGCORE_ARMS: CogcoreLongMemEvalArm[] = [
@@ -113,44 +156,69 @@ function parseArms(spec: string | boolean | undefined): Arm[] {
   return arms;
 }
 
-function parseExperienceGranularity(spec: string | boolean | undefined): ExperienceGranularity {
-  const value = spec && spec !== true ? String(spec) : "session";
+function parseMemoryProfile(spec: string | boolean | undefined, fallback: MemoryProfile): MemoryProfile {
+  const value = spec && spec !== true ? String(spec) : fallback;
+  if (value === "standard" || value === "long-memory") return value;
+  throw new Error(`Unknown --memory-profile '${value}'. Use standard|long-memory.`);
+}
+
+function defaultsForMemoryProfile(profile: MemoryProfile): MemoryProfileDefaults {
+  return profile === "long-memory" ? LONG_MEMORY_PROFILE_DEFAULTS : STANDARD_MEMORY_PROFILE_DEFAULTS;
+}
+
+function parseExperienceGranularity(
+  spec: string | boolean | undefined,
+  fallback: ExperienceGranularity,
+): ExperienceGranularity {
+  const value = spec && spec !== true ? String(spec) : fallback;
   if (value === "session" || value === "chunk" || value === "turn") return value;
   throw new Error(`Unknown --experience-granularity '${value}'. Use session|chunk|turn.`);
 }
 
-function parseExperienceEmbedding(spec: string | boolean | undefined): ExperienceEmbedding {
-  const value = spec && spec !== true ? String(spec) : "none";
+function parseExperienceEmbedding(
+  spec: string | boolean | undefined,
+  fallback: ExperienceEmbedding,
+): ExperienceEmbedding {
+  const value = spec && spec !== true ? String(spec) : fallback;
   if (value === "none" || value === "hash") return value;
   throw new Error(`Unknown --experience-embedding '${value}'. Use none|hash.`);
 }
 
-function parseExperienceScope(spec: string | boolean | undefined): ExperienceScope {
-  const value = spec && spec !== true ? String(spec) : "knowledge-sessions";
+function parseExperienceScope(spec: string | boolean | undefined, fallback: ExperienceScope): ExperienceScope {
+  const value = spec && spec !== true ? String(spec) : fallback;
   if (value === "knowledge-sessions" || value === "all") return value;
   throw new Error(`Unknown --experience-scope '${value}'. Use knowledge-sessions|all.`);
 }
 
-function parseObservationMemory(spec: string | boolean | undefined): ObservationMemoryMode {
-  const value = spec && spec !== true ? String(spec) : "off";
+function parseObservationMemory(
+  spec: string | boolean | undefined,
+  fallback: ObservationMemoryMode,
+): ObservationMemoryMode {
+  const value = spec && spec !== true ? String(spec) : fallback;
   if (value === "off" || value === "kb") return value;
   throw new Error(`Unknown --observation-memory '${value}'. Use off|kb.`);
 }
 
-function parseObservationSource(spec: string | boolean | undefined): ObservationExtractionSource {
-  const value = spec && spec !== true ? String(spec) : "chunks";
+function parseObservationSource(
+  spec: string | boolean | undefined,
+  fallback: ObservationExtractionSource,
+): ObservationExtractionSource {
+  const value = spec && spec !== true ? String(spec) : fallback;
   if (value === "chunks" || value === "combined") return value;
   throw new Error(`Unknown --observation-source '${value}'. Use chunks|combined.`);
 }
 
-function parseObservationContext(spec: string | boolean | undefined): ObservationContextMode {
-  const value = spec && spec !== true ? String(spec) : "retrieved";
+function parseObservationContext(
+  spec: string | boolean | undefined,
+  fallback: ObservationContextMode,
+): ObservationContextMode {
+  const value = spec && spec !== true ? String(spec) : fallback;
   if (value === "retrieved" || value === "log" || value === "both") return value;
   throw new Error(`Unknown --observation-context '${value}'. Use retrieved|log|both.`);
 }
 
-function parseLiveToolPolicy(spec: string | boolean | undefined): LiveToolPolicy {
-  const value = spec && spec !== true ? String(spec) : "auto";
+function parseLiveToolPolicy(spec: string | boolean | undefined, fallback: LiveToolPolicy): LiveToolPolicy {
+  const value = spec && spec !== true ? String(spec) : fallback;
   if (value === "auto" || value === "always" || value === "off") return value;
   throw new Error(`Unknown --live-tool-policy '${value}'. Use auto|always|off.`);
 }
@@ -361,6 +429,7 @@ interface RunMetadataRecord {
     maxFactsPerChunk: number;
     extractionCacheVersion: number;
     observationCacheVersion: number;
+    memoryProfile: MemoryProfile;
     systemExperienceSlots?: number;
     experienceGranularity?: ExperienceGranularity;
     experienceChunkTurns?: number;
@@ -959,6 +1028,7 @@ async function runCogcoreLiveArm(
   liveToolPolicy: LiveToolPolicy,
   liveToolQueries: number,
   liveToolResults: number,
+  memoryProfile: MemoryProfile,
   recordRetries: number,
   retrievalOnly: boolean,
   log: (m: string) => void,
@@ -1004,6 +1074,7 @@ async function runCogcoreLiveArm(
         liveToolPolicy,
         liveToolQueries,
         liveToolResults,
+        memoryProfile,
         onProgress: (m) => log(`  [${arm}] ${instance.id}: ${m}`),
       });
 
@@ -1211,23 +1282,53 @@ async function main(): Promise<void> {
   const maxFactsPerChunk = args["max-facts-per-chunk"] ? Number(args["max-facts-per-chunk"]) : 60;
   const debugAll = Boolean(args["debug-all"]);
   const retrievalOnly = Boolean(args["retrieval-only"]);
-  const experienceGranularity = parseExperienceGranularity(args["experience-granularity"]);
+  const memoryProfile = parseMemoryProfile(
+    args["memory-profile"],
+    arms.some((a) => isCogcoreLiveArm(a)) ? "long-memory" : "standard",
+  );
+  const memoryProfileDefaults = defaultsForMemoryProfile(memoryProfile);
+  const experienceGranularity = parseExperienceGranularity(
+    args["experience-granularity"],
+    memoryProfileDefaults.experienceGranularity,
+  );
   const experienceChunkTurns = args["experience-chunk-turns"] ? Number(args["experience-chunk-turns"]) : 8;
-  const experienceEmbedding = parseExperienceEmbedding(args["experience-embedding"]);
-  const experienceScope = parseExperienceScope(args["experience-scope"]);
-  const experiencePoolSize = args["experience-pool-size"] ? Number(args["experience-pool-size"]) : 64;
+  const experienceEmbedding = parseExperienceEmbedding(
+    args["experience-embedding"],
+    memoryProfileDefaults.experienceEmbedding,
+  );
+  const experienceScope = parseExperienceScope(args["experience-scope"], memoryProfileDefaults.experienceScope);
+  const experiencePoolSize = args["experience-pool-size"]
+    ? Number(args["experience-pool-size"])
+    : memoryProfileDefaults.experiencePoolSize;
   const experienceMinScore = args["experience-min-score"] ? Number(args["experience-min-score"]) : undefined;
-  const observationMemory = parseObservationMemory(args["observation-memory"]);
-  const observationSource = parseObservationSource(args["observation-source"]);
-  const observationContext = parseObservationContext(args["observation-context"]);
-  const observationLogMaxChars = args["observation-log-max-chars"] ? Number(args["observation-log-max-chars"]) : 80_000;
+  const observationMemory = parseObservationMemory(
+    args["observation-memory"],
+    memoryProfileDefaults.observationMemory,
+  );
+  const observationSource = parseObservationSource(
+    args["observation-source"],
+    memoryProfileDefaults.observationSource,
+  );
+  const observationContext = parseObservationContext(
+    args["observation-context"],
+    memoryProfileDefaults.observationContext,
+  );
+  const observationLogMaxChars = args["observation-log-max-chars"]
+    ? Number(args["observation-log-max-chars"])
+    : memoryProfileDefaults.observationLogMaxChars;
   const observationMaxPerChunk = args["observation-max-per-chunk"]
     ? Number(args["observation-max-per-chunk"])
-    : 12;
-  const observationSlots = args["observation-slots"] ? Number(args["observation-slots"]) : 12;
-  const liveToolPolicy = parseLiveToolPolicy(args["live-tool-policy"]);
-  const liveToolQueries = args["live-tool-queries"] ? Number(args["live-tool-queries"]) : 2;
-  const liveToolResults = args["live-tool-results"] ? Number(args["live-tool-results"]) : Math.min(8, k);
+    : memoryProfileDefaults.observationMaxPerChunk;
+  const observationSlots = args["observation-slots"]
+    ? Number(args["observation-slots"])
+    : memoryProfileDefaults.observationSlots;
+  const liveToolPolicy = parseLiveToolPolicy(args["live-tool-policy"], memoryProfileDefaults.liveToolPolicy);
+  const liveToolQueries = args["live-tool-queries"]
+    ? Number(args["live-tool-queries"])
+    : memoryProfileDefaults.liveToolQueries;
+  const liveToolResults = args["live-tool-results"]
+    ? Number(args["live-tool-results"])
+    : memoryProfileDefaults.liveToolResults(k);
   const recordRetries = args["record-retries"] ? Number(args["record-retries"]) : 1;
   if (!Number.isInteger(recordRetries) || recordRetries < 0) {
     throw new Error(`Invalid --record-retries '${String(args["record-retries"])}'. Use a non-negative integer.`);
@@ -1297,7 +1398,7 @@ async function main(): Promise<void> {
       `categoryOffset=${categoryOffset ?? "stride"}, ` +
       `arms=${arms.join(",")}, k=${k}, conc=${concurrency}, cogConc=${cogcoreConcurrency}, ` +
       `extractConc=${extractConcurrency}, chunkTurns=${chunkTurns}, maxFactsPerChunk=${maxFactsPerChunk}, ` +
-      `retrievalOnly=${retrievalOnly}, debugAll=${debugAll}, ` +
+      `memoryProfile=${memoryProfile}, retrievalOnly=${retrievalOnly}, debugAll=${debugAll}, ` +
       `maxCompletionTokens=${maxCompletionTokens}, recordRetries=${recordRetries}${
         hasCogcoreSystemArm
           ? `, systemExperienceSlots=${systemExperienceSlots}, experienceGranularity=${experienceGranularity}, ` +
@@ -1340,6 +1441,7 @@ async function main(): Promise<void> {
         maxFactsPerChunk,
         extractionCacheVersion: COGCORE_EXTRACTION_CACHE_VERSION,
         observationCacheVersion: COGCORE_OBSERVATION_CACHE_VERSION,
+        memoryProfile,
         ...(hasCogcoreSystemArm
           ? {
               systemExperienceSlots,
@@ -1401,6 +1503,7 @@ async function main(): Promise<void> {
           maxFactsPerChunk,
           extractionCacheVersion: COGCORE_EXTRACTION_CACHE_VERSION,
           observationCacheVersion: COGCORE_OBSERVATION_CACHE_VERSION,
+          memoryProfile,
           ...(hasCogcoreSystemArm
             ? {
                 systemExperienceSlots,
@@ -1483,6 +1586,7 @@ async function main(): Promise<void> {
               liveToolPolicy,
               liveToolQueries,
               liveToolResults,
+              memoryProfile,
               recordRetries,
               retrievalOnly,
               log,

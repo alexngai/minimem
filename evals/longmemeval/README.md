@@ -83,6 +83,12 @@ question/gold/evidence-matching extracted facts and evolution actions even when
 the answer is correct. Use `--record-retries N` to retry transient per-question
 failures, and `--retry-errors-from path.jsonl` to rerun only questions that had
 an `error` in a previous details file.
+Memory-profile flags: `--memory-profile standard|long-memory` chooses the
+default bundle before individual flags are applied. `cogcore-live` defaults to
+`long-memory`, which enables chunk ExperienceMemory with hash scoring,
+KnowledgeBank observation memory from the combined extraction pass, chronological
+observation-log context, and adaptive live tool use. Use `--memory-profile standard`
+to reproduce the older conservative defaults, or override any specific flag below.
 System-arm ExperienceMemory tuning flags: `--experience-granularity session|chunk|turn`,
 `--experience-chunk-turns N`, `--experience-embedding none|hash`,
 `--experience-scope knowledge-sessions|all`, `--experience-pool-size N`,
@@ -123,10 +129,7 @@ source ~/.zshrc
 npx tsx evals/longmemeval/qa.ts --arms cogcore-live \
   --retry-errors-from evals/longmemeval/DETAILS-live-full-qa.jsonl \
   --record-retries 2 --k 16 --concurrency 4 --cogcore-concurrency 4 \
-  --extract-concurrency 1 --experience-granularity chunk \
-  --experience-embedding hash --experience-scope knowledge-sessions \
-  --experience-pool-size 64 --live-tool-policy auto \
-  --live-tool-queries 2 --live-tool-results 6 \
+  --extract-concurrency 1 --memory-profile long-memory \
   --out evals/longmemeval/RESULTS-live-error-rerun.md \
   --details-out evals/longmemeval/DETAILS-live-error-rerun.jsonl
 ```
@@ -137,14 +140,9 @@ To A/B the observation-form KnowledgeBank layer on targeted hard cases:
 source ~/.zshrc
 npx tsx evals/longmemeval/qa.ts --arms cogcore-live \
   --question-ids gpt4_d84a3211,6e984301,71017277 \
-  --observation-memory kb --observation-source combined --observation-context log \
-  --observation-log-max-chars 80000 \
-  --observation-max-per-chunk 12 --observation-slots 12 \
+  --memory-profile long-memory \
   --record-retries 2 --k 16 --concurrency 3 --cogcore-concurrency 3 \
-  --extract-concurrency 1 --experience-granularity chunk \
-  --experience-embedding hash --experience-scope knowledge-sessions \
-  --experience-pool-size 64 --live-tool-policy auto \
-  --live-tool-queries 2 --live-tool-results 6 \
+  --extract-concurrency 1 \
   --out evals/longmemeval/RESULTS-live-observation-targeted.md \
   --details-out evals/longmemeval/DETAILS-live-observation-targeted.jsonl
 ```
