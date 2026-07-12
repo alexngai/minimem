@@ -19,11 +19,19 @@ node node_modules/.bin/tsx evals/longmemeval/qa.ts \
   --experience-embedding hash \
   --experience-scope knowledge-sessions \
   --experience-pool-size 64 \
+  --observation-memory kb \
+  --observation-source combined \
+  --observation-context log \
+  --observation-log-max-chars 80000 \
+  --observation-max-per-chunk 12 \
+  --observation-slots 12 \
+  --live-tool-policy auto \
   --live-tool-queries 2 \
   --live-tool-results 6 \
+  --record-retries 2 \
   --out evals/longmemeval/RESULTS-live-full-qa.md \
   --details-out evals/longmemeval/DETAILS-live-full-qa.jsonl
 
-status=$?
-echo "runner-exit=$(date -Iseconds) status=$status"
-exit "$status"
+exit_code=$?
+echo "runner-exit=$(date -Iseconds) status=$exit_code"
+exit "$exit_code"

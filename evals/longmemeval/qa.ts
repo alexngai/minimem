@@ -38,11 +38,16 @@ import {
   CogcoreLongMemEvalAdapter,
   CogcoreLiveLongMemEvalAdapter,
   COGCORE_EXTRACTION_CACHE_VERSION,
+  COGCORE_OBSERVATION_CACHE_VERSION,
   defaultSystemExperienceSlots,
   type LiveAnswerTrace,
   type ExperienceEmbedding,
   type ExperienceGranularity,
   type ExperienceScope,
+  type LiveToolPolicy,
+  type ObservationContextMode,
+  type ObservationExtractionSource,
+  type ObservationMemoryMode,
   type CogcoreLiveLongMemEvalArm,
   type CogcoreLongMemEvalArm,
 } from "./cogcore-memory.js";
@@ -126,9 +131,91 @@ function parseExperienceScope(spec: string | boolean | undefined): ExperienceSco
   throw new Error(`Unknown --experience-scope '${value}'. Use knowledge-sessions|all.`);
 }
 
+function parseObservationMemory(spec: string | boolean | undefined): ObservationMemoryMode {
+  const value = spec && spec !== true ? String(spec) : "off";
+  if (value === "off" || value === "kb") return value;
+  throw new Error(`Unknown --observation-memory '${value}'. Use off|kb.`);
+}
+
+function parseObservationSource(spec: string | boolean | undefined): ObservationExtractionSource {
+  const value = spec && spec !== true ? String(spec) : "chunks";
+  if (value === "chunks" || value === "combined") return value;
+  throw new Error(`Unknown --observation-source '${value}'. Use chunks|combined.`);
+}
+
+function parseObservationContext(spec: string | boolean | undefined): ObservationContextMode {
+  const value = spec && spec !== true ? String(spec) : "retrieved";
+  if (value === "retrieved" || value === "log" || value === "both") return value;
+  throw new Error(`Unknown --observation-context '${value}'. Use retrieved|log|both.`);
+}
+
+function parseLiveToolPolicy(spec: string | boolean | undefined): LiveToolPolicy {
+  const value = spec && spec !== true ? String(spec) : "auto";
+  if (value === "auto" || value === "always" || value === "off") return value;
+  throw new Error(`Unknown --live-tool-policy '${value}'. Use auto|always|off.`);
+}
+
 function parseCategories(spec: string | boolean | undefined): string[] {
   if (!spec || spec === true) return [];
   return String(spec).split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+const RETRYABLE_ERROR_PATTERNS = [
+  /azure .* exhausted retries/i,
+  /\bfetch failed\b/i,
+  /\brequest timed out\b/i,
+  /\babort(?:ed)?\b/i,
+  /\btimeout\b/i,
+  /\bECONNRESET\b/i,
+  /\bETIMEDOUT\b/i,
+  /\bENOTFOUND\b/i,
+  /\bECONNREFUSED\b/i,
+  /\bEAI_AGAIN\b/i,
+  /\b429\b/i,
+  /\brate limit/i,
+  /\btoo many requests\b/i,
+  /\b5\d\d\b/,
+];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableEvalError(message: string | undefined): boolean {
+  if (!message) return false;
+  return RETRYABLE_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function retryDelayMs(attempt: number, message: string | undefined): number {
+  if (message && /\b429\b|rate limit|too many requests/i.test(message)) return Math.min(120_000, 30_000 + attempt * 30_000);
+  return Math.min(45_000, 10_000 + attempt * 10_000);
+}
+
+async function loadErroredQuestionIdsFromDetails(file: string): Promise<string[]> {
+  const raw = await fs.readFile(file, "utf-8");
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, line] of raw.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch (err) {
+      throw new Error(
+        `Could not parse ${file}:${index + 1}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const record = parsed as { type?: unknown; questionId?: unknown; error?: unknown };
+    if (record.type !== "record" || typeof record.questionId !== "string" || typeof record.error !== "string") {
+      continue;
+    }
+    if (!seen.has(record.questionId)) {
+      seen.add(record.questionId);
+      out.push(record.questionId);
+    }
+  }
+  return out;
 }
 
 function sampleByQuestionIds(source: ReturnType<typeof loadLongMemEvalCached>, questionIds: string[]): SampledMemQuestion[] {
@@ -240,6 +327,8 @@ interface QADetailRecord {
   debug?: CogcoreDebugArtifacts;
   liveTrace?: LiveAnswerTrace;
   timingMs?: QATimingMs;
+  retryAttempts?: number;
+  retryErrors?: string[];
   error?: string;
 }
 
@@ -259,6 +348,9 @@ interface RunMetadataRecord {
     perCategory: number;
     sample?: number;
     targetCategories?: string[];
+    questionIdsFilter?: string[];
+    retryErrorsFrom?: string;
+    retryErrorQuestionIds?: string[];
     categoryOffset?: number;
     includeAbstain: boolean;
     abstainN: number;
@@ -268,6 +360,7 @@ interface RunMetadataRecord {
     chunkTurns: number;
     maxFactsPerChunk: number;
     extractionCacheVersion: number;
+    observationCacheVersion: number;
     systemExperienceSlots?: number;
     experienceGranularity?: ExperienceGranularity;
     experienceChunkTurns?: number;
@@ -275,9 +368,17 @@ interface RunMetadataRecord {
     experienceScope?: ExperienceScope;
     experiencePoolSize?: number;
     experienceMinScore?: number;
+    observationMemory?: ObservationMemoryMode;
+    observationSource?: ObservationExtractionSource;
+    observationContext?: ObservationContextMode;
+    observationLogMaxChars?: number;
+    observationMaxPerChunk?: number;
+    observationSlots?: number;
+    liveToolPolicy?: LiveToolPolicy;
     liveToolQueries?: number;
     liveToolResults?: number;
     maxCompletionTokens: number;
+    recordRetries: number;
     retrievalOnly: boolean;
     debugAll: boolean;
   };
@@ -596,7 +697,12 @@ async function runArm(
           const { text } = await llm.chat([
             {
               role: "user",
-              content: buildLongMemEvalAnswerPrompt(question.question, question.date, promptExcerpts),
+              content: buildLongMemEvalAnswerPrompt(
+                question.question,
+                question.date,
+                promptExcerpts,
+                question.category,
+              ),
             },
           ]);
           answer = text.trim();
@@ -844,113 +950,156 @@ async function runCogcoreLiveArm(
   experienceEmbedding: ExperienceEmbedding,
   experienceScope: ExperienceScope,
   experiencePoolSize: number,
+  observationMemory: ObservationMemoryMode,
+  observationSource: ObservationExtractionSource,
+  observationContext: ObservationContextMode,
+  observationLogMaxChars: number,
+  observationMaxPerChunk: number,
+  observationSlots: number,
+  liveToolPolicy: LiveToolPolicy,
   liveToolQueries: number,
   liveToolResults: number,
+  recordRetries: number,
   retrievalOnly: boolean,
   log: (m: string) => void,
 ): Promise<ArmRunResult> {
   let done = 0;
   const results = await mapPool(sampled, concurrency, async ({ instance, question }) => {
-    const adapter = new CogcoreLiveLongMemEvalAdapter(llm, arm, {
-      topK: k,
-      embeddings: "local",
-      extractConcurrency,
-      chunkTurns,
-      maxFactsPerChunk,
-      experienceGranularity,
-      experienceChunkTurns,
-      experienceEmbedding,
-      experienceScope,
-      experiencePoolSize,
-      liveToolQueries,
-      liveToolResults,
-      onProgress: (m) => log(`  [${arm}] ${instance.id}: ${m}`),
-    });
     let answer = "";
     let judgedBy: QAJudgedBy = "error";
     let correct = false;
     let retrieved: RetrievedDetail[] = [];
     let liveTrace: LiveAnswerTrace | undefined;
     let error: string | undefined;
+    const retryErrors: string[] = [];
+    let attemptsRun = 0;
     const totalStarted = Date.now();
     const timingMs: QATimingMs = { total: 0 };
-    try {
-      const ingestStarted = Date.now();
-      await adapter.ingest(instance);
-      timingMs.ingest = Date.now() - ingestStarted;
-      if (retrievalOnly) {
-        const retrieveStarted = Date.now();
-        const excerpts = await adapter.retrieve(question);
-        timingMs.retrieve = Date.now() - retrieveStarted;
-        answer = RETRIEVAL_ONLY_ANSWER;
-        retrieved = excerpts.map((e, i) => ({
-          rank: i + 1,
-          ref: e.ref,
-          text: e.text,
-          channel: e.channel,
-          sourceRank: e.sourceRank,
-          sourceScore: e.sourceScore,
-          query: e.query,
-          noteId: e.noteId,
-          matchType: e.matchType,
-          experienceId: e.experienceId,
-          sessionId: e.sessionId,
-          turnIds: e.turnIds,
-          date: e.date,
-          selectedBy: e.selectedBy,
-        }));
-      } else {
-        const answerStarted = Date.now();
-        const res = await adapter.answer(question);
-        timingMs.answer = Date.now() - answerStarted;
-        answer = res.answer;
-        liveTrace = res.liveTrace;
-        retrieved = res.retrieved.map((e, i) => ({
-          rank: i + 1,
-          ref: e.ref,
-          text: e.text,
-          channel: e.channel,
-          sourceRank: e.sourceRank,
-          sourceScore: e.sourceScore,
-          query: e.query,
-          noteId: e.noteId,
-          matchType: e.matchType,
-          experienceId: e.experienceId,
-          sessionId: e.sessionId,
-          turnIds: e.turnIds,
-          date: e.date,
-          selectedBy: e.selectedBy,
-        }));
+
+    for (let attempt = 0; attempt <= recordRetries; attempt++) {
+      attemptsRun = attempt + 1;
+      answer = "";
+      judgedBy = "error";
+      correct = false;
+      retrieved = [];
+      liveTrace = undefined;
+      error = undefined;
+      const adapter = new CogcoreLiveLongMemEvalAdapter(llm, arm, {
+        topK: k,
+        embeddings: "local",
+        extractConcurrency,
+        chunkTurns,
+        maxFactsPerChunk,
+        experienceGranularity,
+        experienceChunkTurns,
+        experienceEmbedding,
+        experienceScope,
+        experiencePoolSize,
+        observationMemory,
+        observationSource,
+        observationContext,
+        observationLogMaxChars,
+        observationMaxPerChunk,
+        observationSlots,
+        liveToolPolicy,
+        liveToolQueries,
+        liveToolResults,
+        onProgress: (m) => log(`  [${arm}] ${instance.id}: ${m}`),
+      });
+
+      try {
+        const ingestStarted = Date.now();
+        await adapter.ingest(instance);
+        timingMs.ingest = (timingMs.ingest ?? 0) + Date.now() - ingestStarted;
+        if (retrievalOnly) {
+          const retrieveStarted = Date.now();
+          const excerpts = await adapter.retrieve(question);
+          timingMs.retrieve = (timingMs.retrieve ?? 0) + Date.now() - retrieveStarted;
+          answer = RETRIEVAL_ONLY_ANSWER;
+          retrieved = excerpts.map((e, i) => ({
+            rank: i + 1,
+            ref: e.ref,
+            text: e.text,
+            channel: e.channel,
+            sourceRank: e.sourceRank,
+            sourceScore: e.sourceScore,
+            query: e.query,
+            noteId: e.noteId,
+            matchType: e.matchType,
+            experienceId: e.experienceId,
+            sessionId: e.sessionId,
+            turnIds: e.turnIds,
+            date: e.date,
+            selectedBy: e.selectedBy,
+          }));
+        } else {
+          const answerStarted = Date.now();
+          const res = await adapter.answer(question);
+          timingMs.answer = (timingMs.answer ?? 0) + Date.now() - answerStarted;
+          answer = res.answer;
+          liveTrace = res.liveTrace;
+          retrieved = res.retrieved.map((e, i) => ({
+            rank: i + 1,
+            ref: e.ref,
+            text: e.text,
+            channel: e.channel,
+            sourceRank: e.sourceRank,
+            sourceScore: e.sourceScore,
+            query: e.query,
+            noteId: e.noteId,
+            matchType: e.matchType,
+            experienceId: e.experienceId,
+            sessionId: e.sessionId,
+            turnIds: e.turnIds,
+            date: e.date,
+            selectedBy: e.selectedBy,
+          }));
+        }
+        if (retrievalOnly) {
+          correct = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved).allHit;
+          judgedBy = RETRIEVAL_ONLY_JUDGED_BY;
+        } else if (question.abstain) {
+          const judgeStarted = Date.now();
+          correct = isMemoryQARefusal(answer);
+          timingMs.judge = (timingMs.judge ?? 0) + Date.now() - judgeStarted;
+          judgedBy = "abstain-sentinel";
+        } else {
+          const judgeStarted = Date.now();
+          correct = await judgeMemoryQACorrect(
+            (p) => llm.complete(p),
+            question.question,
+            question.answer,
+            answer,
+          );
+          timingMs.judge = (timingMs.judge ?? 0) + Date.now() - judgeStarted;
+          judgedBy = "mem0-judge";
+        }
+      } catch (err) {
+        error = err instanceof Error ? err.message : String(err);
+      } finally {
+        const closeStarted = Date.now();
+        try {
+          await adapter.close();
+        } catch (closeErr) {
+          const closeError = closeErr instanceof Error ? closeErr.message : String(closeErr);
+          error = error ? `${error}; adapter close failed: ${closeError}` : `adapter close failed: ${closeError}`;
+        }
+        timingMs.adapterClose = (timingMs.adapterClose ?? 0) + Date.now() - closeStarted;
       }
-      const closeStarted = Date.now();
-      await adapter.close();
-      timingMs.adapterClose = (timingMs.adapterClose ?? 0) + Date.now() - closeStarted;
-      if (retrievalOnly) {
-        correct = buildEvidenceCoverage(instance, question.evidenceTurnIds, retrieved).allHit;
-        judgedBy = RETRIEVAL_ONLY_JUDGED_BY;
-      } else if (question.abstain) {
-        const judgeStarted = Date.now();
-        correct = isMemoryQARefusal(answer);
-        timingMs.judge = Date.now() - judgeStarted;
-        judgedBy = "abstain-sentinel";
-      } else {
-        const judgeStarted = Date.now();
-        correct = await judgeMemoryQACorrect(
-          (p) => llm.complete(p),
-          question.question,
-          question.answer,
-          answer,
-        );
-        timingMs.judge = Date.now() - judgeStarted;
-        judgedBy = "mem0-judge";
-      }
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-      log(`  [${arm}] error on ${question.id}: ${error}`);
-    } finally {
-      const closeStarted = Date.now();
-      await adapter.close();
-      timingMs.adapterClose = (timingMs.adapterClose ?? 0) + Date.now() - closeStarted;
+
+      if (!error) break;
+
+      retryErrors.push(error);
+      const canRetry = attempt < recordRetries && isRetryableEvalError(error);
+      log(
+        `  [${arm}] error on ${question.id} attempt ${attempt + 1}/${recordRetries + 1}: ${error}` +
+          (canRetry ? " (retryable)" : ""),
+      );
+      if (!canRetry) break;
+
+      const delayMs = retryDelayMs(attempt, error);
+      log(`  [${arm}] retrying ${question.id} in ${(delayMs / 1000).toFixed(0)}s`);
+      await sleep(delayMs);
     }
 
     done++;
@@ -996,6 +1145,8 @@ async function runCogcoreLiveArm(
       debug,
       timingMs,
       ...(liveTrace ? { liveTrace } : {}),
+      ...(attemptsRun > 1 ? { retryAttempts: attemptsRun - 1 } : {}),
+      ...(retryErrors.length > 0 ? { retryErrors } : {}),
       ...(error ? { error } : {}),
     };
     return { record, detail };
@@ -1047,7 +1198,10 @@ async function main(): Promise<void> {
   const perCategory = args["per-category"] ? Number(args["per-category"]) : 10;
   const sample = args.sample ? Number(args.sample) : undefined;
   const targetCategories = parseCategories(args.categories);
-  const questionIdsFilter = parseCategories(args["question-ids"]);
+  const explicitQuestionIdsFilter = parseCategories(args["question-ids"]);
+  const retryErrorsFromArg = args["retry-errors-from"];
+  if (retryErrorsFromArg === true) throw new Error("--retry-errors-from requires a detail JSONL path");
+  const retryErrorsFrom = retryErrorsFromArg ? String(retryErrorsFromArg) : undefined;
   const categoryOffset = args["category-offset"] ? Number(args["category-offset"]) : undefined;
   const includeAbstain = args["no-abstain"] ? false : true;
   const concurrency = args.concurrency ? Number(args.concurrency) : 4;
@@ -1063,8 +1217,37 @@ async function main(): Promise<void> {
   const experienceScope = parseExperienceScope(args["experience-scope"]);
   const experiencePoolSize = args["experience-pool-size"] ? Number(args["experience-pool-size"]) : 64;
   const experienceMinScore = args["experience-min-score"] ? Number(args["experience-min-score"]) : undefined;
+  const observationMemory = parseObservationMemory(args["observation-memory"]);
+  const observationSource = parseObservationSource(args["observation-source"]);
+  const observationContext = parseObservationContext(args["observation-context"]);
+  const observationLogMaxChars = args["observation-log-max-chars"] ? Number(args["observation-log-max-chars"]) : 80_000;
+  const observationMaxPerChunk = args["observation-max-per-chunk"]
+    ? Number(args["observation-max-per-chunk"])
+    : 12;
+  const observationSlots = args["observation-slots"] ? Number(args["observation-slots"]) : 12;
+  const liveToolPolicy = parseLiveToolPolicy(args["live-tool-policy"]);
   const liveToolQueries = args["live-tool-queries"] ? Number(args["live-tool-queries"]) : 2;
   const liveToolResults = args["live-tool-results"] ? Number(args["live-tool-results"]) : Math.min(8, k);
+  const recordRetries = args["record-retries"] ? Number(args["record-retries"]) : 1;
+  if (!Number.isInteger(recordRetries) || recordRetries < 0) {
+    throw new Error(`Invalid --record-retries '${String(args["record-retries"])}'. Use a non-negative integer.`);
+  }
+  if (!Number.isInteger(observationMaxPerChunk) || observationMaxPerChunk < 1) {
+    throw new Error(
+      `Invalid --observation-max-per-chunk '${String(args["observation-max-per-chunk"])}'. Use a positive integer.`,
+    );
+  }
+  if (!Number.isInteger(observationSlots) || observationSlots < 0) {
+    throw new Error(`Invalid --observation-slots '${String(args["observation-slots"])}'. Use a non-negative integer.`);
+  }
+  if (!Number.isInteger(observationLogMaxChars) || observationLogMaxChars < 0) {
+    throw new Error(
+      `Invalid --observation-log-max-chars '${String(args["observation-log-max-chars"])}'. Use a non-negative integer.`,
+    );
+  }
+  if (!Number.isInteger(liveToolQueries) || liveToolQueries < 0) {
+    throw new Error(`Invalid --live-tool-queries '${String(args["live-tool-queries"])}'. Use a non-negative integer.`);
+  }
   const hasCogcoreArm = arms.some((a) => isCogcoreArm(a) || isCogcoreLiveArm(a));
   const hasCogcoreSystemArm = arms.some((a) => String(a).startsWith("cogcore-system") || isCogcoreLiveArm(a));
   const systemExperienceSlots = args["experience-slots"]
@@ -1090,6 +1273,13 @@ async function main(): Promise<void> {
     targetCategories.length > 0
       ? all.filter((inst) => inst.questions.some((q) => targetCategories.includes(q.category)))
       : all;
+  const retryErrorQuestionIds = retryErrorsFrom ? await loadErroredQuestionIdsFromDetails(retryErrorsFrom) : [];
+  if (retryErrorsFrom) {
+    if (retryErrorQuestionIds.length === 0) throw new Error(`No errored records found in ${retryErrorsFrom}`);
+    log(`loaded ${retryErrorQuestionIds.length} errored question ids from ${retryErrorsFrom}`);
+  }
+  const questionIdsFilter =
+    explicitQuestionIdsFilter.length > 0 ? explicitQuestionIdsFilter : retryErrorQuestionIds;
   let sampled =
     questionIdsFilter.length > 0
       ? sampleByQuestionIds(source, questionIdsFilter)
@@ -1108,12 +1298,16 @@ async function main(): Promise<void> {
       `arms=${arms.join(",")}, k=${k}, conc=${concurrency}, cogConc=${cogcoreConcurrency}, ` +
       `extractConc=${extractConcurrency}, chunkTurns=${chunkTurns}, maxFactsPerChunk=${maxFactsPerChunk}, ` +
       `retrievalOnly=${retrievalOnly}, debugAll=${debugAll}, ` +
-      `maxCompletionTokens=${maxCompletionTokens}${
+      `maxCompletionTokens=${maxCompletionTokens}, recordRetries=${recordRetries}${
         hasCogcoreSystemArm
           ? `, systemExperienceSlots=${systemExperienceSlots}, experienceGranularity=${experienceGranularity}, ` +
             `experienceChunkTurns=${experienceChunkTurns}, experienceEmbedding=${experienceEmbedding}, ` +
             `experienceScope=${experienceScope}, experiencePoolSize=${experiencePoolSize}, ` +
-            `experienceMinScore=${experienceMinScore ?? "off"}, liveToolQueries=${liveToolQueries}, ` +
+            `experienceMinScore=${experienceMinScore ?? "off"}, observationMemory=${observationMemory}, ` +
+            `observationSource=${observationSource}, observationContext=${observationContext}, ` +
+            `observationLogMaxChars=${observationLogMaxChars}, observationMaxPerChunk=${observationMaxPerChunk}, ` +
+            `observationSlots=${observationSlots}, ` +
+            `liveToolPolicy=${liveToolPolicy}, liveToolQueries=${liveToolQueries}, ` +
             `liveToolResults=${liveToolResults}`
           : ""
       })`,
@@ -1135,6 +1329,7 @@ async function main(): Promise<void> {
         ...(sample !== undefined ? { sample } : {}),
         ...(targetCategories.length > 0 ? { targetCategories } : {}),
         ...(questionIdsFilter.length > 0 ? { questionIdsFilter } : {}),
+        ...(retryErrorsFrom ? { retryErrorsFrom, retryErrorQuestionIds } : {}),
         ...(categoryOffset !== undefined ? { categoryOffset } : {}),
         includeAbstain,
         abstainN,
@@ -1144,6 +1339,7 @@ async function main(): Promise<void> {
         chunkTurns,
         maxFactsPerChunk,
         extractionCacheVersion: COGCORE_EXTRACTION_CACHE_VERSION,
+        observationCacheVersion: COGCORE_OBSERVATION_CACHE_VERSION,
         ...(hasCogcoreSystemArm
           ? {
               systemExperienceSlots,
@@ -1152,11 +1348,18 @@ async function main(): Promise<void> {
               experienceEmbedding,
               experienceScope,
               experiencePoolSize,
+              observationMemory,
+              observationSource,
+              observationContext,
+              observationLogMaxChars,
+              observationMaxPerChunk,
+              observationSlots,
               ...(experienceMinScore !== undefined ? { experienceMinScore } : {}),
-              ...(arms.some((a) => isCogcoreLiveArm(a)) ? { liveToolQueries, liveToolResults } : {}),
+              ...(arms.some((a) => isCogcoreLiveArm(a)) ? { liveToolPolicy, liveToolQueries, liveToolResults } : {}),
             }
           : {}),
         maxCompletionTokens,
+        recordRetries,
         retrievalOnly,
         debugAll,
       },
@@ -1186,6 +1389,8 @@ async function main(): Promise<void> {
           sample: sample ?? null,
           targetCategories: targetCategories.length > 0 ? targetCategories : null,
           questionIdsFilter: questionIdsFilter.length > 0 ? questionIdsFilter : null,
+          retryErrorsFrom: retryErrorsFrom ?? null,
+          retryErrorQuestionIds: retryErrorQuestionIds.length > 0 ? retryErrorQuestionIds : null,
           categoryOffset: categoryOffset ?? null,
           includeAbstain,
           abstainN,
@@ -1195,6 +1400,7 @@ async function main(): Promise<void> {
           chunkTurns,
           maxFactsPerChunk,
           extractionCacheVersion: COGCORE_EXTRACTION_CACHE_VERSION,
+          observationCacheVersion: COGCORE_OBSERVATION_CACHE_VERSION,
           ...(hasCogcoreSystemArm
             ? {
                 systemExperienceSlots,
@@ -1203,11 +1409,18 @@ async function main(): Promise<void> {
                 experienceEmbedding,
                 experienceScope,
                 experiencePoolSize,
+                observationMemory,
+                observationSource,
+                observationContext,
+                observationLogMaxChars,
+                observationMaxPerChunk,
+                observationSlots,
                 ...(experienceMinScore !== undefined ? { experienceMinScore } : {}),
-                ...(arms.some((a) => isCogcoreLiveArm(a)) ? { liveToolQueries, liveToolResults } : {}),
+                ...(arms.some((a) => isCogcoreLiveArm(a)) ? { liveToolPolicy, liveToolQueries, liveToolResults } : {}),
               }
             : {}),
           maxCompletionTokens,
+          recordRetries,
           retrievalOnly,
           debugAll,
           questionIds: sampled.map((s) => s.question.id),
@@ -1261,8 +1474,16 @@ async function main(): Promise<void> {
               experienceEmbedding,
               experienceScope,
               experiencePoolSize,
+              observationMemory,
+              observationSource,
+              observationContext,
+              observationLogMaxChars,
+              observationMaxPerChunk,
+              observationSlots,
+              liveToolPolicy,
               liveToolQueries,
               liveToolResults,
+              recordRetries,
               retrievalOnly,
               log,
             )

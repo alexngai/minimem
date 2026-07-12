@@ -57,6 +57,10 @@ export type CogcoreLiveLongMemEvalArm = "cogcore-live";
 export type ExperienceGranularity = "session" | "chunk" | "turn";
 export type ExperienceEmbedding = "none" | "hash";
 export type ExperienceScope = "knowledge-sessions" | "all";
+export type ObservationMemoryMode = "off" | "kb";
+export type ObservationExtractionSource = "chunks" | "combined";
+export type ObservationContextMode = "retrieved" | "log" | "both";
+export type LiveToolPolicy = "auto" | "always" | "off";
 
 export interface CogcoreLongMemEvalOptions {
   topK?: number;
@@ -91,8 +95,24 @@ export interface CogcoreLongMemEvalOptions {
   maxFactsPerChunk?: number;
   /** Maximum agent-facing minimem tool searches in the live delegate. */
   liveToolQueries?: number;
+  /** Policy for whether live-agent minimem tools should run for a question. */
+  liveToolPolicy?: LiveToolPolicy;
   /** Maximum minimem results per live tool search. */
   liveToolResults?: number;
+  /** Write Mastra-like distilled observations into KnowledgeBank during ingestion. */
+  observationMemory?: ObservationMemoryMode;
+  /** Cache directory for LLM-generated observation memory. */
+  observationCacheDir?: string;
+  /** Extraction path used to produce observation memory. */
+  observationSource?: ObservationExtractionSource;
+  /** Agent-facing observation channel. */
+  observationContext?: ObservationContextMode;
+  /** Maximum characters of chronological observation log to inject. */
+  observationLogMaxChars?: number;
+  /** Upper bound on observation records extracted from each transcript chunk. */
+  observationMaxPerChunk?: number;
+  /** Maximum observation notes allowed to preempt normal scoped KnowledgeBank notes. */
+  observationSlots?: number;
   /** Optional progress hook for long extraction/indexing steps. */
   onProgress?: (message: string) => void;
 }
@@ -116,6 +136,43 @@ interface EvolutionCache {
   chunkTurns: number;
   maxFactsPerChunk: number;
   plan: MemoryEvolutionPlan;
+}
+
+type ObservationKind =
+  | "event"
+  | "preference"
+  | "state_update"
+  | "plan"
+  | "commitment"
+  | "relationship"
+  | "assistant_answer"
+  | "inventory"
+  | "temporal"
+  | "other";
+
+type ObservationStatus = "current" | "historical" | "planned" | "completed" | "cancelled" | "superseded" | "unknown";
+
+interface ExtractedObservation {
+  statement: string;
+  type: ObservationKind;
+  date?: string;
+  status: ObservationStatus;
+  entities: string[];
+  turnIds: string[];
+}
+
+interface ObservationCache {
+  version: number;
+  instanceId: string;
+  chunkTurns: number;
+  maxObservationsPerChunk: number;
+  source?: ObservationExtractionSource;
+  observations: ExtractedObservation[];
+}
+
+interface CombinedExtraction {
+  facts: ExtractedFact[];
+  observations: ExtractedObservation[];
 }
 
 export interface RetrievedExcerpt {
@@ -149,6 +206,11 @@ export interface LiveAnswerTrace {
   queryV2KnowledgeCount: number;
   scopedSystemKnowledgeCount: number;
   surfacedKnowledgeCount: number;
+  observationKnowledgeCount?: number;
+  observationContext?: ObservationContextMode;
+  observationLogContextChars?: number;
+  liveToolPolicy?: LiveToolPolicy;
+  effectiveLiveToolQueries?: number;
   toolCalls: LiveToolTrace[];
 }
 
@@ -192,11 +254,40 @@ interface AgentDelegate {
 }
 
 export const COGCORE_EXTRACTION_CACHE_VERSION = 3;
+export const COGCORE_OBSERVATION_CACHE_VERSION = 1;
 const DEFAULT_CHUNK_TURNS = 40;
 const DEFAULT_MAX_FACTS_PER_CHUNK = 60;
 const DEFAULT_EXPERIENCE_CHUNK_TURNS = 8;
+const DEFAULT_OBSERVATION_SOURCE: ObservationExtractionSource = "chunks";
+const DEFAULT_OBSERVATION_CONTEXT: ObservationContextMode = "retrieved";
+const DEFAULT_OBSERVATION_LOG_MAX_CHARS = 80_000;
+const DEFAULT_OBSERVATION_MAX_PER_CHUNK = 12;
+const DEFAULT_OBSERVATION_SLOTS = 12;
+const COMBINED_EMPTY_RETRIES = 1;
 const MAX_EXCERPT_CHARS = 1200;
 const MAX_KNOWLEDGE_TOKENS = 1_000_000;
+const MAX_SCOPED_SYSTEM_KNOWLEDGE_NOTES = 32;
+const OBSERVATION_TYPES = new Set<ObservationKind>([
+  "event",
+  "preference",
+  "state_update",
+  "plan",
+  "commitment",
+  "relationship",
+  "assistant_answer",
+  "inventory",
+  "temporal",
+  "other",
+]);
+const OBSERVATION_STATUSES = new Set<ObservationStatus>([
+  "current",
+  "historical",
+  "planned",
+  "completed",
+  "cancelled",
+  "superseded",
+  "unknown",
+]);
 
 export function defaultSystemExperienceSlots(topK: number): number {
   return Math.min(4, Math.max(1, Math.floor(topK / 4)));
@@ -295,6 +386,84 @@ function buildExtractionPrompt(instance: MemQAInstance, turns: DatedTurn[], maxF
   ].join("\n");
 }
 
+function buildObservationPrompt(instance: MemQAInstance, turns: DatedTurn[], maxObservations: number): string {
+  const transcript = turns
+    .map((t) => `[${t.sessionId}${t.date ? ` @ ${t.date}` : ""} turn ${t.id}] ${t.speaker}: ${t.text}`)
+    .join("\n");
+  return [
+    "You are writing an observation log for an AI assistant's long-term memory.",
+    "Distill the transcript below into compact chronological observations that will be injected directly into a future agent's context.",
+    "",
+    "Return a JSON array. Each item must be:",
+    '{"statement":"<one self-contained observation; include exact names, numbers, dates, and role when relevant>", "type":"event|preference|state_update|plan|commitment|relationship|assistant_answer|inventory|temporal|other", "date":"<best YYYY/MM/DD or source date string, if known>", "status":"current|historical|planned|completed|cancelled|superseded|unknown", "entities":["<important people, places, items, orgs, named concepts>"], "turnIds":["<source turn id>", "..."]}',
+    "",
+    "Rules:",
+    "- Preserve chronology, source dates, relative-date phrases, quantities, prices, ordered lists, and countable events.",
+    "- Capture USER facts, preferences, plans, state changes, relationships, possessions, completed actions, and corrections.",
+    "- Capture ASSISTANT-provided answers, recommendations, explanations, and commitments if they may later be asked about.",
+    "- Mark planned or pending things as planned; mark completed things as completed; mark cancelled/returned/discarded items explicitly.",
+    "- For updates, make the latest state explicit and mention what changed.",
+    "- Split enumerations into separate observations when each item could be counted later.",
+    "- Include only observations supported by the transcript, and include the exact source turn ids.",
+    `- Return at most ${maxObservations} observations for this chunk, and do not fill the quota unless the chunk truly contains that many durable observations.`,
+    "- Prefer a compact observation log: many chunks should produce fewer than the cap.",
+    "- Return ONLY the JSON array, no prose.",
+    "",
+    `Instance: ${instance.id}`,
+    "Transcript:",
+    transcript,
+  ].join("\n");
+}
+
+function buildCombinedExtractionPrompt(
+  instance: MemQAInstance,
+  turns: DatedTurn[],
+  maxFacts: number,
+  maxObservations: number,
+): string {
+  const transcript = turns
+    .map((t) => `[${t.sessionId}${t.date ? ` @ ${t.date}` : ""} turn ${t.id}] ${t.speaker}: ${t.text}`)
+    .join("\n");
+  return [
+    "You are building long-term memory for an AI assistant from past user/assistant chat sessions.",
+    "In one pass, extract both atomic answer-bearing facts and compact chronological observation-log entries.",
+    "",
+    "Return ONLY a JSON object with this exact shape:",
+    "{",
+    '  "facts": [{"fact":"<one self-contained fact; include speaker role and date/time when relevant>", "entities":["<proper nouns: people, pets, places, orgs, named things>"]}],',
+    '  "observations": [{"statement":"<one self-contained observation; include exact names, numbers, dates, and role when relevant>", "type":"event|preference|state_update|plan|commitment|relationship|assistant_answer|inventory|temporal|other", "date":"<best YYYY/MM/DD or source date string, if known>", "status":"current|historical|planned|completed|cancelled|superseded|unknown", "entities":["<important people, places, items, orgs, named concepts>"], "turnIds":["<source turn id>", "..."]}]',
+    "}",
+    "",
+    "Fact rules:",
+    "- Capture USER facts, preferences, plans, state changes, relationships, dates, quantities, and outcomes.",
+    "- Capture ASSISTANT-provided answers, recommendations, explanations, decisions, and commitments when they may be asked about later.",
+    "- Preserve exact names, numbers, list members, descriptive modifiers, and emotionally loaded phrasing.",
+    "- Preserve the original temporal phrasing, and include the session date when useful.",
+    "- If a fact supersedes an earlier state, make the replacement explicit.",
+    "- Split enumerations into separate facts so each item is independently retrievable.",
+    `- Return at most ${maxFacts} facts for this chunk; prefer the most durable, specific, answer-bearing facts.`,
+    "",
+    "Observation rules:",
+    "- Preserve chronology, source dates, relative-date phrases, quantities, prices, ordered lists, and countable events.",
+    "- Capture USER facts, preferences, plans, state changes, relationships, possessions, completed actions, and corrections.",
+    "- Capture ASSISTANT-provided answers, recommendations, explanations, and commitments if they may later be asked about.",
+    "- Mark planned or pending things as planned; mark completed things as completed; mark cancelled/returned/discarded items explicitly.",
+    "- For updates, make the latest state explicit and mention what changed.",
+    "- Split enumerations into separate observations when each item could be counted later.",
+    "- Include only observations supported by the transcript, and include the exact source turn ids.",
+    `- Return at most ${maxObservations} observations for this chunk, and do not fill the quota unless the chunk truly contains that many durable observations.`,
+    "- Prefer a compact observation log: many chunks should produce fewer than the cap.",
+    "",
+    "General rules:",
+    "- Skip greetings and filler with no lasting information.",
+    "- Do not invent or infer unsupported memories.",
+    "",
+    `Instance: ${instance.id}`,
+    "Transcript:",
+    transcript,
+  ].join("\n");
+}
+
 function coerceFact(item: unknown): ExtractedFact | null {
   if (!item || typeof item !== "object") return null;
   const f = item as ExtractedFact;
@@ -304,6 +473,46 @@ function coerceFact(item: unknown): ExtractedFact | null {
     entities: Array.isArray(f.entities)
       ? f.entities.filter((e) => typeof e === "string" && e.trim()).map((e) => e.trim())
       : [],
+  };
+}
+
+function normalizeObservationType(value: unknown): ObservationKind {
+  return typeof value === "string" && OBSERVATION_TYPES.has(value as ObservationKind)
+    ? (value as ObservationKind)
+    : "other";
+}
+
+function normalizeObservationStatus(value: unknown): ObservationStatus {
+  return typeof value === "string" && OBSERVATION_STATUSES.has(value as ObservationStatus)
+    ? (value as ObservationStatus)
+    : "unknown";
+}
+
+function coerceObservation(item: unknown): ExtractedObservation | null {
+  if (!item || typeof item !== "object") return null;
+  const obj = item as {
+    statement?: unknown;
+    type?: unknown;
+    date?: unknown;
+    status?: unknown;
+    entities?: unknown;
+    turnIds?: unknown;
+    sourceTurnIds?: unknown;
+  };
+  if (typeof obj.statement !== "string" || !obj.statement.trim()) return null;
+  const turnIdsRaw = Array.isArray(obj.turnIds) ? obj.turnIds : obj.sourceTurnIds;
+  const turnIds = Array.isArray(turnIdsRaw)
+    ? turnIdsRaw.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim())
+    : [];
+  return {
+    statement: obj.statement.trim(),
+    type: normalizeObservationType(obj.type),
+    ...(typeof obj.date === "string" && obj.date.trim() ? { date: obj.date.trim() } : {}),
+    status: normalizeObservationStatus(obj.status),
+    entities: Array.isArray(obj.entities)
+      ? obj.entities.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim())
+      : [],
+    turnIds,
   };
 }
 
@@ -341,6 +550,40 @@ function salvageObjects(s: string): ExtractedFact[] {
   return facts;
 }
 
+function salvageObservationObjects(s: string): ExtractedObservation[] {
+  const observations: ExtractedObservation[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try {
+          const obs = coerceObservation(JSON.parse(s.slice(start, i + 1)));
+          if (obs) observations.push(obs);
+        } catch {
+          // Skip malformed object.
+        }
+        start = -1;
+      }
+    }
+  }
+  return observations;
+}
+
 function parseFacts(raw: string): ExtractedFact[] {
   let s = raw.trim();
   s = s.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
@@ -355,6 +598,59 @@ function parseFacts(raw: string): ExtractedFact[] {
     }
   }
   return salvageObjects(start !== -1 ? s.slice(start) : s);
+}
+
+function parseObservations(raw: string): ExtractedObservation[] {
+  let s = raw.trim();
+  s = s.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  if (start !== -1 && end > start) {
+    try {
+      const parsed = JSON.parse(s.slice(start, end + 1)) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.map(coerceObservation).filter((o): o is ExtractedObservation => o !== null);
+      }
+    } catch {
+      // Fall through to salvage.
+    }
+  }
+  return salvageObservationObjects(start !== -1 ? s.slice(start) : s);
+}
+
+function coerceCombinedExtraction(value: unknown): CombinedExtraction | null {
+  if (!value || typeof value !== "object") return null;
+  const obj = value as { facts?: unknown; observations?: unknown };
+  const facts = Array.isArray(obj.facts)
+    ? obj.facts.map(coerceFact).filter((f): f is ExtractedFact => f !== null)
+    : [];
+  const observations = Array.isArray(obj.observations)
+    ? obj.observations.map(coerceObservation).filter((o): o is ExtractedObservation => o !== null)
+    : [];
+  if (facts.length === 0 && observations.length === 0) return null;
+  return { facts, observations };
+}
+
+function parseCombinedExtraction(raw: string): CombinedExtraction {
+  const s = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const candidates = [s];
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start !== -1 && end > start) candidates.push(s.slice(start, end + 1));
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = coerceCombinedExtraction(JSON.parse(candidate));
+      if (parsed) return parsed;
+    } catch {
+      // Fall through to the next candidate or salvage below.
+    }
+  }
+
+  return {
+    facts: salvageObjects(start !== -1 ? s.slice(start) : s),
+    observations: salvageObservationObjects(start !== -1 ? s.slice(start) : s),
+  };
 }
 
 async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -461,6 +757,9 @@ function sessionIdsFromKnowledge(excerpts: RetrievedExcerpt[]): Set<string> {
   for (const excerpt of excerpts) {
     const match = /#\s+([^\s:]+(?::[^\s:]+)*):\d+/.exec(excerpt.text);
     if (match?.[1]) out.add(match[1]);
+    for (const turnMatch of excerpt.text.matchAll(/\b([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)*):\d+\b/g)) {
+      if (turnMatch[1]) out.add(turnMatch[1]);
+    }
   }
   return out;
 }
@@ -549,6 +848,23 @@ function parsePlannedToolQueries(raw: string, maxQueries: number): PlannedToolQu
   }
 }
 
+function questionNeedsStructuredToolPass(question: MemQuestion): boolean {
+  const q = question.question.toLowerCase();
+  return (
+    question.category === "multi-session" ||
+    question.category === "temporal-reasoning" ||
+    question.category === "knowledge-update" ||
+    /\b(how many|count|list|all|which|order|ordered|timeline|first|last|before|after|latest|current|changed|updated|prefer|recommend)\b/.test(
+      q,
+    )
+  );
+}
+
+function addUniquePlannedToolQuery(queries: PlannedToolQuery[], query: PlannedToolQuery): void {
+  const key = `${query.tool}:${query.query.toLowerCase()}`;
+  if (!queries.some((q) => `${q.tool}:${q.query.toLowerCase()}` === key)) queries.push(query);
+}
+
 function knowledgeToExcerpt(match: KnowledgeMatch, question: string, index: number, selectedBy: string): RetrievedExcerpt {
   const body = match.note.body ?? "";
   const type = match.matchType ?? "semantic";
@@ -564,6 +880,162 @@ function knowledgeToExcerpt(match: KnowledgeMatch, question: string, index: numb
     matchType: type,
     selectedBy,
   };
+}
+
+function isObservationMemoryMatch(match: KnowledgeMatch): boolean {
+  return match.note.frontmatter.tags.includes("observation-memory");
+}
+
+function observationBody(match: KnowledgeMatch): string {
+  return match.note.body ?? "";
+}
+
+function observationTypeOf(match: KnowledgeMatch): ObservationKind | null {
+  const tag = match.note.frontmatter.tags.find((t) => t.startsWith("observation-") && t !== "observation-memory");
+  const value = tag?.slice("observation-".length);
+  return OBSERVATION_TYPES.has(value as ObservationKind) ? (value as ObservationKind) : null;
+}
+
+function observationDateOf(match: KnowledgeMatch): string {
+  return /^Observation date:\s*(.+)$/m.exec(observationBody(match))?.[1]?.trim() ?? "unknown";
+}
+
+function observationIntent(question: MemQuestion): "money" | "temporal" | "preference" | "general" {
+  const q = question.question.toLowerCase();
+  if (question.category === "temporal-reasoning" || /\b(order|earliest|latest|timeline|before|after|first|last)\b/.test(q)) {
+    return "temporal";
+  }
+  if (/\b(spent|spend|cost|costs|price|prices|expense|expenses|paid|purchase|bought|total money|\$)\b/.test(q)) {
+    return "money";
+  }
+  if (question.category === "single-session-preference" || /\b(prefer|preference|like|suggest|recommend)\b/.test(q)) {
+    return "preference";
+  }
+  return "general";
+}
+
+function observationIntentScore(question: MemQuestion, match: KnowledgeMatch, sourceRank: number): number {
+  const intent = observationIntent(question);
+  const type = observationTypeOf(match);
+  const body = observationBody(match);
+  const lower = body.toLowerCase();
+  let score = (match.score ?? 0) - sourceRank * 0.001;
+
+  if (intent === "money") {
+    if (/\$\s?\d|\b\d+\s?(?:dollars|usd)\b/i.test(body)) score += 8;
+    if (/\b(bought|paid|spent|cost|costs|price|purchase|purchased|installed|investment|expense)\b/.test(lower)) {
+      score += 5;
+    }
+    if (type === "inventory" || type === "event") score += 3;
+    if (type === "assistant_answer" || type === "preference") score -= 4;
+    if (/\b(goal|mileage|miles|route|insurance|rack)\b/.test(lower) && !/\$\s?\d/.test(body)) score -= 3;
+  } else if (intent === "temporal") {
+    if (type === "event") score += 7;
+    if (type === "inventory" || type === "state_update") score += 2;
+    if (type === "preference" || type === "plan") score -= 4;
+    if (type === "assistant_answer") score -= 3;
+    if (/\b(visited|attended|participated|took|tour|exhibition|museum|gallery)\b/.test(lower)) score += 4;
+    if (/\brecently\b/.test(lower)) score -= 2;
+  } else if (intent === "preference") {
+    if (type === "preference") score += 7;
+    if (type === "state_update" || type === "event") score += 2;
+    if (type === "assistant_answer") score -= 2;
+  } else {
+    if (type === "assistant_answer") score -= 1;
+  }
+
+  const qTokens = tokenize(question.question);
+  for (const token of tokenize(body)) if (qTokens.has(token)) score += 0.05;
+  return score;
+}
+
+function selectObservationMatches(question: MemQuestion, matches: KnowledgeMatch[], limit: number): KnowledgeMatch[] {
+  const ranked = matches
+    .map((match, index) => ({ match, score: observationIntentScore(question, match, index) }))
+    .sort((a, b) => b.score - a.score);
+
+  if (observationIntent(question) !== "temporal") return ranked.slice(0, limit).map((x) => x.match);
+
+  const selected: KnowledgeMatch[] = [];
+  const seen = new Set<string>();
+  const dateCounts = new Map<string, number>();
+  for (const { match } of ranked) {
+    const id = match.note.frontmatter.id;
+    if (seen.has(id)) continue;
+    const date = observationDateOf(match);
+    if ((dateCounts.get(date) ?? 0) >= 1) continue;
+    seen.add(id);
+    dateCounts.set(date, (dateCounts.get(date) ?? 0) + 1);
+    selected.push(match);
+    if (selected.length >= limit) return selected;
+  }
+  for (const { match } of ranked) {
+    const id = match.note.frontmatter.id;
+    if (seen.has(id)) continue;
+    const date = observationDateOf(match);
+    if ((dateCounts.get(date) ?? 0) >= 2) continue;
+    seen.add(id);
+    dateCounts.set(date, (dateCounts.get(date) ?? 0) + 1);
+    selected.push(match);
+    if (selected.length >= limit) return selected;
+  }
+  for (const { match } of ranked) {
+    const id = match.note.frontmatter.id;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    selected.push(match);
+    if (selected.length >= limit) return selected;
+  }
+  return selected;
+}
+
+function observationSortKey(obs: ExtractedObservation): string {
+  const date = obs.date?.replace(/\//g, "-") ?? "9999-99-99";
+  const turn = obs.turnIds[0] ?? "";
+  return `${date}\t${turn}\t${obs.type}\t${obs.statement}`;
+}
+
+function truncateStableContext(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const headChars = Math.floor(maxChars * 0.55);
+  const tailChars = Math.max(0, maxChars - headChars - 120);
+  return [
+    text.slice(0, headChars).trimEnd(),
+    "",
+    `... [observation log truncated to ${maxChars} chars; middle omitted] ...`,
+    "",
+    text.slice(text.length - tailChars).trimStart(),
+  ].join("\n");
+}
+
+function formatObservationLogContext(observations: ExtractedObservation[], maxChars: number): string {
+  if (observations.length === 0 || maxChars <= 0) return "";
+  const sorted = [...observations].sort((a, b) => observationSortKey(a).localeCompare(observationSortKey(b)));
+  const lines = [
+    "## Chronological Observation Log",
+    "This is stable long-term memory distilled from past sessions. Treat each line as evidence only for what it explicitly states.",
+    "Use dates, statuses, and source turn ids carefully. For relative-date questions, anchor relative phrases to the source turn date and verify against raw turns if available. Do not infer facts that are only adjacent or related.",
+    "",
+    ...sorted.map((obs, index) => {
+      const date = obs.date ?? "unknown";
+      const turns = obs.turnIds.length > 0 ? obs.turnIds.join(",") : "unknown";
+      return `${index + 1}. [${date}] ${obs.type}/${obs.status}: ${obs.statement} (turns: ${turns})`;
+    }),
+  ].join("\n");
+  return truncateStableContext(lines, maxChars);
+}
+
+function mergeKnowledgeMatches(primary: KnowledgeMatch[], secondary: KnowledgeMatch[], limit: number): KnowledgeMatch[] {
+  const out: KnowledgeMatch[] = [];
+  const seen = new Set<string>();
+  for (const match of [...primary, ...secondary]) {
+    const id = match.note.frontmatter.id;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(match);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 function injectedMemoryToExcerpts(
@@ -626,7 +1098,7 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
       "Use the injected context and any tool results as your only source of past-memory evidence.",
       "The context may contain KnowledgeBank notes, raw imported turns, extracted facts, and ExperienceMemory excerpts.",
       "",
-      buildLongMemEvalAnswerPrompt(this.question.question, this.question.date, excerpts),
+      buildLongMemEvalAnswerPrompt(this.question.question, this.question.date, excerpts, this.question.category),
     ].join("\n");
     const res = await this.llm.chat([{ role: "user", content: finalPrompt }]);
     addLlmUsage(this.usage, res.usage);
@@ -634,12 +1106,16 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
   }
 
   private async runMemoryTools(prompt: string, systemContext: string): Promise<LiveToolTrace[]> {
-    const queries: PlannedToolQuery[] = [{ tool: "memory_search", query: this.question.question }];
-    if (this.maxToolQueries > 1) {
+    const queries: PlannedToolQuery[] = [];
+    addUniquePlannedToolQuery(queries, { tool: "memory_search", query: this.question.question });
+    if (this.maxToolQueries > 1 && questionNeedsStructuredToolPass(this.question)) {
+      addUniquePlannedToolQuery(queries, { tool: "knowledge_search", query: this.question.question });
+    }
+    if (queries.length < this.maxToolQueries) {
       const planPrompt = [
         "You are deciding whether to use minimem memory tools before answering a long-term memory question.",
         "Return ONLY JSON: {\"queries\":[{\"tool\":\"memory_search|knowledge_search\",\"query\":\"...\"}]}",
-        `Return at most ${this.maxToolQueries - 1} additional queries. Use no query if the default exact question search is enough.`,
+        `Return at most ${this.maxToolQueries - queries.length} additional queries. Use no query if the existing searches are enough.`,
         "",
         "Available tools:",
         "- memory_search: semantic search over raw and knowledge memory files.",
@@ -655,9 +1131,8 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
       ].join("\n");
       const planned = await this.llm.chat([{ role: "user", content: planPrompt }]);
       addLlmUsage(this.usage, planned.usage);
-      for (const query of parsePlannedToolQueries(planned.text, this.maxToolQueries - 1)) {
-        const key = `${query.tool}:${query.query.toLowerCase()}`;
-        if (!queries.some((q) => `${q.tool}:${q.query.toLowerCase()}` === key)) queries.push(query);
+      for (const query of parsePlannedToolQueries(planned.text, this.maxToolQueries - queries.length)) {
+        addUniquePlannedToolQuery(queries, query);
       }
     }
 
@@ -1096,7 +1571,7 @@ export class CogcoreLongMemEvalAdapter {
   async answer(question: MemQuestion): Promise<AnswerResult> {
     const excerpts = await this.retrieve(question);
     const res = await this.llm.chat([
-      { role: "user", content: buildLongMemEvalAnswerPrompt(question.question, question.date, excerpts) },
+      { role: "user", content: buildLongMemEvalAnswerPrompt(question.question, question.date, excerpts, question.category) },
     ]);
     return { answer: res.text.trim(), usage: res.usage, retrieved: excerpts };
   }
@@ -1130,7 +1605,15 @@ export class CogcoreLiveLongMemEvalAdapter {
   private readonly chunkTurnCount: number;
   private readonly maxFactsPerChunk: number;
   private readonly liveToolQueries: number;
+  private readonly liveToolPolicy: LiveToolPolicy;
   private readonly liveToolResults: number;
+  private readonly observationMemory: ObservationMemoryMode;
+  private readonly observationCacheDir: string;
+  private readonly observationSource: ObservationExtractionSource;
+  private readonly observationContext: ObservationContextMode;
+  private readonly observationLogMaxChars: number;
+  private readonly observationMaxPerChunk: number;
+  private readonly observationSlots: number;
   private readonly onProgress?: (message: string) => void;
   private atlas: Atlas | null = null;
   private state: CogcoreState | null = null;
@@ -1138,6 +1621,8 @@ export class CogcoreLiveLongMemEvalAdapter {
   private currentInstanceId: string | null = null;
   private lastInjectedMemory: MemoryQueryResultV2 | undefined;
   private lastScopedKnowledge: KnowledgeMatch[] = [];
+  private lastObservationKnowledge: KnowledgeMatch[] = [];
+  private lastObservationLogContext = "";
   private lastFormattedKnowledge = "";
   private lastInjectedExperienceCount = 0;
   private lastInjectedPlaybookCount = 0;
@@ -1160,7 +1645,15 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.chunkTurnCount = opts.chunkTurns ?? DEFAULT_CHUNK_TURNS;
     this.maxFactsPerChunk = opts.maxFactsPerChunk ?? DEFAULT_MAX_FACTS_PER_CHUNK;
     this.liveToolQueries = opts.liveToolQueries ?? 2;
+    this.liveToolPolicy = opts.liveToolPolicy ?? "auto";
     this.liveToolResults = opts.liveToolResults ?? Math.min(8, this.topK);
+    this.observationMemory = opts.observationMemory ?? "off";
+    this.observationCacheDir = opts.observationCacheDir ?? path.resolve("evals/longmemeval/.cache/cogcore-observations");
+    this.observationSource = opts.observationSource ?? DEFAULT_OBSERVATION_SOURCE;
+    this.observationContext = opts.observationContext ?? DEFAULT_OBSERVATION_CONTEXT;
+    this.observationLogMaxChars = opts.observationLogMaxChars ?? DEFAULT_OBSERVATION_LOG_MAX_CHARS;
+    this.observationMaxPerChunk = opts.observationMaxPerChunk ?? DEFAULT_OBSERVATION_MAX_PER_CHUNK;
+    this.observationSlots = opts.observationSlots ?? DEFAULT_OBSERVATION_SLOTS;
     this.onProgress = opts.onProgress;
   }
 
@@ -1171,6 +1664,11 @@ export class CogcoreLiveLongMemEvalAdapter {
 
   private cachePath(instanceId: string): string {
     return path.join(this.cacheDir, `${safeFileName(instanceId)}.json`);
+  }
+
+  private observationCachePath(instanceId: string): string {
+    const sourceSuffix = this.observationSource === "chunks" ? "" : `.${this.observationSource}`;
+    return path.join(this.observationCacheDir, `${safeFileName(instanceId)}${sourceSuffix}.json`);
   }
 
   private async loadCache(instanceId: string): Promise<ExtractedFact[] | null> {
@@ -1202,6 +1700,39 @@ export class CogcoreLiveLongMemEvalAdapter {
     };
     await fs.mkdir(this.cacheDir, { recursive: true });
     await fs.writeFile(this.cachePath(instanceId), JSON.stringify(payload), "utf-8");
+  }
+
+  private async loadObservationCache(instanceId: string): Promise<ExtractedObservation[] | null> {
+    if (!this.cache || this.observationMemory === "off") return null;
+    try {
+      const parsed = JSON.parse(await fs.readFile(this.observationCachePath(instanceId), "utf-8")) as ObservationCache;
+      if (
+        parsed.version === COGCORE_OBSERVATION_CACHE_VERSION &&
+        parsed.instanceId === instanceId &&
+        parsed.chunkTurns === this.chunkTurnCount &&
+        parsed.maxObservationsPerChunk === this.observationMaxPerChunk &&
+        (parsed.source ?? "chunks") === this.observationSource
+      ) {
+        return parsed.observations;
+      }
+    } catch {
+      // Cache miss.
+    }
+    return null;
+  }
+
+  private async saveObservationCache(instanceId: string, observations: ExtractedObservation[]): Promise<void> {
+    if (!this.cache || this.observationMemory === "off") return;
+    const payload: ObservationCache = {
+      version: COGCORE_OBSERVATION_CACHE_VERSION,
+      instanceId,
+      chunkTurns: this.chunkTurnCount,
+      maxObservationsPerChunk: this.observationMaxPerChunk,
+      source: this.observationSource,
+      observations,
+    };
+    await fs.mkdir(this.observationCacheDir, { recursive: true });
+    await fs.writeFile(this.observationCachePath(instanceId), JSON.stringify(payload), "utf-8");
   }
 
   private async openAtlas(instanceId: string): Promise<CogcoreState> {
@@ -1287,6 +1818,142 @@ export class CogcoreLiveLongMemEvalAdapter {
     return n;
   }
 
+  private async extractFacts(instance: MemQAInstance, usage: UsageAccumulator): Promise<ExtractedFact[]> {
+    const chunks = chunkTurns(flattenTurns(instance), this.chunkTurnCount).map((turns, index) => ({ turns, index }));
+    this.onProgress?.(`extracting ${chunks.length} chunks for ${instance.id}`);
+    const perChunk = await mapPool(chunks, this.extractConcurrency, async (chunk) => {
+      const res = await this.llm.chat([
+        { role: "user", content: buildExtractionPrompt(instance, chunk.turns, this.maxFactsPerChunk) },
+      ]);
+      addUsage(usage, res.usage);
+      const parsed = parseFacts(res.text).slice(0, this.maxFactsPerChunk);
+      this.onProgress?.(`chunk ${chunk.index + 1}/${chunks.length}: ${parsed.length} facts`);
+      return parsed;
+    });
+    const facts = perChunk.flat();
+    this.onProgress?.(`extracted ${facts.length} facts for ${instance.id}`);
+    return facts;
+  }
+
+  private async extractCombinedMemories(instance: MemQAInstance, usage: UsageAccumulator): Promise<CombinedExtraction> {
+    const chunks = chunkTurns(flattenTurns(instance), this.chunkTurnCount).map((turns, index) => ({ turns, index }));
+    this.onProgress?.(`extracting ${chunks.length} combined fact+observation chunks for ${instance.id}`);
+    const perChunk = await mapPool(chunks, this.extractConcurrency, async (chunk) => {
+      let parsed: CombinedExtraction = { facts: [], observations: [] };
+      for (let attempt = 0; attempt <= COMBINED_EMPTY_RETRIES; attempt++) {
+        const res = await this.llm.chat([
+          {
+            role: "user",
+            content: buildCombinedExtractionPrompt(
+              instance,
+              chunk.turns,
+              this.maxFactsPerChunk,
+              this.observationMaxPerChunk,
+            ),
+          },
+        ]);
+        addUsage(usage, res.usage);
+        parsed = parseCombinedExtraction(res.text);
+        if (parsed.facts.length > 0 || parsed.observations.length > 0) break;
+        if (attempt < COMBINED_EMPTY_RETRIES) {
+          this.onProgress?.(`combined chunk ${chunk.index + 1}/${chunks.length}: empty parse, retrying`);
+        }
+      }
+
+      if (parsed.facts.length === 0 && parsed.observations.length === 0) {
+        this.onProgress?.(`combined chunk ${chunk.index + 1}/${chunks.length}: empty after retry, falling back`);
+        const [factRes, observationRes] = await Promise.all([
+          this.llm.chat([{ role: "user", content: buildExtractionPrompt(instance, chunk.turns, this.maxFactsPerChunk) }]),
+          this.llm.chat([
+            { role: "user", content: buildObservationPrompt(instance, chunk.turns, this.observationMaxPerChunk) },
+          ]),
+        ]);
+        addUsage(usage, factRes.usage);
+        addUsage(usage, observationRes.usage);
+        parsed = {
+          facts: parseFacts(factRes.text),
+          observations: parseObservations(observationRes.text),
+        };
+      }
+
+      const facts = parsed.facts.slice(0, this.maxFactsPerChunk);
+      const observations = parsed.observations.slice(0, this.observationMaxPerChunk);
+      this.onProgress?.(
+        `combined chunk ${chunk.index + 1}/${chunks.length}: ${facts.length} facts, ` +
+          `${observations.length} observations`,
+      );
+      return { facts, observations };
+    });
+    const combined = {
+      facts: perChunk.flatMap((chunk) => chunk.facts),
+      observations: perChunk.flatMap((chunk) => chunk.observations),
+    };
+    this.onProgress?.(
+      `extracted ${combined.facts.length} facts + ${combined.observations.length} observations for ${instance.id}`,
+    );
+    return combined;
+  }
+
+  private async loadOrExtractObservations(instance: MemQAInstance, usage: UsageAccumulator): Promise<ExtractedObservation[]> {
+    if (this.observationMemory === "off") return [];
+    let observations = await this.loadObservationCache(instance.id);
+    if (observations) {
+      this.onProgress?.(`observation cache hit for ${instance.id}: ${observations.length} observations`);
+      return observations;
+    }
+
+    const chunks = chunkTurns(flattenTurns(instance), this.chunkTurnCount).map((turns, index) => ({ turns, index }));
+    this.onProgress?.(`extracting ${chunks.length} observation chunks for ${instance.id}`);
+    const perChunk = await mapPool(chunks, this.extractConcurrency, async (chunk) => {
+      const res = await this.llm.chat([
+        { role: "user", content: buildObservationPrompt(instance, chunk.turns, this.observationMaxPerChunk) },
+      ]);
+      addUsage(usage, res.usage);
+      const parsed = parseObservations(res.text).slice(0, this.observationMaxPerChunk);
+      this.onProgress?.(`observation chunk ${chunk.index + 1}/${chunks.length}: ${parsed.length} observations`);
+      return parsed;
+    });
+    observations = perChunk.flat();
+    await this.saveObservationCache(instance.id, observations);
+    this.onProgress?.(`extracted ${observations.length} observations for ${instance.id}`);
+    return observations;
+  }
+
+  private async addObservationKnowledge(instance: MemQAInstance, observations: ExtractedObservation[]): Promise<number> {
+    if (!this.state || this.observationMemory === "off") return 0;
+    let n = 0;
+    for (const obs of observations) {
+      const id = `o-${String(n).padStart(6, "0")}`;
+      const sourceTurnIds = obs.turnIds.length > 0 ? obs.turnIds.join(", ") : "unknown";
+      const body = [
+        `Observation date: ${obs.date ?? "unknown"}`,
+        `Observation type: ${obs.type}`,
+        `Status: ${obs.status}`,
+        `Statement: ${obs.statement}`,
+        `Source turn ids: ${sourceTurnIds}`,
+      ].join("\n");
+      await this.state.kb.addObservation(
+        createObservation({
+          id,
+          title: `observation-${String(n).padStart(6, "0")}`,
+          body,
+          domain: [instance.id],
+          entities: obs.entities,
+          tags: [
+            "observation-memory",
+            `observation-${obs.type}`,
+            `status-${obs.status}`,
+            ...obs.turnIds.map((turnId) => `turn-${safeFileName(turnId)}`),
+          ],
+          confidence: 0.82,
+          source: { origin: "extracted" },
+        }),
+      );
+      n++;
+    }
+    return n;
+  }
+
   private async scopedInjectedMemory(question: MemQuestion): Promise<MemoryQueryResultV2> {
     if (!this.atlas || !this.currentInstanceId || !this.state) throw new Error("ingest() must run before answer()");
     const base = await this.atlas.queryMemory(question.question, {
@@ -1298,15 +1965,45 @@ export class CogcoreLiveLongMemEvalAdapter {
     if (experienceSlots <= 0) return { ...base, experiences: [] };
 
     const knowledgeSlots = Math.max(1, this.topK - experienceSlots);
-    const surfaced = (await this.state.kb.getRelevantKnowledge(
+    const scopedKnowledgeNotes = Math.min(MAX_SCOPED_SYSTEM_KNOWLEDGE_NOTES, Math.max(this.topK, knowledgeSlots * 2));
+    const surfacedCandidates = (await this.state.kb.getRelevantKnowledge(
       { description: question.question, domain: this.currentInstanceId },
-      { maxNotes: this.topK, maxTokens: MAX_KNOWLEDGE_TOKENS },
+      { maxNotes: scopedKnowledgeNotes, maxTokens: MAX_KNOWLEDGE_TOKENS },
     )) as KnowledgeMatch[];
-    this.lastScopedKnowledge = surfaced;
-    const retainedKnowledge = surfaced
-      .slice(0, knowledgeSlots)
+    const surfaced =
+      this.observationMemory === "kb" && this.observationContext === "log"
+        ? surfacedCandidates.filter((match) => !isObservationMemoryMatch(match))
+        : surfacedCandidates;
+    const observationKnowledge =
+      this.observationMemory === "kb" && this.observationSlots > 0 && this.observationContext !== "log"
+        ? selectObservationMatches(
+            question,
+            ((await this.state.kb.getRelevantKnowledge(
+              {
+                description:
+                  `${question.question}\n` +
+                  "Find a broad candidate set of compact chronological observation-memory notes. " +
+                  "For spending questions include purchases, prices, dollar amounts, paid costs, and inventory. " +
+                  "For temporal/order questions include all dated completed visit/event observations across different dates. " +
+                  "For preference questions include durable preferences and latest state updates.",
+                domain: this.currentInstanceId,
+              },
+              {
+                maxNotes: Math.max(scopedKnowledgeNotes * 4, this.observationSlots * 12, 128),
+                maxTokens: MAX_KNOWLEDGE_TOKENS,
+              },
+            )) as KnowledgeMatch[]).filter(isObservationMemoryMatch),
+            this.observationSlots,
+          )
+        : [];
+    this.lastObservationKnowledge = observationKnowledge;
+    this.lastScopedKnowledge = mergeKnowledgeMatches(observationKnowledge, surfaced, scopedKnowledgeNotes);
+    const sessionAnchorKnowledge = surfaced
       .map((m, index) => knowledgeToExcerpt(m, question.question, index, "scope-anchor-knowledge"));
-    const allowedSessionIds = sessionIdsFromKnowledge(retainedKnowledge);
+    const sessionAnchorObservations = observationKnowledge.map((m, index) =>
+      knowledgeToExcerpt(m, question.question, index, "scope-anchor-observation-knowledge"),
+    );
+    const allowedSessionIds = sessionIdsFromKnowledge([...sessionAnchorObservations, ...sessionAnchorKnowledge]);
     const rankedExperiences = (
       await this.atlas.getMemory().experiences.findSimilar(question.question, {
         k: this.experiencePoolSize,
@@ -1326,17 +2023,39 @@ export class CogcoreLiveLongMemEvalAdapter {
   }
 
   private scopedSystemPromptAdditions(): string | undefined {
-    if (!this.state || this.lastScopedKnowledge.length === 0) return undefined;
-    return [
-      "## LongMemEval Memory Evidence",
-      "Use these KnowledgeBank notes as primary past-memory evidence. Consider all relevant notes before answering. For latest-state or correction questions, prefer later user corrections over earlier assistant claims.",
-      "",
-      this.state.kb.formatKnowledgeForPrompt(this.lastScopedKnowledge, {
-        maxTokens: MAX_KNOWLEDGE_TOKENS,
-        includeEvidence: true,
-        includeLinks: true,
-      }),
-    ].join("\n");
+    if (!this.state) return undefined;
+    const sections: string[] = [];
+    if (this.observationMemory === "kb" && this.observationContext !== "retrieved" && this.lastObservationLogContext) {
+      sections.push(this.lastObservationLogContext);
+    }
+    if (this.lastScopedKnowledge.length > 0) {
+      sections.push(
+        [
+          "## LongMemEval Memory Evidence",
+          "Use these KnowledgeBank notes as primary past-memory evidence. Consider all relevant notes before answering. For latest-state or correction questions, prefer later user corrections over earlier assistant claims.",
+          "",
+          this.state.kb.formatKnowledgeForPrompt(this.lastScopedKnowledge, {
+            maxTokens: MAX_KNOWLEDGE_TOKENS,
+            includeEvidence: true,
+            includeLinks: true,
+          }),
+        ].join("\n"),
+      );
+    }
+    return sections.length > 0 ? sections.join("\n\n") : undefined;
+  }
+
+  private effectiveLiveToolQueries(question: MemQuestion): number {
+    if (this.liveToolPolicy === "off") return 0;
+    if (
+      this.liveToolPolicy === "auto" &&
+      this.observationMemory === "kb" &&
+      (this.observationContext === "log" || this.observationContext === "both") &&
+      question.category === "temporal-reasoning"
+    ) {
+      return 0;
+    }
+    return this.liveToolQueries;
   }
 
   async ingest(instance: MemQAInstance): Promise<UsageAccumulator> {
@@ -1347,23 +2066,33 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.state = state;
 
     let facts = await this.loadCache(instance.id);
+    let observations: ExtractedObservation[] | null = null;
+    const useCombinedObservations = this.observationMemory !== "off" && this.observationSource === "combined";
+    if (useCombinedObservations) {
+      observations = await this.loadObservationCache(instance.id);
+      if (observations) {
+        this.onProgress?.(`combined observation cache hit for ${instance.id}: ${observations.length} observations`);
+      }
+    }
+
     if (!facts) {
-      const chunks = chunkTurns(flattenTurns(instance), this.chunkTurnCount).map((turns, index) => ({ turns, index }));
-      this.onProgress?.(`extracting ${chunks.length} chunks for ${instance.id}`);
-      const perChunk = await mapPool(chunks, this.extractConcurrency, async (chunk) => {
-        const res = await this.llm.chat([
-          { role: "user", content: buildExtractionPrompt(instance, chunk.turns, this.maxFactsPerChunk) },
-        ]);
-        addUsage(usage, res.usage);
-        const parsed = parseFacts(res.text).slice(0, this.maxFactsPerChunk);
-        this.onProgress?.(`chunk ${chunk.index + 1}/${chunks.length}: ${parsed.length} facts`);
-        return parsed;
-      });
-      facts = perChunk.flat();
+      if (useCombinedObservations && !observations) {
+        const combined = await this.extractCombinedMemories(instance, usage);
+        facts = combined.facts;
+        observations = combined.observations;
+        await this.saveObservationCache(instance.id, observations);
+      } else {
+        facts = await this.extractFacts(instance, usage);
+      }
       await this.saveCache(instance.id, facts);
-      this.onProgress?.(`extracted ${facts.length} facts for ${instance.id}`);
     } else {
       this.onProgress?.(`cache hit for ${instance.id}: ${facts.length} facts`);
+    }
+
+    if (useCombinedObservations && !observations) {
+      const combined = await this.extractCombinedMemories(instance, usage);
+      observations = combined.observations;
+      await this.saveObservationCache(instance.id, observations);
     }
 
     let n = 0;
@@ -1401,9 +2130,18 @@ export class CogcoreLiveLongMemEvalAdapter {
       r++;
     }
 
+    const observationsToWrite = useCombinedObservations
+      ? (observations ?? [])
+      : await this.loadOrExtractObservations(instance, usage);
+    this.lastObservationLogContext =
+      this.observationMemory === "kb" && this.observationContext !== "retrieved"
+        ? formatObservationLogContext(observationsToWrite, this.observationLogMaxChars)
+        : "";
+    const observationCount = await this.addObservationKnowledge(instance, observationsToWrite);
     const sessionCount = await this.addSessionExperiences(instance);
     this.onProgress?.(
-      `indexing ${facts.length} extracted facts + raw turns + ${sessionCount} ${this.experienceGranularity} experiences for ${instance.id}`,
+      `indexing ${facts.length} extracted facts + raw turns + ${observationCount} observations + ` +
+        `${sessionCount} ${this.experienceGranularity} experiences for ${instance.id}`,
     );
     await state.kb.defragment();
     await indexAndInject(state, this.embeddings, this.topK, this.keywordHook(), this.mmr);
@@ -1433,14 +2171,16 @@ export class CogcoreLiveLongMemEvalAdapter {
     if (!this.atlas || !this.state || !this.currentInstanceId) throw new Error("ingest() must run before answer()");
     this.lastInjectedMemory = undefined;
     this.lastScopedKnowledge = [];
+    this.lastObservationKnowledge = [];
     this.lastFormattedKnowledge = "";
     this.lastInjectedExperienceCount = 0;
     this.lastInjectedPlaybookCount = 0;
+    const effectiveLiveToolQueries = this.effectiveLiveToolQueries(question);
     const delegate = new LongMemEvalLiveDelegate(
       this.llm,
       question,
       this.toolExecutor,
-      this.liveToolQueries,
+      effectiveLiveToolQueries,
       this.liveToolResults,
     );
     this.atlas.setDelegate(delegate);
@@ -1473,8 +2213,26 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.atlas.getAgentManager()?.setDiagnosticsCollector(undefined);
     const surfacedKnowledge = result.surfacedKnowledge ?? [];
     const retrieved: RetrievedExcerpt[] = [];
+    if (this.lastObservationLogContext) {
+      retrieved.push({
+        ref: "observation-log-context",
+        text: excerptForQuery(this.lastObservationLogContext, question.question),
+        channel: "knowledge",
+        query: question.question,
+        selectedBy: "atlas-observation-log-context",
+      });
+    }
     for (const [index, match] of this.lastScopedKnowledge.entries()) {
-      retrieved.push(knowledgeToExcerpt(match, question.question, index, "atlas-scoped-system-knowledge"));
+      retrieved.push(
+        knowledgeToExcerpt(
+          match,
+          question.question,
+          index,
+          isObservationMemoryMatch(match)
+            ? "atlas-scoped-observation-knowledge"
+            : "atlas-scoped-system-knowledge",
+        ),
+      );
     }
     retrieved.push(
       ...injectedMemoryToExcerpts(
@@ -1508,6 +2266,11 @@ export class CogcoreLiveLongMemEvalAdapter {
         queryV2KnowledgeCount: injectedMemory?.knowledge?.length ?? 0,
         scopedSystemKnowledgeCount: this.lastScopedKnowledge.length,
         surfacedKnowledgeCount: surfacedKnowledge.length,
+        observationKnowledgeCount: this.lastObservationKnowledge.length,
+        observationContext: this.observationContext,
+        observationLogContextChars: this.lastObservationLogContext.length,
+        liveToolPolicy: this.liveToolPolicy,
+        effectiveLiveToolQueries,
         toolCalls: delegate.toolCalls,
       },
     };
@@ -1519,6 +2282,8 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.toolExecutor = null;
     this.lastInjectedMemory = undefined;
     this.lastScopedKnowledge = [];
+    this.lastObservationKnowledge = [];
+    this.lastObservationLogContext = "";
     this.lastFormattedKnowledge = "";
     this.lastInjectedExperienceCount = 0;
     this.lastInjectedPlaybookCount = 0;
