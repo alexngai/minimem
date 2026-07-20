@@ -307,6 +307,16 @@ function safeFileName(s: string): string {
   return s.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+/**
+ * Extraction/observation caches are model-specific: a gpt-5-mini run must not
+ * reuse gpt-5.5's extracted facts. We key the cache filename on the deployment,
+ * but leave the default "gpt-5.5" bare so pre-existing caches stay valid.
+ */
+const DEFAULT_CACHE_DEPLOYMENT = "gpt-5.5";
+function modelCacheSuffix(deployment: string): string {
+  return deployment === DEFAULT_CACHE_DEPLOYMENT ? "" : `.${safeFileName(deployment)}`;
+}
+
 function tokenize(s: string): Set<string> {
   return new Set(
     s
@@ -1322,7 +1332,7 @@ export class CogcoreLongMemEvalAdapter {
   }
 
   private cachePath(instanceId: string): string {
-    return path.join(this.cacheDir, `${safeFileName(instanceId)}.json`);
+    return path.join(this.cacheDir, `${safeFileName(instanceId)}${modelCacheSuffix(this.llm.deployment)}.json`);
   }
 
   private async loadCache(instanceId: string): Promise<ExtractedFact[] | null> {
@@ -1768,12 +1778,15 @@ export class CogcoreLiveLongMemEvalAdapter {
   }
 
   private cachePath(instanceId: string): string {
-    return path.join(this.cacheDir, `${safeFileName(instanceId)}.json`);
+    return path.join(this.cacheDir, `${safeFileName(instanceId)}${modelCacheSuffix(this.llm.deployment)}.json`);
   }
 
   private observationCachePath(instanceId: string): string {
     const sourceSuffix = this.observationSource === "chunks" ? "" : `.${this.observationSource}`;
-    return path.join(this.observationCacheDir, `${safeFileName(instanceId)}${sourceSuffix}.json`);
+    return path.join(
+      this.observationCacheDir,
+      `${safeFileName(instanceId)}${sourceSuffix}${modelCacheSuffix(this.llm.deployment)}.json`,
+    );
   }
 
   private async loadCache(instanceId: string): Promise<ExtractedFact[] | null> {

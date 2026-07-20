@@ -77,7 +77,12 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 type RetrievalArm = Embeddings;
 type Arm = RetrievalArm | CogcoreLongMemEvalArm | CogcoreLiveLongMemEvalArm;
 type QAJudgedBy = MemoryQARecord["judgedBy"] | "retrieval-only";
-type MemoryProfile = "standard" | "long-memory";
+// Frontier profiles span the accuracy<->efficiency Pareto curve by collapsing
+// answer-time channels. `max-accuracy` runs every channel wide; `long-memory`
+// is the validated 93% point; `efficient`/`lean` progressively drop the dynamic
+// stack (retrieved-notes, live tools, big log) toward a single primary
+// mechanism — the stable, cacheable observation log — on a cheaper answer model.
+type MemoryProfile = "standard" | "long-memory" | "max-accuracy" | "efficient" | "lean";
 
 interface MemoryProfileDefaults {
   experienceGranularity: ExperienceGranularity;
@@ -93,6 +98,12 @@ interface MemoryProfileDefaults {
   liveToolPolicy: LiveToolPolicy;
   liveToolQueries: number;
   liveToolResults: (k: number) => number;
+  /** Retrieval breadth for this frontier point. */
+  k: number;
+  /** Construction cost knob: facts extracted per chunk. */
+  maxFactsPerChunk: number;
+  /** Answer/extraction/tool model. undefined => AZURE_DEPLOYMENT ?? "gpt-5.5". */
+  answerDeployment?: string;
 }
 
 const STANDARD_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
@@ -109,8 +120,11 @@ const STANDARD_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
   liveToolPolicy: "auto",
   liveToolQueries: 2,
   liveToolResults: (k) => Math.min(8, k),
+  k: 10,
+  maxFactsPerChunk: 60,
 };
 
+// Validated 93.0% point (all five answer-time channels on, GPT-5.5).
 const LONG_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
   ...STANDARD_MEMORY_PROFILE_DEFAULTS,
   experienceGranularity: "chunk",
@@ -120,6 +134,53 @@ const LONG_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
   observationContext: "both",
   observationLogMaxChars: 40_000,
   liveToolResults: () => 6,
+  k: 16,
+};
+
+// Accuracy ceiling: every channel widened, tools always on. Most expensive.
+const MAX_ACCURACY_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
+  ...LONG_MEMORY_PROFILE_DEFAULTS,
+  observationLogMaxChars: 64_000,
+  liveToolPolicy: "always",
+  liveToolQueries: 3,
+  liveToolResults: () => 8,
+  k: 20,
+};
+
+// Efficient: log-primary. Drops retrieved-notes redundancy + live tools; leaner
+// construction; cheaper answer model. Answer context is stable/cacheable.
+const EFFICIENT_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
+  ...LONG_MEMORY_PROFILE_DEFAULTS,
+  observationContext: "log",
+  observationLogMaxChars: 24_000,
+  liveToolPolicy: "off",
+  k: 8,
+  maxFactsPerChunk: 40,
+  answerDeployment: "gpt-5-mini",
+};
+
+// Lean: single primary mechanism — the observation log alone. No tools, no
+// experience embedding, minimal retrieval. Cheapest, fully cacheable context.
+const LEAN_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
+  ...LONG_MEMORY_PROFILE_DEFAULTS,
+  experienceGranularity: "session",
+  experienceEmbedding: "none",
+  observationContext: "log",
+  observationLogMaxChars: 16_000,
+  observationSlots: 8,
+  liveToolPolicy: "off",
+  liveToolQueries: 0,
+  k: 6,
+  maxFactsPerChunk: 30,
+  answerDeployment: "gpt-5-mini",
+};
+
+const MEMORY_PROFILES: Record<MemoryProfile, MemoryProfileDefaults> = {
+  standard: STANDARD_MEMORY_PROFILE_DEFAULTS,
+  "long-memory": LONG_MEMORY_PROFILE_DEFAULTS,
+  "max-accuracy": MAX_ACCURACY_MEMORY_PROFILE_DEFAULTS,
+  efficient: EFFICIENT_MEMORY_PROFILE_DEFAULTS,
+  lean: LEAN_MEMORY_PROFILE_DEFAULTS,
 };
 
 const RETRIEVAL_ARMS: RetrievalArm[] = ["none", "local", "nomic"];
@@ -159,12 +220,12 @@ function parseArms(spec: string | boolean | undefined): Arm[] {
 
 function parseMemoryProfile(spec: string | boolean | undefined, fallback: MemoryProfile): MemoryProfile {
   const value = spec && spec !== true ? String(spec) : fallback;
-  if (value === "standard" || value === "long-memory") return value;
-  throw new Error(`Unknown --memory-profile '${value}'. Use standard|long-memory.`);
+  if (value in MEMORY_PROFILES) return value as MemoryProfile;
+  throw new Error(`Unknown --memory-profile '${value}'. Use ${Object.keys(MEMORY_PROFILES).join("|")}.`);
 }
 
 function defaultsForMemoryProfile(profile: MemoryProfile): MemoryProfileDefaults {
-  return profile === "long-memory" ? LONG_MEMORY_PROFILE_DEFAULTS : STANDARD_MEMORY_PROFILE_DEFAULTS;
+  return MEMORY_PROFILES[profile];
 }
 
 function parseExperienceGranularity(
@@ -462,9 +523,21 @@ interface ArmSummaryRecord {
   arm: Arm;
   accuracy: number;
   n: number;
+  /** answer + extraction + tool calls/tokens (excludes judge). */
   calls: number;
   tokens: number;
   wallMs: number;
+  /** Judge calls/tokens, accounted separately (its own client). */
+  judgeCalls?: number;
+  judgeTokens?: number;
+  /** Answer-time efficiency metrics (mean over answered questions). */
+  meanAnswerContextChars?: number;
+  meanObsLogChars?: number;
+  meanToolCallsPerQ?: number;
+  /** Frontier-point labels. */
+  memoryProfile?: MemoryProfile;
+  answerDeployment?: string;
+  judgeDeployment?: string;
 }
 
 type DetailJsonlRecord = RunMetadataRecord | QADetailRecord | ArmSummaryRecord;
@@ -713,6 +786,7 @@ async function runArm(
   arm: RetrievalArm,
   sampled: SampledMemQuestion[],
   llm: LlmClient,
+  judgeComplete: (p: string) => Promise<string>,
   k: number,
   concurrency: number,
   retrievalOnly: boolean,
@@ -781,7 +855,7 @@ async function runArm(
             judgedBy = "abstain-sentinel";
           } else {
             correct = await judgeMemoryQACorrect(
-              (p) => llm.complete(p),
+              judgeComplete,
               question.question,
               question.answer,
               answer,
@@ -837,6 +911,7 @@ async function runCogcoreArm(
   arm: CogcoreLongMemEvalArm,
   sampled: SampledMemQuestion[],
   llm: LlmClient,
+  judgeComplete: (p: string) => Promise<string>,
   k: number,
   concurrency: number,
   extractConcurrency: number,
@@ -938,7 +1013,7 @@ async function runCogcoreArm(
       } else {
         const judgeStarted = Date.now();
         correct = await judgeMemoryQACorrect(
-          (p) => llm.complete(p),
+          judgeComplete,
           question.question,
           question.answer,
           answer,
@@ -1009,6 +1084,7 @@ async function runCogcoreLiveArm(
   arm: CogcoreLiveLongMemEvalArm,
   sampled: SampledMemQuestion[],
   llm: LlmClient,
+  judgeComplete: (p: string) => Promise<string>,
   k: number,
   concurrency: number,
   extractConcurrency: number,
@@ -1075,7 +1151,9 @@ async function runCogcoreLiveArm(
         liveToolPolicy,
         liveToolQueries,
         liveToolResults,
-        memoryProfile,
+        // New frontier profiles are long-memory-derived; their concrete knobs
+        // are passed explicitly above, so collapse to the adapter's 2-value type.
+        memoryProfile: memoryProfile === "standard" ? "standard" : "long-memory",
         onProgress: (m) => log(`  [${arm}] ${instance.id}: ${m}`),
       });
 
@@ -1138,7 +1216,7 @@ async function runCogcoreLiveArm(
         } else {
           const judgeStarted = Date.now();
           correct = await judgeMemoryQACorrect(
-            (p) => llm.complete(p),
+            judgeComplete,
             question.question,
             question.answer,
             answer,
@@ -1266,7 +1344,12 @@ function categoryCounts(sampled: SampledMemQuestion[]): Record<string, number> {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const arms = parseArms(args.arms);
-  const k = args.k ? Number(args.k) : 10;
+  const memoryProfile = parseMemoryProfile(
+    args["memory-profile"],
+    arms.some((a) => isCogcoreLiveArm(a)) ? "long-memory" : "standard",
+  );
+  const memoryProfileDefaults = defaultsForMemoryProfile(memoryProfile);
+  const k = args.k ? Number(args.k) : memoryProfileDefaults.k;
   const perCategory = args["per-category"] ? Number(args["per-category"]) : 10;
   const sample = args.sample ? Number(args.sample) : undefined;
   const targetCategories = parseCategories(args.categories);
@@ -1280,14 +1363,18 @@ async function main(): Promise<void> {
   const cogcoreConcurrency = args["cogcore-concurrency"] ? Number(args["cogcore-concurrency"]) : 1;
   const extractConcurrency = args["extract-concurrency"] ? Number(args["extract-concurrency"]) : 2;
   const chunkTurns = args["chunk-turns"] ? Number(args["chunk-turns"]) : 40;
-  const maxFactsPerChunk = args["max-facts-per-chunk"] ? Number(args["max-facts-per-chunk"]) : 60;
+  const maxFactsPerChunk = args["max-facts-per-chunk"]
+    ? Number(args["max-facts-per-chunk"])
+    : memoryProfileDefaults.maxFactsPerChunk;
   const debugAll = Boolean(args["debug-all"]);
   const retrievalOnly = Boolean(args["retrieval-only"]);
-  const memoryProfile = parseMemoryProfile(
-    args["memory-profile"],
-    arms.some((a) => isCogcoreLiveArm(a)) ? "long-memory" : "standard",
-  );
-  const memoryProfileDefaults = defaultsForMemoryProfile(memoryProfile);
+  // Answer/extraction/tool model (profile-driven, flag-overridable); judge model
+  // is a separate, run-level fixed choice so every frontier point is scored by
+  // the same judge. Judge defaults to the answer model (preserves prior behavior).
+  const answerDeployment = args["answer-deployment"]
+    ? String(args["answer-deployment"])
+    : memoryProfileDefaults.answerDeployment;
+  const judgeDeployment = args["judge-deployment"] ? String(args["judge-deployment"]) : answerDeployment;
   const experienceGranularity = parseExperienceGranularity(
     args["experience-granularity"],
     memoryProfileDefaults.experienceGranularity,
@@ -1415,7 +1502,12 @@ async function main(): Promise<void> {
       })`,
   );
 
-  const llm = new LlmClient({ maxCompletionTokens });
+  const llm = new LlmClient({ maxCompletionTokens, deployment: answerDeployment });
+  // Separate judge client so scoring is independent of the (tunable) answer
+  // model and its token usage is always accounted separately from
+  // answer+extraction (even when the two share a deployment).
+  const judgeLlm = new LlmClient({ maxCompletionTokens, deployment: judgeDeployment });
+  const judgeComplete = (p: string): Promise<string> => judgeLlm.complete(p);
 
   const reports = new Map<Arm, MemoryQAReport>();
   const detailRecords: DetailJsonlRecord[] = [
@@ -1539,13 +1631,15 @@ async function main(): Promise<void> {
   for (const arm of arms) {
     const started = Date.now();
     const before = { ...llm.totals };
+    const judgeBefore = { ...judgeLlm.totals };
     const run = isRetrievalArm(arm)
-      ? await runArm(arm, sampled, llm, k, concurrency, retrievalOnly, log)
+      ? await runArm(arm, sampled, llm, judgeComplete, k, concurrency, retrievalOnly, log)
       : isCogcoreArm(arm)
         ? await runCogcoreArm(
             arm,
             sampled,
             llm,
+            judgeComplete,
             k,
             Math.min(concurrency, cogcoreConcurrency),
             extractConcurrency,
@@ -1567,6 +1661,7 @@ async function main(): Promise<void> {
               arm,
               sampled,
               llm,
+              judgeComplete,
               k,
               Math.min(concurrency, cogcoreConcurrency),
               extractConcurrency,
@@ -1600,7 +1695,16 @@ async function main(): Promise<void> {
     detailRecords.push(...run.details);
     const tokens = llm.totals.totalTokens - before.totalTokens;
     const calls = llm.totals.calls - before.calls;
+    const judgeTokens = judgeLlm.totals.totalTokens - judgeBefore.totalTokens;
+    const judgeCalls = judgeLlm.totals.calls - judgeBefore.calls;
     const wallMs = Date.now() - started;
+    // Answer-time efficiency (the production-relevant, cacheability axis): mean
+    // context size, observation-log size, and dynamic tool calls per question.
+    const traced = run.details.filter((d) => d.liveTrace);
+    const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+    const meanAnswerContextChars = Math.round(mean(traced.map((d) => d.liveTrace!.systemContextChars)));
+    const meanObsLogChars = Math.round(mean(traced.map((d) => d.liveTrace!.observationLogContextChars ?? 0)));
+    const meanToolCallsPerQ = Number(mean(traced.map((d) => d.liveTrace!.toolCalls.length)).toFixed(2));
     detailRecords.push({
       type: "arm-summary",
       arm,
@@ -1609,10 +1713,19 @@ async function main(): Promise<void> {
       calls,
       tokens,
       wallMs,
+      judgeCalls,
+      judgeTokens,
+      meanAnswerContextChars,
+      meanObsLogChars,
+      meanToolCallsPerQ,
+      memoryProfile,
+      answerDeployment: llm.deployment,
+      judgeDeployment: judgeLlm.deployment,
     });
     log(
       `  [${arm}] overall ${pct(report.overall.accuracy)} ` +
-        `(${(wallMs / 1000).toFixed(0)}s, ${calls} llm calls, ${tokens} tokens)`,
+        `(${(wallMs / 1000).toFixed(0)}s, ${calls} answer+extract calls, ${tokens} tokens; ` +
+        `judge ${judgeCalls}/${judgeTokens}tok; ctx ~${meanAnswerContextChars}c, ${meanToolCallsPerQ} tools/q)`,
     );
 
     sections.push(`## arm: ${arm}\n`);
@@ -1628,7 +1741,11 @@ async function main(): Promise<void> {
         `abstention: ${refused}/${absRecords.length} refused (${pct(refused / absRecords.length)})\n`,
       );
     }
-    sections.push(`cost: ${calls} LLM calls, ${tokens} tokens\n`);
+    sections.push(
+      `cost: ${calls} answer+extract calls, ${tokens} tokens | judge ${judgeCalls} calls, ${judgeTokens} tokens\n` +
+        `answer-time: ~${meanAnswerContextChars} ctx chars (obs-log ~${meanObsLogChars}), ${meanToolCallsPerQ} tool calls/q\n` +
+        `frontier-point: profile=${memoryProfile}, answer=${llm.deployment}, judge=${judgeLlm.deployment}, k=${k}\n`,
+    );
   }
 
   if (arms.length >= 2) {
