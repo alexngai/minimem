@@ -82,7 +82,7 @@ type QAJudgedBy = MemoryQARecord["judgedBy"] | "retrieval-only";
 // is the validated 93% point; `efficient`/`lean` progressively drop the dynamic
 // stack (retrieved-notes, live tools, big log) toward a single primary
 // mechanism — the stable, cacheable observation log — on a cheaper answer model.
-type MemoryProfile = "standard" | "long-memory" | "max-accuracy" | "efficient" | "lean";
+type MemoryProfile = "standard" | "long-memory" | "max-accuracy" | "efficient" | "lean" | "cacheable";
 
 interface MemoryProfileDefaults {
   experienceGranularity: ExperienceGranularity;
@@ -175,12 +175,26 @@ const LEAN_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
   answerDeployment: "gpt-5-mini",
 };
 
+// Banked efficiency win (validated 2026-07): log-primary + tools-off at gpt-5.5.
+// Isolation ladder n=60 = 93.3% (vs 96.7% baseline, p=0.62 — within noise) with
+// a stable, cacheable answer context and NO live tools. Same strong model +
+// warm gpt-5.5 caches (maxFacts=60) as long-memory. The honest efficiency point:
+// ~our full-500 accuracy at a cacheable context. (Keep both channels via
+// `--observation-context both` for ~95% at less cacheability.)
+const CACHEABLE_MEMORY_PROFILE_DEFAULTS: MemoryProfileDefaults = {
+  ...LONG_MEMORY_PROFILE_DEFAULTS,
+  observationContext: "log",
+  liveToolPolicy: "off",
+  k: 8,
+};
+
 const MEMORY_PROFILES: Record<MemoryProfile, MemoryProfileDefaults> = {
   standard: STANDARD_MEMORY_PROFILE_DEFAULTS,
   "long-memory": LONG_MEMORY_PROFILE_DEFAULTS,
   "max-accuracy": MAX_ACCURACY_MEMORY_PROFILE_DEFAULTS,
   efficient: EFFICIENT_MEMORY_PROFILE_DEFAULTS,
   lean: LEAN_MEMORY_PROFILE_DEFAULTS,
+  cacheable: CACHEABLE_MEMORY_PROFILE_DEFAULTS,
 };
 
 const RETRIEVAL_ARMS: RetrievalArm[] = ["none", "local", "nomic"];

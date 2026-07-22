@@ -95,6 +95,7 @@ single primary mechanism — the stable, cacheable observation log (cheap):
 |---------|----------|--------:|-----------|--:|--------------|--------|
 | `max-accuracy` | all 5 | 64k | always | 20 | gpt-5.5 | accuracy ceiling |
 | `long-memory` (default) | all 5 | 40k | auto | 16 | gpt-5.5 | validated 93.0% point |
+| `cacheable` | log-primary | 40k | off | 8 | gpt-5.5 | **banked**: cacheable ctx, ~93% (n=60: 93.3%) |
 | `efficient` | log + light retrieval | 24k | off | 8 | gpt-5-mini | cacheable, cheaper |
 | `lean` | **observation log only** | 16k | off | 6 | gpt-5-mini | single primary mechanism |
 | `standard` | retrieved notes only | 80k | auto | 10 | gpt-5.5 | legacy conservative |
