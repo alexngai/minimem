@@ -18,6 +18,10 @@ evals/locomo/.cache/
 evals/longmemeval/cache/
 evals/longmemeval/.cache/
 
+# BEAM dataset cache (parquet + normalized JSON, download/convert on demand — see evals/beam/README.md)
+evals/beam/cache/
+evals/beam/.venv/
+
 # LongMemEval per-run outputs (regenerate via the CLIs; not curated docs)
 evals/longmemeval/RESULTS-*.md
 evals/longmemeval/DETAILS-*.jsonl
