@@ -118,6 +118,17 @@ export interface CogcoreLongMemEvalOptions {
   observationSlots?: number;
   /** Optional progress hook for long extraction/indexing steps. */
   onProgress?: (message: string) => void;
+  /**
+   * Override the answer-generation prompt (same signature as
+   * buildLongMemEvalAnswerPrompt). Use for a benchmark-specific prompt, e.g. the
+   * BEAM-tuned prompt. Defaults to buildLongMemEvalAnswerPrompt.
+   */
+  answerPromptOverride?: (
+    question: string,
+    questionDate: string | undefined,
+    excerpts: { ref?: string; text: string }[],
+    questionCategory?: string,
+  ) => string;
 }
 
 interface ExtractedFact {
@@ -1188,6 +1199,12 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
     private readonly toolExecutor: MemoryToolExecutor | null,
     private readonly maxToolQueries: number,
     private readonly maxToolResults: number,
+    private readonly buildAnswerPrompt: (
+      question: string,
+      questionDate: string | undefined,
+      excerpts: { ref?: string; text: string }[],
+      questionCategory?: string,
+    ) => string = buildLongMemEvalAnswerPrompt,
   ) {}
 
   async execute(prompt: string, options: AgentDelegateOptions): Promise<{ success: boolean; output: string }> {
@@ -1207,7 +1224,7 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
       "Use the injected context and any tool results as your only source of past-memory evidence.",
       "The context may contain KnowledgeBank notes, raw imported turns, extracted facts, and ExperienceMemory excerpts.",
       "",
-      buildLongMemEvalAnswerPrompt(this.question.question, this.question.date, excerpts, this.question.category),
+      this.buildAnswerPrompt(this.question.question, this.question.date, excerpts, this.question.category),
     ].join("\n");
     const res = await this.llm.chat([{ role: "user", content: finalPrompt }]);
     addLlmUsage(this.usage, res.usage);
@@ -1720,6 +1737,12 @@ export class CogcoreLiveLongMemEvalAdapter {
   private readonly liveToolQueries: number;
   private readonly liveToolPolicy: LiveToolPolicy;
   private readonly liveToolResults: number;
+  private readonly answerPromptOverride?: (
+    question: string,
+    questionDate: string | undefined,
+    excerpts: { ref?: string; text: string }[],
+    questionCategory?: string,
+  ) => string;
   private readonly memoryProfile: CogcoreMemoryProfile;
   private readonly observationMemory: ObservationMemoryMode;
   private readonly observationCacheDir: string;
@@ -1761,6 +1784,7 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.liveToolQueries = opts.liveToolQueries ?? 2;
     this.liveToolPolicy = opts.liveToolPolicy ?? "auto";
     this.liveToolResults = opts.liveToolResults ?? Math.min(8, this.topK);
+    this.answerPromptOverride = opts.answerPromptOverride;
     this.memoryProfile = opts.memoryProfile ?? "long-memory";
     this.observationMemory = opts.observationMemory ?? "off";
     this.observationCacheDir = opts.observationCacheDir ?? path.resolve("evals/longmemeval/.cache/cogcore-observations");
@@ -2306,6 +2330,7 @@ export class CogcoreLiveLongMemEvalAdapter {
       this.toolExecutor,
       effectiveLiveToolQueries,
       this.liveToolResults,
+      this.answerPromptOverride ?? buildLongMemEvalAnswerPrompt,
     );
     this.atlas.setDelegate(delegate);
     const injectedKnowledge = await this.scopedInjectedMemory(question);

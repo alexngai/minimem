@@ -29,6 +29,39 @@ const ANSWER_DEP = arg("answer-deployment", "gpt-5.5")!;
 const JUDGE_DEP = arg("judge-deployment", "gpt-4.1")!;
 const CONC = Number(arg("concurrency", "4"));
 const OUT = arg("out");
+const DETAILS_OUT = arg("details-out");
+const ANSWER_PROMPT = arg("answer-prompt", "tuned")!; // tuned (BEAM-tuned, default) | v15 (legacy adapter prompt)
+
+// BEAM-tuned answer prompt (validated +4-5pp over v15 on held-out): comprehensive
+// + closed-book, LongMemEval-specific rules removed, contradiction-flagging added.
+function beamTunedPrompt(
+  question: string,
+  _date: string | undefined,
+  excerpts: { ref?: string; text: string }[],
+  _cat?: string,
+): string {
+  const ctx = excerpts.map((e) => `- ${e.ref ? `[${e.ref}] ` : ""}${e.text}`).join("\n");
+  return [
+    "You are answering a question about a user using ONLY the memory excerpts below, drawn from the user's past conversations with an assistant.",
+    "Answer as completely and specifically as possible, grounded strictly in the excerpts.",
+    "",
+    "Rules:",
+    "- Use ONLY the excerpts; do NOT use outside knowledge. If the excerpts do not contain the information needed, say the information is not available / not mentioned.",
+    "- Be thorough: address EVERY part of the question and include the specific supporting facts (names, numbers, dates, events) from the excerpts. When a question has multiple aspects, cover each one.",
+    "- Contradictions: if the excerpts contain conflicting statements about the same thing that were never reconciled (e.g. \"I have never done X\" and \"I did X\"), explicitly state that there is contradictory information, quote BOTH conflicting statements, and note that it is unclear which is correct — do NOT silently pick one side.",
+    "- Updates: if a fact/value/state changed over time (a genuine update, not an unreconciled conflict), give the most recent value and briefly note the prior value and when it changed.",
+    "- Counts / lists / orderings: enumerate the relevant items completely from the excerpts; for ordering, sort by date/time; for counts, count distinct real-world items.",
+    "- Time: resolve relative dates (\"last week\", \"two weeks ago\") against the question's reference date when available; for elapsed-time questions, show the calculation.",
+    "- Preferences / instructions: recall the user's stated preferences or instructions from the excerpts and apply them to the question.",
+    "- Be direct, but include enough supporting detail to fully satisfy every part of the question.",
+    "",
+    "Memory excerpts:",
+    ctx,
+    "",
+    `Question: ${question}`,
+    "Answer:",
+  ].join("\n");
+}
 
 const BASE = (process.env.AZURE_API_BASE || "").replace(/\/$/, "");
 const KEY = process.env.AZURE_API_KEY!;
@@ -77,6 +110,7 @@ function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
     liveToolResults: 6,
     memoryProfile: "long-memory",
     onProgress: () => {},
+    ...(ANSWER_PROMPT === "tuned" ? { answerPromptOverride: beamTunedPrompt } : {}),
   });
 }
 
@@ -95,17 +129,33 @@ async function main(): Promise<void> {
 
   type Row = { conversationId: string; dimension: string; questionId: string; score: number };
   const rows: Row[] = [];
+  const details: Array<Record<string, unknown>> = [];
   let done = 0;
 
   for (const inst of instances) {
     const adapter = newAdapter(llm);
     await adapter.ingest(inst);
     const answered = await mapPool(inst.questions, CONC, async (q) => {
-      const { answer } = await adapter.answer(q);
+      const res = await adapter.answer(q);
       // event_ordering keeps the float (BEAM); the other 9 dims int-floor.
       const floor = q.category !== "event_ordering";
-      const { score } = await beamJudgeQuestion(judge, q.rubric ?? [], answer, { floor });
-      return { conversationId: inst.id, dimension: q.category, questionId: q.id, score };
+      const judged = await beamJudgeQuestion(judge, q.rubric ?? [], res.answer, { floor });
+      const row: Row = { conversationId: inst.id, dimension: q.category, questionId: q.id, score: judged.score };
+      if (DETAILS_OUT) {
+        details.push({
+          conversationId: inst.id,
+          dimension: q.category,
+          questionId: q.id,
+          question: q.question,
+          rubric: q.rubric ?? [],
+          reference: q.answer,
+          answer: res.answer,
+          perItem: judged.perItem,
+          score: judged.score,
+          retrieved: (res.retrieved ?? []).map((e) => ({ ref: e.ref, text: e.text })),
+        });
+      }
+      return row;
     });
     rows.push(...answered);
     await adapter.close();
@@ -130,6 +180,11 @@ async function main(): Promise<void> {
   console.log(`  ${"OVERALL (mean of dims)".padEnd(26)} ${(100 * overall).toFixed(1)}%`);
   console.log(`Mastra/others don't publish BEAM; mem0 ref: 62% @1M, 48.6% @10M.`);
   if (OUT) { fs.mkdirSync(path.dirname(OUT), { recursive: true }); fs.writeFileSync(OUT, JSON.stringify(report, null, 2)); process.stderr.write(`[beam] wrote ${OUT}\n`); }
+  if (DETAILS_OUT) {
+    fs.mkdirSync(path.dirname(DETAILS_OUT), { recursive: true });
+    fs.writeFileSync(DETAILS_OUT, details.map((d) => JSON.stringify(d)).join("\n") + "\n");
+    process.stderr.write(`[beam] wrote ${DETAILS_OUT} (${details.length} rows)\n`);
+  }
 }
 
 main().catch((e) => { process.stderr.write(`[beam] error: ${e instanceof Error ? e.stack : String(e)}\n`); process.exit(1); });

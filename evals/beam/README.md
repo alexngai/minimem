@@ -64,10 +64,28 @@ judge scores each answer; per-dimension + overall (mean of dims) are reported.
 - Result files (`results/`), the dataset cache (`cache/`), and `.venv/` are
   git-ignored.
 
+## Answer prompt (`--answer-prompt`)
+
+`tuned` (default) uses a BEAM-tuned answer prompt: comprehensive + closed-book,
+with LongMemEval-specific rules removed and an explicit contradiction-flagging
+instruction added (the v15 "prefer the latest state" rule was resolving
+contradictions the rubric wants flagged). `v15` uses the legacy `cogcore-live`
+answer prompt (the LongMemEval one). Validated held-out (conv 15–20,
+majority-of-3): tuned beats v15 by +4.4pp offline; confirmed live at +6.6pp.
+
 ## Results (100K, current system)
 
-`cogcore-live` (gpt-5.5 answer, gpt-4.1 judge), 20 conv / 400 Q: **62.4% overall**
-(abstention 100, preference 95, extraction 69, knowledge 61, multi-session 59,
-instruction 59, event-ordering 54, summarization 50, temporal 49, contradiction
-29). Reference leaderboard @100K: Hindsight 73.4%, Honcho 63.0%, paper baselines
-~32–36% (not judge-matched — see caveats).
+`cogcore-live` (gpt-5.5 answer, gpt-4.1 judge), 20 conv / 400 Q:
+
+| answer prompt | overall | notable dims |
+|---------------|---------|--------------|
+| `v15` (legacy) | 62.4% | contradiction 29, instruction 59, extraction 69 |
+| **`tuned`** (default) | **69.0%** | contradiction **54**, instruction **84**, extraction **86**, knowledge **71** |
+
+tuned = **+6.6pp** overall (contradiction +25.6, instruction +25.0, extraction
++16.6, knowledge +10.0), with two regressions worth future work: summarization
+−12.6 and multi_session −8.4 (both want whole-conversation context — a retrieval
+lever, not a prompt one). Reference leaderboard @100K: Hindsight 73.4% (SOTA),
+Honcho 63.0%, paper baselines ~32–36% — so tuned clears Honcho and sits ~4pp from
+SOTA (not judge-matched: our gpt-4.1 vs their gpt-4.1-mini; the +6.6 *improvement*
+is measured consistently).
