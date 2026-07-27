@@ -24,13 +24,22 @@ function arg(name: string, def?: string): string | undefined {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : def;
 }
 const DATA = arg("data", "evals/beam/cache/beam-100K.json")!;
-const CONVS = Number(arg("conversations", "0")); // 0 = all
+const CONVS = Number(arg("conversations", "0")); // 0 = all (count of conversations to run)
+const CONV_START = Number(arg("conv-start", "0")); // 0-indexed start (for running a later batch and merging)
 const ANSWER_DEP = arg("answer-deployment", "gpt-5.5")!;
 const JUDGE_DEP = arg("judge-deployment", "gpt-4.1")!;
 const CONC = Number(arg("concurrency", "4"));
 const OUT = arg("out");
 const DETAILS_OUT = arg("details-out");
 const ANSWER_PROMPT = arg("answer-prompt", "tuned")!; // tuned (BEAM-tuned, default) | v15 (legacy adapter prompt)
+const CONSOLIDATION = arg("consolidation", "off")!; // off (default) | contradiction (cross-chunk synthesis pass)
+const QUERY_ADAPTIVE = arg("query-adaptive", "off")!; // off (default) | on (route by question intent to a strategy-specific context/prompt)
+const RETRIEVAL = arg("retrieval", "kb")!; // kb (default, cognitive-core flat) | minimem-graph (structural retrieval on minimem's graph)
+const GRAPH_TRAVERSE = arg("graph-traverse", "off")!; // off (Stage 0, seed-only) | on (Stage 1, seed-then-traverse)
+const QUERY_DECOMP = arg("query-decomp", "off")!; // off | on (split each question into sub-queries, union graph retrievals)
+const GRAPH_SUMMARIES = arg("graph-summaries", "off")!; // off | on (synthesize hierarchical summaries as retrievable nodes)
+const SAMPLES = Number(arg("samples", "1")); // answers per question; score = mean (majority-of-N noise control)
+const DIMS = (arg("dims") ?? "").split(",").map((s) => s.trim()).filter(Boolean); // limit to these categories (empty = all)
 
 // BEAM-tuned answer prompt (validated +4-5pp over v15 on held-out): comprehensive
 // + closed-book, LongMemEval-specific rules removed, contradiction-flagging added.
@@ -63,6 +72,62 @@ function beamTunedPrompt(
   ].join("\n");
 }
 
+// Query-adaptive prompts: summarization wants a holistic, comprehensive answer over
+// the (already broad) context; temporal/ordering questions get a timeline-first prompt
+// (the adapter prepends an explicit chronological timeline to the context).
+function beamSummaryPrompt(question: string, _date: string | undefined, excerpts: { ref?: string; text: string }[]): string {
+  const ctx = excerpts.map((e) => `- ${e.ref ? `[${e.ref}] ` : ""}${e.text}`).join("\n");
+  return [
+    "You are producing a COMPREHENSIVE, well-organized answer to a summarization question about a user, using ONLY the memory context below (drawn from the user's past conversations with an assistant).",
+    "",
+    "Rules:",
+    "- Cover ALL major topics, themes, projects, events, decisions, and changes over time that are relevant to the question — be complete and representative, not selective. A good summary reflects the full breadth of the history.",
+    "- Organize the answer clearly (by theme or chronologically) and group related points together.",
+    "- Include concrete specifics (names, dates, numbers, outcomes) in service of the overview, not as isolated facts.",
+    "- If the question scopes the summary to a topic or time range, summarize that scope thoroughly and completely.",
+    "- Use ONLY the context; if something is not present, do not invent it.",
+    "",
+    "Memory context:",
+    ctx,
+    "",
+    `Question: ${question}`,
+    "Comprehensive answer:",
+  ].join("\n");
+}
+
+function beamTimelinePrompt(question: string, date: string | undefined, excerpts: { ref?: string; text: string }[]): string {
+  const ctx = excerpts.map((e) => `- ${e.ref ? `[${e.ref}] ` : ""}${e.text}`).join("\n");
+  return [
+    "You are answering a TIME-based question about a user using ONLY the memory context below. A chronological TIMELINE of dated observations appears near the top of the context — use it to establish the order and dates of events.",
+    "",
+    "Rules:",
+    "- For ordering questions, determine the correct chronological order by date and list events in order.",
+    "- For elapsed-time / duration questions, identify the two relevant dated events and compute the interval, showing the dates and the calculation.",
+    `- Resolve relative dates ("last week", "two weeks ago") against the question's reference date when available${date ? ` (reference date: ${date})` : ""}.`,
+    "- Ground every date and ordering claim in the timeline/context; do not invent or guess dates.",
+    "- Be specific and complete.",
+    "",
+    "Memory context:",
+    ctx,
+    "",
+    `Question: ${question}`,
+    "Answer:",
+  ].join("\n");
+}
+
+// Intent router (oracle: uses BEAM's question category). A real deployment would infer
+// intent with a classifier; oracle routing isolates the strategy's value from router error.
+function beamAdaptivePrompt(
+  question: string,
+  date: string | undefined,
+  excerpts: { ref?: string; text: string }[],
+  category?: string,
+): string {
+  if (category === "summarization") return beamSummaryPrompt(question, date, excerpts);
+  if (category === "temporal_reasoning" || category === "event_ordering") return beamTimelinePrompt(question, date, excerpts);
+  return beamTunedPrompt(question, date, excerpts, category);
+}
+
 const BASE = (process.env.AZURE_API_BASE || "").replace(/\/$/, "");
 const KEY = process.env.AZURE_API_KEY!;
 const VER = process.env.AZURE_API_VERSION!;
@@ -88,6 +153,14 @@ async function judge(prompt: string): Promise<string> {
   return '{"score": 0}';
 }
 
+// Consolidation (synthesis) runs a reasoning model over ALL observations; give it a
+// large completion budget (reasoning models spend most of the budget on reasoning).
+const consolidationLlm = new LlmClient({ deployment: ANSWER_DEP, maxCompletionTokens: 16_000, maxRetries: 5 });
+// Query decomposition is a small, fast task — use gpt-4.1 (non-reasoning), not the answer model.
+const queryDecomposeLlm = new LlmClient({ deployment: "gpt-4.1", maxCompletionTokens: 400, maxRetries: 5 });
+// Summary synthesis reads all observations and writes several thorough summaries — big output budget.
+const graphSummaryLlm = new LlmClient({ deployment: "gpt-4.1", maxCompletionTokens: 6000, maxRetries: 5 });
+
 function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
   return new CogcoreLiveLongMemEvalAdapter(llm, "cogcore-live", {
     topK: 16,
@@ -110,7 +183,20 @@ function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
     liveToolResults: 6,
     memoryProfile: "long-memory",
     onProgress: () => {},
-    ...(ANSWER_PROMPT === "tuned" ? { answerPromptOverride: beamTunedPrompt } : {}),
+    ...(QUERY_ADAPTIVE === "on"
+      ? { answerPromptOverride: beamAdaptivePrompt, queryAdaptive: "on" as const }
+      : ANSWER_PROMPT === "tuned"
+        ? { answerPromptOverride: beamTunedPrompt }
+        : {}),
+    ...(CONSOLIDATION !== "off" ? { consolidation: CONSOLIDATION as "contradiction", consolidationLlm } : {}),
+    ...(RETRIEVAL === "minimem-graph"
+      ? {
+          retrieval: "minimem-graph" as const,
+          minimemTraverse: GRAPH_TRAVERSE === "on",
+          ...(QUERY_DECOMP === "on" ? { queryDecompose: true, queryDecomposeLlm } : {}),
+          ...(GRAPH_SUMMARIES === "on" ? { graphSummaries: true, graphSummaryLlm } : {}),
+        }
+      : {}),
   });
 }
 
@@ -124,7 +210,13 @@ async function mapPool<T, R>(items: T[], limit: number, fn: (x: T, i: number) =>
 async function main(): Promise<void> {
   const llm = new LlmClient({ deployment: ANSWER_DEP, maxCompletionTokens: 8192, maxRetries: 5 });
   let instances: MemQAInstance[] = loadBeam(DATA);
-  if (CONVS > 0) instances = instances.slice(0, CONVS);
+  // Namespace instance ids by dataset so caches (observations/derived/minimem-graph),
+  // which are keyed by id, don't collide across splits (100K conv "1" vs 500K conv "1").
+  // Empty tag for the 100K default preserves its existing caches.
+  const tag = /100K/.test(DATA) ? "" : `${path.basename(DATA).replace(/\.json$/, "")}--`;
+  if (tag) instances = instances.map((i) => ({ ...i, id: `${tag}${i.id}` }));
+  const sliceEnd = CONVS > 0 ? CONV_START + CONVS : instances.length;
+  instances = instances.slice(CONV_START, sliceEnd);
   process.stderr.write(`[beam] ${instances.length} conversations, answer=${ANSWER_DEP}, judge=${JUDGE_DEP}\n`);
 
   type Row = { conversationId: string; dimension: string; questionId: string; score: number };
@@ -133,14 +225,31 @@ async function main(): Promise<void> {
   let done = 0;
 
   for (const inst of instances) {
+    const questions = DIMS.length ? inst.questions.filter((q) => DIMS.includes(q.category)) : inst.questions;
+    if (questions.length === 0) {
+      done++;
+      process.stderr.write(`[beam] conversation ${done}/${instances.length} (${inst.id}) skipped (no matching dims)\n`);
+      continue;
+    }
     const adapter = newAdapter(llm);
     await adapter.ingest(inst);
-    const answered = await mapPool(inst.questions, CONC, async (q) => {
-      const res = await adapter.answer(q);
+    const answered = await mapPool(questions, CONC, async (q) => {
       // event_ordering keeps the float (BEAM); the other 9 dims int-floor.
       const floor = q.category !== "event_ordering";
-      const judged = await beamJudgeQuestion(judge, q.rubric ?? [], res.answer, { floor });
-      const row: Row = { conversationId: inst.id, dimension: q.category, questionId: q.id, score: judged.score };
+      const scores: number[] = [];
+      let lastAnswer = "";
+      let lastRetrieved: { ref?: string; text: string }[] = [];
+      let lastPerItem: unknown;
+      for (let s = 0; s < SAMPLES; s++) {
+        const res = await adapter.answer(q);
+        const judged = await beamJudgeQuestion(judge, q.rubric ?? [], res.answer, { floor });
+        scores.push(judged.score);
+        lastAnswer = res.answer;
+        lastRetrieved = (res.retrieved ?? []).map((e) => ({ ref: e.ref, text: e.text }));
+        lastPerItem = judged.perItem;
+      }
+      const score = scores.reduce((a, b) => a + b, 0) / scores.length;
+      const row: Row = { conversationId: inst.id, dimension: q.category, questionId: q.id, score };
       if (DETAILS_OUT) {
         details.push({
           conversationId: inst.id,
@@ -149,10 +258,12 @@ async function main(): Promise<void> {
           question: q.question,
           rubric: q.rubric ?? [],
           reference: q.answer,
-          answer: res.answer,
-          perItem: judged.perItem,
-          score: judged.score,
-          retrieved: (res.retrieved ?? []).map((e) => ({ ref: e.ref, text: e.text })),
+          answer: lastAnswer,
+          perItem: lastPerItem,
+          score,
+          samples: SAMPLES,
+          sampleScores: scores,
+          retrieved: lastRetrieved,
         });
       }
       return row;
