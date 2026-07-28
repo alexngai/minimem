@@ -1,13 +1,15 @@
 /**
- * Structural retrieval on minimem's OWN graph — the machinery the cogcore-live arm
- * bypasses (it writes to cognitive-core's KnowledgeBank without links and retrieves flat).
+ * Structural retrieval on minimem's OWN graph — using the PRODUCT graph feature so the
+ * eval exercises the SHIPPED code path, not a bespoke reimplementation:
+ *   - ingestion: MinimemConfig.graph.autoEntityLinks derives co-entity edges at sync time
+ *     from the `entities` frontmatter (no hand-built hub nodes / links).
+ *   - retrieval: search(query, { graphExpand }) does seed-then-traverse over knowledge_links.
  *
- * Stage 0 (traverse=false): observations as typed knowledge notes; retrieve via minimem
- *   hybrid search (RRF) — the parity substrate.
- * Stage 1 (traverse=true): add entity-hub + temporal edges (KnowledgeLink) at ingestion;
- *   retrieve by seed-then-traverse (hybrid seed → getGraphNeighbors expansion → merge).
+ * Stage 0 (traverse=false): hybrid seed only (graphExpand=0).
+ * Stage 1 (traverse=true): seed-then-traverse over the auto-derived co-entity graph.
  *
- * See scratchpad/structural-retrieval-design.md.
+ * Public interface (build / retrieve / retrieveMany / close) is unchanged so the adapter
+ * and ablation flags keep working. See evals/beam/RESULTS.md.
  */
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -15,7 +17,6 @@ import {
   Minimem,
   serializeFrontmatter,
   type MemoryFrontmatter,
-  type KnowledgeLink,
   type MinimemConfig,
 } from "../../src/index.js";
 
@@ -28,31 +29,32 @@ export interface GraphObservation {
   turnIds?: string[];
 }
 
-export interface MinimemGraphOptions {
-  /** Directory to hold the notes + SQLite index for this conversation (wiped on build). */
-  memoryDir: string;
-  instanceId: string;
-  embedding: MinimemConfig["embedding"];
-  topK?: number;
-  /** Stage 1: build entity/temporal edges and retrieve by seed-then-traverse. */
-  traverse?: boolean;
-  /** Max notes returned by seed-then-traverse (default 2x topK). */
-  maxContext?: number;
-  /** Synthesized hierarchical summaries, written as retrievable domain-summary nodes. */
-  summaries?: SummaryNote[];
-}
-
 export interface SummaryNote {
   topic: string;
   summary: string;
   entities: string[];
 }
 
+export interface MinimemGraphOptions {
+  /** Directory to hold the notes + SQLite index for this conversation (wiped on build). */
+  memoryDir: string;
+  instanceId: string;
+  embedding: MinimemConfig["embedding"];
+  topK?: number;
+  /** Stage 1: build co-entity edges (autoEntityLinks) and retrieve by seed-then-traverse (graphExpand). */
+  traverse?: boolean;
+  /** graphExpand traversal depth over the co-entity graph (default 1 = direct co-entity notes). */
+  graphExpandDepth?: number;
+  /** Max notes returned by retrieveMany (default 2x topK). */
+  maxContext?: number;
+  /** Synthesized hierarchical summaries, written as retrievable domain-summary nodes. */
+  summaries?: SummaryNote[];
+}
+
 export interface GraphExcerpt {
   ref: string;
   text: string;
   score: number;
-  via?: "seed" | "graph";
   date?: string;
   epoch?: number | null;
 }
@@ -78,10 +80,6 @@ function parseDate(s?: string): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
-function entitySlug(entity: string): string {
-  return `e-${entity.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48)}`;
-}
-
 function noteBody(obs: GraphObservation): string {
   return [
     obs.date ? `Date: ${obs.date}` : "",
@@ -94,67 +92,39 @@ function noteBody(obs: GraphObservation): string {
 }
 
 /**
- * Write observations as minimem knowledge notes. Stage 1 (traverse) also writes entity-hub
- * notes and links: obs -[mentions/entity]-> entity-hub, and a temporal chain obs -[before/temporal]-> next-by-date.
+ * Write observations (and any synthesized summaries) as minimem knowledge notes with
+ * `entities` frontmatter. Edges are NOT written here — the product's autoEntityLinks
+ * derives co-entity edges from the entities column at sync time.
  */
-async function writeGraphNotes(
+async function writeNotes(
   memoryDir: string,
   instanceId: string,
   observations: GraphObservation[],
-  traverse: boolean,
-  summaries: SummaryNote[] = [],
+  summaries: SummaryNote[],
 ): Promise<NoteMeta[]> {
   const notesDir = path.join(memoryDir, "memory");
   await fs.mkdir(notesDir, { recursive: true });
   await fs.writeFile(path.join(memoryDir, "MEMORY.md"), `# Memory\n\nKnowledge notes for ${instanceId}.\n`, "utf8");
 
-  const metas: NoteMeta[] = observations.map((obs, i) => ({
-    id: `o-${String(i).padStart(6, "0")}`,
-    body: noteBody(obs),
-    date: obs.date,
-    epoch: parseDate(obs.date),
-    entities: obs.entities ?? [],
-  }));
+  const metas: NoteMeta[] = [];
 
-  // Temporal chain: link each observation to the next one by date.
-  const temporalNext = new Map<string, string>();
-  if (traverse) {
-    const dated = metas.filter((m) => m.epoch !== null).sort((a, b) => a.epoch! - b.epoch!);
-    for (let i = 0; i + 1 < dated.length; i++) temporalNext.set(dated[i].id, dated[i + 1].id);
-  }
-
-  // Entity hubs (Stage 1): one note per distinct entity; observations link to their hubs.
-  const entitySet = new Set<string>();
-  if (traverse) for (const m of metas) for (const e of m.entities) entitySet.add(e);
-
-  for (const meta of metas) {
-    const links: KnowledgeLink[] = [];
-    if (traverse) {
-      for (const e of meta.entities) links.push({ target: entitySlug(e), relation: "mentions", layer: "entity" });
-      const next = temporalNext.get(meta.id);
-      if (next) links.push({ target: next, relation: "before", layer: "temporal" });
-    }
+  for (let i = 0; i < observations.length; i++) {
+    const obs = observations[i];
+    const id = `o-${String(i).padStart(6, "0")}`;
+    const entities = obs.entities ?? [];
     const fm: MemoryFrontmatter = {
-      id: meta.id,
+      id,
       type: "observation",
       domain: [instanceId],
-      entities: meta.entities,
+      entities,
       confidence: 0.82,
-      ...(meta.date ? { created: meta.date } : {}),
-      ...(links.length ? { links } : {}),
+      ...(obs.date ? { created: obs.date } : {}),
     };
-    await fs.writeFile(path.join(notesDir, `${meta.id}.md`), `${serializeFrontmatter(fm)}\n\n${meta.body}\n`, "utf8");
+    const body = noteBody(obs);
+    await fs.writeFile(path.join(notesDir, `${id}.md`), `${serializeFrontmatter(fm)}\n\n${body}\n`, "utf8");
+    metas.push({ id, body, date: obs.date, epoch: parseDate(obs.date), entities });
   }
 
-  if (traverse) {
-    for (const e of entitySet) {
-      const id = entitySlug(e);
-      const fm: MemoryFrontmatter = { id, type: "entity", domain: [instanceId], entities: [e] };
-      await fs.writeFile(path.join(notesDir, `${id}.md`), `${serializeFrontmatter(fm)}\n\nEntity: ${e}\n`, "utf8");
-    }
-  }
-
-  // Synthesized summary nodes (bet #2): retrievable domain-summary notes.
   for (let i = 0; i < summaries.length; i++) {
     const s = summaries[i];
     const id = `s-${String(i).padStart(6, "0")}`;
@@ -186,57 +156,47 @@ export class MinimemGraphStore {
 
   static async build(observations: GraphObservation[], opts: MinimemGraphOptions): Promise<MinimemGraphStore> {
     await fs.rm(opts.memoryDir, { recursive: true, force: true });
-    const metas = await writeGraphNotes(opts.memoryDir, opts.instanceId, observations, opts.traverse ?? false, opts.summaries ?? []);
+    const metas = await writeNotes(opts.memoryDir, opts.instanceId, observations, opts.summaries ?? []);
     const mm = await Minimem.create({
       memoryDir: opts.memoryDir,
       embedding: opts.embedding,
       watch: { enabled: false },
       query: { maxResults: opts.topK ?? 16, minScore: 0 },
+      // Product graph feature: build co-entity edges at sync when we intend to traverse.
+      ...(opts.traverse ? { graph: { autoEntityLinks: true } } : {}),
     });
     await mm.sync({ force: true });
     return new MinimemGraphStore(mm, opts, metas);
   }
 
-  /** Stage 0: hybrid seed only. Stage 1 (traverse): seed → graph-neighbor expansion → merge. */
+  private toExcerpt(r: { path: string; snippet: string; score: number }): GraphExcerpt {
+    const id = path.basename(r.path, ".md");
+    const meta = this.byId.get(id);
+    return {
+      ref: `minimem:${id}`,
+      text: meta?.body ?? stripFrontmatter(r.snippet),
+      score: r.score,
+      date: meta?.date,
+      epoch: meta?.epoch ?? null,
+    };
+  }
+
+  /** Stage 0: hybrid seed only. Stage 1 (traverse): product seed-then-traverse via graphExpand. */
   async retrieve(query: string, k?: number): Promise<GraphExcerpt[]> {
     const topK = k ?? this.opts.topK ?? 16;
-    // Over-fetch so we can drop entity-hub hits and still fill topK observation seeds.
-    const raw = await this.mm.search(query, { maxResults: topK * 2, minScore: 0, skipStaleCheck: true });
-    // Keep observation (o-) and summary (s-) nodes as seeds; drop entity-hub (e-) nodes.
-    const seeds = raw.filter((r) => !path.basename(r.path, ".md").startsWith("e-")).slice(0, topK);
-    // Use our own clean note bodies (minimem chunks long frontmatter, leaking YAML into snippets).
-    const bodyOf = (id: string, fallback: string) => this.byId.get(id)?.body ?? stripFrontmatter(fallback);
-    const seedExcerpts: GraphExcerpt[] = seeds.map((r) => {
-      const id = path.basename(r.path, ".md");
-      const meta = this.byId.get(id);
-      return { ref: `minimem:${id}`, text: bodyOf(id, r.snippet), score: r.score, via: "seed" as const, date: meta?.date, epoch: meta?.epoch ?? null };
+    const graphExpand = this.opts.traverse ? (this.opts.graphExpandDepth ?? 1) : 0;
+    const results = await this.mm.search(query, {
+      maxResults: topK,
+      minScore: 0,
+      skipStaleCheck: true,
+      graphExpand,
     });
-    if (!this.opts.traverse) return seedExcerpts;
-
-    // Seed-then-traverse: expand each seed observation via entity/temporal edges (depth 2).
-    const seen = new Set(seeds.map((r) => path.basename(r.path, ".md")));
-    const out: GraphExcerpt[] = [...seedExcerpts];
-    const maxContext = this.opts.maxContext ?? topK * 2;
-    for (const r of seeds) {
-      if (out.length >= maxContext) break;
-      const seedId = path.basename(r.path, ".md");
-      const neighbors = this.mm.getGraphNeighbors(seedId, 2);
-      for (const n of neighbors) {
-        if (out.length >= maxContext) break;
-        if (seen.has(n.id) || !n.id.startsWith("o-")) continue; // skip entity hubs + dups
-        const meta = this.byId.get(n.id);
-        if (!meta) continue;
-        seen.add(n.id);
-        out.push({ ref: `minimem:${n.id}`, text: meta.body, score: r.score * 0.5, via: "graph", date: meta.date, epoch: meta.epoch });
-      }
-    }
-    return out.slice(0, maxContext);
+    return results.map((r) => this.toExcerpt(r));
   }
 
   /**
-   * Query decomposition: retrieve for each sub-query independently (seed-then-traverse),
-   * then union the results deduped by note, keeping the best score, relevance-ordered.
-   * Gives multi-part / multi-hop questions the evidence a single query misses.
+   * Query decomposition: retrieve for each sub-query independently, union deduped by note,
+   * keeping the best score, relevance-ordered.
    */
   async retrieveMany(queries: string[], kPerQuery?: number, maxTotal?: number): Promise<GraphExcerpt[]> {
     const perQuery = kPerQuery ?? this.opts.topK ?? 16;

@@ -189,7 +189,10 @@ own graph. Three follow-on retrieval levers all showed the champion is at a loca
 optimum, so the durable result is the **structural-vs-flat delta**, and the
 remaining absolute gap is a model/judge question. The graph feature is folded into
 the minimem **product** (`graph.autoEntityLinks` at sync + `search({graphExpand})`),
-off by default, tests green.
+off by default, tests green — and **validated end-to-end**: the eval now runs on
+the product path (direct co-entity edges + `graphExpand`, replacing the original
+bespoke hub-node implementation) and reproduces the win at 500K (70.3% vs 71.6%
+for the original, within n=12 noise; still +15pp over flat KB).
 
 Open threads for a fresh strategy: match model/judge for a true leaderboard
 comparison; harden with the full 35-conv numbers; revisit abstention (traversal
