@@ -23,6 +23,11 @@ const CONC = Number(arg("concurrency", "4"));
 const SAMPLES = Number(arg("samples", "1"));
 const RETRIEVAL = arg("retrieval", "kb")!;
 const GRAPH_TRAVERSE = arg("graph-traverse", "off")!;
+const RERANK = arg("rerank", "off")!;
+const EMBED_MODEL = arg("embed-model");
+const ANSWER_MODEL = arg("answer-model"); // separate answer-only deployment (extraction stays on --answer-deployment)
+const rerankLlm = new LlmClient({ deployment: "gpt-4.1", maxCompletionTokens: 300, maxRetries: 5 });
+const answerModelLlm = ANSWER_MODEL ? new LlmClient({ deployment: ANSWER_MODEL, maxCompletionTokens: 8192, maxRetries: 5 }) : undefined;
 const OUT = arg("out");
 const DETAILS_OUT = arg("details-out");
 
@@ -56,9 +61,15 @@ function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
     liveToolResults: 6,
     memoryProfile: "long-memory",
     onProgress: () => {},
+    ...(answerModelLlm ? { answerLlm: answerModelLlm } : {}),
     // No BEAM prompt — default LongMemEval answer prompt, appropriate for LOCOMO QA.
     ...(RETRIEVAL === "minimem-graph"
-      ? { retrieval: "minimem-graph" as const, minimemTraverse: GRAPH_TRAVERSE === "on" }
+      ? {
+          retrieval: "minimem-graph" as const,
+          minimemTraverse: GRAPH_TRAVERSE === "on",
+          ...(RERANK === "llm" ? { rerank: "llm" as const, rerankLlm } : {}),
+          ...(EMBED_MODEL ? { minimemEmbeddingModel: EMBED_MODEL } : {}),
+        }
       : {}),
   });
 }

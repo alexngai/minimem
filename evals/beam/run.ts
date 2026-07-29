@@ -27,6 +27,7 @@ const DATA = arg("data", "evals/beam/cache/beam-100K.json")!;
 const CONVS = Number(arg("conversations", "0")); // 0 = all (count of conversations to run)
 const CONV_START = Number(arg("conv-start", "0")); // 0-indexed start (for running a later batch and merging)
 const ANSWER_DEP = arg("answer-deployment", "gpt-5.5")!;
+const ANSWER_MODEL = arg("answer-model"); // separate deployment for the final answer only (isolates answer-model from extraction)
 const JUDGE_DEP = arg("judge-deployment", "gpt-4.1")!;
 const CONC = Number(arg("concurrency", "4"));
 const OUT = arg("out");
@@ -38,6 +39,8 @@ const RETRIEVAL = arg("retrieval", "kb")!; // kb (default, cognitive-core flat) 
 const GRAPH_TRAVERSE = arg("graph-traverse", "off")!; // off (Stage 0, seed-only) | on (Stage 1, seed-then-traverse)
 const QUERY_DECOMP = arg("query-decomp", "off")!; // off | on (split each question into sub-queries, union graph retrievals)
 const GRAPH_SUMMARIES = arg("graph-summaries", "off")!; // off | on (synthesize hierarchical summaries as retrievable nodes)
+const RERANK = arg("rerank", "off")!; // off | llm (LLM reranker over a larger candidate pool -> topK)
+const EMBED_MODEL = arg("embed-model"); // override minimem-graph store's local embedding (GGUF hf: path)
 const SAMPLES = Number(arg("samples", "1")); // answers per question; score = mean (majority-of-N noise control)
 const DIMS = (arg("dims") ?? "").split(",").map((s) => s.trim()).filter(Boolean); // limit to these categories (empty = all)
 
@@ -63,6 +66,39 @@ function beamTunedPrompt(
     "- Time: resolve relative dates (\"last week\", \"two weeks ago\") against the question's reference date when available; for elapsed-time questions, show the calculation.",
     "- Preferences / instructions: recall the user's stated preferences or instructions from the excerpts and apply them to the question.",
     "- Be direct, but include enough supporting detail to fully satisfy every part of the question.",
+    "",
+    "Memory excerpts:",
+    ctx,
+    "",
+    `Question: ${question}`,
+    "Answer:",
+  ].join("\n");
+}
+
+// gpt-5.6-sol answer prompt: keeps the comprehensive/synthesis framing (sol is a much
+// stronger summarizer) but hardens the three dims sol regressed on with the plain tuned
+// prompt (contradiction, instruction-following, abstention) — sol answers more elaborately
+// and confidently, so these need explicit discipline + scope calibration.
+function beamSolPrompt(
+  question: string,
+  _date: string | undefined,
+  excerpts: { ref?: string; text: string }[],
+  _cat?: string,
+): string {
+  const ctx = excerpts.map((e) => `- ${e.ref ? `[${e.ref}] ` : ""}${e.text}`).join("\n");
+  return [
+    "You are answering a question about a user using ONLY the memory excerpts below, drawn from the user's past conversations with an assistant.",
+    "Ground every claim strictly in the excerpts, and calibrate the answer's scope to what the question actually asks.",
+    "",
+    "Rules:",
+    "- ABSTENTION (critical): if the excerpts do not actually contain the information the question asks for, you MUST say the information is not available / not mentioned. Do NOT guess, infer, or construct a plausible-sounding answer from loosely related excerpts. A confident answer that the excerpts do not support is WRONG — when the evidence isn't there, decline.",
+    "- CONTRADICTIONS: if the excerpts contain conflicting statements about the same thing that were never reconciled (e.g. \"I have never done X\" and \"I did X\"), you MUST explicitly state that the information is contradictory, quote BOTH conflicting statements, and note it is unclear which is correct. Do NOT resolve it yourself by picking the more recent, more detailed, or more plausible side.",
+    "- FOLLOW THE QUESTION EXACTLY: answer precisely what is asked, in the form asked. For a specific/yes-no/single-value question, give exactly that and stop — do NOT add unrequested background, caveats, or elaboration. Match the question's scope; do not over-explain.",
+    "- Be COMPLETE when the question warrants it: for summary, overview, or multi-part questions, cover every major point/aspect thoroughly with the specific supporting facts (names, numbers, dates, events). Scale the length to the question — comprehensive for broad questions, terse for narrow ones.",
+    "- Updates: if a fact/value/state changed over time (a genuine update, not an unreconciled conflict), give the most recent value and briefly note the prior value and when it changed.",
+    "- Counts / lists / orderings: enumerate the relevant items completely from the excerpts; for ordering, sort by date/time; for counts, count distinct real-world items.",
+    "- Time: resolve relative dates against the question's reference date when available; for elapsed-time questions, show the calculation.",
+    "- Preferences / instructions: recall the user's stated preferences or instructions from the excerpts and apply them exactly.",
     "",
     "Memory excerpts:",
     ctx,
@@ -160,6 +196,9 @@ const consolidationLlm = new LlmClient({ deployment: ANSWER_DEP, maxCompletionTo
 const queryDecomposeLlm = new LlmClient({ deployment: "gpt-4.1", maxCompletionTokens: 400, maxRetries: 5 });
 // Summary synthesis reads all observations and writes several thorough summaries — big output budget.
 const graphSummaryLlm = new LlmClient({ deployment: "gpt-4.1", maxCompletionTokens: 6000, maxRetries: 5 });
+// Reranker: a small, fast listwise LLM call (returns a JSON array of note numbers).
+const rerankLlm = new LlmClient({ deployment: "gpt-4.1", maxCompletionTokens: 300, maxRetries: 5 });
+const answerModelLlm = ANSWER_MODEL ? new LlmClient({ deployment: ANSWER_MODEL, maxCompletionTokens: 8192, maxRetries: 5 }) : undefined;
 
 function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
   return new CogcoreLiveLongMemEvalAdapter(llm, "cogcore-live", {
@@ -183,11 +222,14 @@ function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
     liveToolResults: 6,
     memoryProfile: "long-memory",
     onProgress: () => {},
+    ...(answerModelLlm ? { answerLlm: answerModelLlm } : {}),
     ...(QUERY_ADAPTIVE === "on"
       ? { answerPromptOverride: beamAdaptivePrompt, queryAdaptive: "on" as const }
-      : ANSWER_PROMPT === "tuned"
-        ? { answerPromptOverride: beamTunedPrompt }
-        : {}),
+      : ANSWER_PROMPT === "sol"
+        ? { answerPromptOverride: beamSolPrompt }
+        : ANSWER_PROMPT === "tuned"
+          ? { answerPromptOverride: beamTunedPrompt }
+          : {}),
     ...(CONSOLIDATION !== "off" ? { consolidation: CONSOLIDATION as "contradiction", consolidationLlm } : {}),
     ...(RETRIEVAL === "minimem-graph"
       ? {
@@ -195,6 +237,8 @@ function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
           minimemTraverse: GRAPH_TRAVERSE === "on",
           ...(QUERY_DECOMP === "on" ? { queryDecompose: true, queryDecomposeLlm } : {}),
           ...(GRAPH_SUMMARIES === "on" ? { graphSummaries: true, graphSummaryLlm } : {}),
+          ...(RERANK === "llm" ? { rerank: "llm" as const, rerankLlm } : {}),
+          ...(EMBED_MODEL ? { minimemEmbeddingModel: EMBED_MODEL } : {}),
         }
       : {}),
   });

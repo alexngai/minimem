@@ -96,6 +96,39 @@ captures the retrievable signal:
 - **Cache-collision gotcha:** splits/benchmarks reuse ids; observation/graph caches
   are id-keyed, so ids are namespaced per dataset (`beam-500K--1`, `locomo--<id>`).
 
+## Sharpening the substrate: precision levers + the answer model
+
+Since the substrate is the win, we probed whether *sharpening retrieval precision*
+(rather than adding recall/structure) or a *stronger answer model* could close the
+~5pp gap to the SOTA self-reports. All three landed in the noise band — each is a
+precision/recall or synthesis/precision tradeoff that cancels.
+
+| lever | measure | verdict |
+|---|---|---|
+| **Bigger embeddings** (Qwen3-Embedding-0.6B, 1024-d, vs EmbeddingGemma-300M) | −1.3 @500K | inconclusive — **compromised test**: Qwen3-Embedding needs an instruction prefix on queries that minimem doesn't emit; info_extraction −15.5 is the misuse tell, not a verdict on bigger embeddings |
+| **LLM reranker** (24-candidate pool → gpt-4.1 listwise → topK) | +0.9 @500K (n=24) | wash — a clean **precision-for-breadth trade**: lookup dims +3 to +5 (extraction, knowledge, event_ordering), breadth dims −3 to −6 (multi_session, contradiction, summarization). Nets to zero. |
+| **Abstention guard** on the reranker | 1 fire / 240 Q | inert — the reranker won't return "none relevant" because there's always something *topically* related among candidates (topical ≠ answer-bearing) |
+| **Stronger answer model** (gpt-5.6-sol answering; extraction held on gpt-5.5) | see below | synthesis-vs-precision wash |
+
+**gpt-5.6-sol (answer model only; judge held constant):**
+
+| benchmark | gpt-5.5 | gpt-5.6-sol | Δ |
+|---|---|---|---|
+| BEAM 500K (12 conv) | 70.0 | 71.6 | +1.6 |
+| BEAM 1M (6 conv) | 65.5 | 67.4 | +1.8 |
+| LOCOMO (10 conv, 300 q) | 78.0 | 76.0 | **−2.1** |
+
+sol is a *stronger synthesizer, weaker at precision*: robust summarization gains
+(+13 to +16) and multi_session (+19 @1M), but losses on extraction / instruction /
+factual-QA. On synthesis-heavy BEAM it nets slightly positive (+1.6/+1.8, edge of
+noise); on precision-heavy LOCOMO it nets **negative**. Net across benchmarks ≈ zero.
+Attempting to prompt-correct sol's precision losses **backfired** (a
+precision-hardened "sol prompt" scored −11.3 vs the plain tuned prompt — the
+terseness/exactness directives starved the reasoning dims: temporal −33,
+event_ordering −29, knowledge −21). **Useful nugget:** model choice is
+*workload-dependent* — sol for synthesis-heavy tasks, gpt-5.5 for precision-heavy
+recall — but neither is a universal win, and the answer model does not close the gap.
+
 ## Reproduce
 
 ```sh
@@ -115,15 +148,29 @@ npx tsx evals/locomo/run-graph.tmp.ts --conversations 10 --max-q 30 --retrieval 
 
 ## Takeaway
 
-The durable, well-supported result: **minimem's focused hybrid retrieval ≫ the
-cognitive-core KnowledgeBank baseline (+13pp @BEAM-500K, +43pp @LOCOMO), widening
-with scale because the KB's obs-log dump truncates while minimem retrieves the
-right notes regardless of store size.** The **knowledge-graph feature**
-(`autoEntityLinks` + `graphExpand`, in `src/minimem.ts`) is **marginal — +1–2pp,
-within noise, with an abstention cost** — sound code, but not a validated win. The
-honest deliverable is the *retrieval evidence*, not the graph feature.
+The one durable, large, well-supported result: **minimem's focused hybrid retrieval
+≫ the cognitive-core KnowledgeBank baseline (+13pp @BEAM-500K, +43pp @LOCOMO),
+widening with scale because the KB's obs-log dump truncates while minimem retrieves
+the right notes regardless of store size.**
 
-Open threads: model/judge-matched comparison for a true leaderboard number; the
-full 35-conv BEAM numbers; and — if the graph is to earn its place — a workload
-where entity traversal beats focused hybrid search by more than noise (not found
-in either benchmark so far).
+Everything layered on top of that substrate was then tested and **every axis nets to
+the noise band** — because each is a precision/recall or synthesis/precision tradeoff
+that cancels:
+
+- retrieval *mechanisms*: graph traversal (+1–2pp), query decomposition (+0.7),
+  synthesized summaries (−3.9), temporal specialization (−1.5);
+- retrieval *quality*: LLM reranker (+0.9, precision-for-breadth wash), bigger
+  embeddings (inconclusive/compromised test);
+- the *answer model*: gpt-5.6-sol (synthesis-vs-precision wash; +1.6/+1.8 BEAM,
+  −2.1 LOCOMO), un-boostable by prompt (−11 when tried).
+
+**Retrieval is solved for this pipeline; the remaining ~5pp to the SOTA self-reports
+is not reachable through these levers.** The honest deliverable is the retrieval
+evidence (the substrate), not any single add-on. Two actionable nuggets survive: the
+LLM reranker is a genuine **+4–5pp for lookup-heavy workloads** (it just nets zero on
+a balanced dim-mix), and model choice is **workload-dependent** (sol for
+synthesis-heavy, gpt-5.5 for precision-heavy).
+
+Genuinely open threads (different *kind* of work, not more retrieval levers):
+**judge-matched** comparison (gpt-4.1-mini) for a true leaderboard number, and the
+full 35-conv BEAM numbers to firm up the absolutes.

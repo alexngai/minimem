@@ -137,6 +137,16 @@ export interface CogcoreLongMemEvalOptions {
   graphSummaries?: boolean;
   /** LLM for summary synthesis (large budget; e.g. gpt-4.1). Falls back to the consolidation/answer LLM. */
   graphSummaryLlm?: LlmClient;
+  /** Separate LLM for the final answer generation (isolates answer-model quality from extraction). Falls back to the main LLM. */
+  answerLlm?: LlmClient;
+  /** LLM reranker over retrieved candidates before answering (only with retrieval="minimem-graph"). */
+  rerank?: "off" | "llm";
+  /** LLM for reranking (small/fast; e.g. gpt-4.1). Falls back to the answer LLM. */
+  rerankLlm?: LlmClient;
+  /** Candidate pool retrieved before reranking (default 24); reranked down to topK. */
+  rerankPoolSize?: number;
+  /** Override the minimem-graph store's local embedding model (GGUF hf: path). */
+  minimemEmbeddingModel?: string;
   /** Cache/work directory for the minimem-graph store (one subdir per instance). */
   minimemGraphDir?: string;
   /** Optional progress hook for long extraction/indexing steps. */
@@ -853,6 +863,48 @@ function parseSummaries(raw: string): SummaryNote[] {
         return { topic: topic || "Overall", summary, entities };
       })
       .filter((x): x is SummaryNote => x !== null);
+  } catch {
+    return [];
+  }
+}
+
+// --- LLM reranker (Exabase-style precision stage): reorder retrieved candidates by relevance ---
+function buildRerankPrompt(query: string, candidates: { text: string }[]): string {
+  const list = candidates.map((c, i) => `[${i}] ${c.text.replace(/\s+/g, " ").slice(0, 400)}`).join("\n");
+  return [
+    "You are reranking retrieved memory notes by how useful each is for answering a question.",
+    "Given the question and the numbered notes, return the note numbers ordered from MOST to LEAST useful for answering it.",
+    "Prefer notes that directly contain the answer or the evidence needed. Drop clearly irrelevant notes.",
+    "If — and ONLY if — you are confident that NONE of the notes contain information relevant to answering the question, return an empty array [].",
+    "Otherwise return ONLY a JSON array of note numbers (most useful first), e.g. [3,0,7].",
+    "",
+    `Question: ${query}`,
+    "Notes:",
+    list,
+    "",
+    "Ranked note numbers (JSON array):",
+  ].join("\n");
+}
+
+/** Returns ordered indices; [] = reranker judged NO note relevant (abstain signal); null = unparseable. */
+function parseRerankOrder(raw: string, n: number): number[] | null {
+  const s = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  if (start === -1 || end <= start) return null;
+  try {
+    const arr = JSON.parse(s.slice(start, end + 1)) as unknown;
+    if (!Array.isArray(arr)) return null;
+    const seen = new Set<number>();
+    const out: number[] = [];
+    for (const x of arr) {
+      const i = Math.trunc(Number(x));
+      if (Number.isInteger(i) && i >= 0 && i < n && !seen.has(i)) {
+        seen.add(i);
+        out.push(i);
+      }
+    }
+    return out;
   } catch {
     return [];
   }
@@ -2004,6 +2056,11 @@ export class CogcoreLiveLongMemEvalAdapter {
   private readonly queryDecomposeLlm: LlmClient;
   private readonly graphSummaries: boolean;
   private readonly graphSummaryLlm: LlmClient;
+  private readonly answerLlm: LlmClient;
+  private readonly rerank: "off" | "llm";
+  private readonly rerankLlm: LlmClient;
+  private readonly rerankPoolSize: number;
+  private readonly minimemEmbeddingModel?: string;
   private readonly minimemGraphDir: string;
   private minimemStore: MinimemGraphStore | null = null;
   private readonly onProgress?: (message: string) => void;
@@ -2059,6 +2116,11 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.queryDecomposeLlm = opts.queryDecomposeLlm ?? this.llm;
     this.graphSummaries = opts.graphSummaries ?? false;
     this.graphSummaryLlm = opts.graphSummaryLlm ?? this.llm;
+    this.answerLlm = opts.answerLlm ?? this.llm;
+    this.rerank = opts.rerank ?? "off";
+    this.rerankLlm = opts.rerankLlm ?? this.llm;
+    this.rerankPoolSize = opts.rerankPoolSize ?? 24;
+    this.minimemEmbeddingModel = opts.minimemEmbeddingModel;
     this.minimemGraphDir = opts.minimemGraphDir ?? path.resolve("evals/longmemeval/.cache/minimem-graph");
     this.onProgress = opts.onProgress;
   }
@@ -2651,7 +2713,9 @@ export class CogcoreLiveLongMemEvalAdapter {
       this.minimemStore = await MinimemGraphStore.build(observationsToWrite as GraphObservation[], {
         memoryDir: path.join(this.minimemGraphDir, safeFileName(instance.id)),
         instanceId: instance.id,
-        embedding: { provider: "local" },
+        embedding: this.minimemEmbeddingModel
+          ? { provider: "local", local: { modelPath: this.minimemEmbeddingModel } }
+          : { provider: "local" },
         topK: this.topK,
         traverse: this.minimemTraverse,
         summaries,
@@ -2871,11 +2935,36 @@ export class CogcoreLiveLongMemEvalAdapter {
     return [question, ...subs.filter((s) => s.toLowerCase() !== question.toLowerCase())].slice(0, 5);
   }
 
+  /** LLM reranker: reorder retrieved candidates by relevance, keep topK. Falls back to input order on parse failure. */
+  private async rerankHits(query: string, hits: GraphExcerpt[]): Promise<GraphExcerpt[]> {
+    if (hits.length <= 1) return hits.slice(0, this.topK);
+    let order: number[] | null = null;
+    try {
+      const res = await this.rerankLlm.chat([{ role: "user", content: buildRerankPrompt(query, hits) }]);
+      order = parseRerankOrder(res.text, hits.length);
+    } catch {
+      order = null;
+    }
+    if (order === null) return hits.slice(0, this.topK); // parse failure → keep retrieval order
+    if (order.length === 0) {
+      // Abstention guard: reranker judged NO note relevant → surface a not-found marker so the model abstains.
+      return [{ ref: "no-relevant-notes", text: "No clearly relevant memory notes were found for this question.", score: 0, epoch: null }];
+    }
+    const reranked = order.map((i) => hits[i]);
+    // Append any candidates the reranker dropped, so we never fall below topK on recall.
+    const included = new Set(order);
+    for (let i = 0; i < hits.length; i++) if (!included.has(i)) reranked.push(hits[i]);
+    return reranked.slice(0, this.topK);
+  }
+
   private async answerViaMinimemGraph(question: MemQuestion): Promise<AnswerResult> {
     if (!this.minimemStore) throw new Error("minimem-graph store not built");
-    const hits = this.queryDecompose
-      ? await this.minimemStore.retrieveMany(await this.decomposeQuery(question.question), this.topK)
-      : await this.minimemStore.retrieve(question.question, this.topK);
+    // With reranking on, retrieve a larger candidate pool, then LLM-rerank down to topK.
+    const pool = this.rerank === "llm" ? Math.max(this.rerankPoolSize, this.topK) : this.topK;
+    let hits = this.queryDecompose
+      ? await this.minimemStore.retrieveMany(await this.decomposeQuery(question.question), pool, pool)
+      : await this.minimemStore.retrieve(question.question, pool);
+    if (this.rerank === "llm") hits = await this.rerankHits(question.question, hits.slice(0, pool));
     // Temporal/ordering intent: present the graph-retrieved (query-relevant) notes in
     // chronological order — far stronger at scale than a globally-truncated timeline, since
     // the retrieved set already contains the relevant events and sorting makes order explicit.
@@ -2886,7 +2975,7 @@ export class CogcoreLiveLongMemEvalAdapter {
     const excerpts: { ref?: string; text: string }[] = ordered.map((h) => ({ ref: h.ref, text: h.text }));
     const buildPrompt = this.answerPromptOverride ?? buildLongMemEvalAnswerPrompt;
     const prompt = buildPrompt(question.question, question.date, excerpts, question.category);
-    const res = await this.llm.chat([{ role: "user", content: prompt }]);
+    const res = await this.answerLlm.chat([{ role: "user", content: prompt }]);
     const usage = zeroUsage();
     addLlmUsage(usage, res.usage);
     const retrieved: RetrievedExcerpt[] = hits.map((h, i) => ({
