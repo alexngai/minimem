@@ -19,6 +19,24 @@ result is the retrieval *substrate*, not the graph.
 > leaderboard-exact absolutes. BEAM cells are majority-of-3; LOCOMO is single-sample
 > over 300 stratified questions.
 
+## Peak scores
+
+Best measured overall per benchmark. These are **memory-QA-pipeline** scores
+(extract observations → minimem retrieval → answer), not leaderboard-exact — see the
+per-benchmark config/judge caveats below.
+
+| benchmark | peak | config | judge |
+|---|---:|---|---|
+| **LongMemEval_S** | **93.0%** | full-500, cogcore-live (v15) | official prompts + gpt-4.1 (re-judged 3 ways; ~1.9pp behind Mastra 94.87%) |
+| **LOCOMO** | **79.3%** | 10 conv, minimem-graph | mem0-J + gpt-4.1 |
+| **BEAM** (500K) | **72.7%** | 18 conv, minimem-graph | rubric + gpt-4.1 |
+
+Answer model gpt-5.5 throughout. **LongMemEval is a full-benchmark run** (500 questions,
+the most rigorous — validated across three judges); LOCOMO and BEAM are representative
+subsets. Absolute numbers are same-family-judge, not leaderboard-exact (the leaders use
+gpt-4.1-mini). The LongMemEval peak is the cogcore-live arm; BEAM/LOCOMO peaks are the
+minimem-graph arm (the substrate finding below is what earns the BEAM/LOCOMO numbers).
+
 ## Attribution — the clean three-arm decomposition
 
 The win was originally reported as "cognitive-core KB **vs** minimem-graph," which

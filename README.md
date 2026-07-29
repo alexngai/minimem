@@ -28,6 +28,23 @@ That's the whole setup. No Docker, no Postgres, no Pinecone, no daemon to babysi
 - **Bring your own embeddings** - OpenAI, Gemini, or a fully local model via `llama.cpp` (no API key required). Guided setup picks one for you on `init`.
 - **Drops into your agent** - First-class MCP server for Claude Code, Codex, Cursor, and Claude Desktop, plus a Claude Code plugin — see [integrations](#mcp-server-integration).
 
+## Benchmarks
+
+Long-term-memory QA benchmark results for an agent memory pipeline (extract → retrieve → answer), answer model gpt-5.5:
+
+| benchmark | score | retrieval | notes |
+|---|---:|---|---|
+| [LongMemEval_S](https://github.com/xiaowu0162/LongMemEval) | **93.0%** | full pipeline | full 500-question run; ~1.9pp behind Mastra (94.87%) |
+| [LOCOMO](https://github.com/snap-research/locomo) | **79.3%** | **minimem** | 10 multi-session conversations, mem0 judge |
+| [BEAM](https://github.com/mohammadtavakoli78/BEAM) | **72.7%** | **minimem** | ICLR 2026 long-horizon memory, 500K-token conversations |
+
+The retrieval finding that earns the LOCOMO/BEAM numbers: **minimem's focused hybrid
+retrieval beats a dump-everything KB baseline by +13pp at 500K tokens and +43pp on LOCOMO,
+and the gap widens with scale** (the KB's context dump truncates; minimem retrieves the
+right notes regardless of store size). Scores are same-family-judge, not leaderboard-exact.
+Full methodology, the clean substrate-vs-graph decomposition, and honest per-benchmark
+caveats: [evals/beam/RESULTS.md](evals/beam/RESULTS.md).
+
 ## Installation
 
 Install globally for the CLI + MCP server (recommended for most users):
