@@ -44,6 +44,7 @@ import {
 } from "../locomo/adapters/cogcore-shared.js";
 import { LlmClient, type LlmUsage } from "../locomo/llm.js";
 import { buildLongMemEvalAnswerPrompt } from "./prompt.js";
+import { MinimemGraphStore, type GraphObservation, type SummaryNote } from "./minimem-graph.js";
 
 export type CogcoreLongMemEvalArm =
   | "cogcore-memory"
@@ -116,8 +117,51 @@ export interface CogcoreLongMemEvalOptions {
   observationMaxPerChunk?: number;
   /** Maximum observation notes allowed to preempt normal scoped KnowledgeBank notes. */
   observationSlots?: number;
+  /** Cross-chunk consolidation (synthesis) mode. "contradiction" synthesizes retrievable contradiction notes from all observations. */
+  consolidation?: ConsolidationMode;
+  /** LLM client for the consolidation pass (reasoning models need a large completion budget). Falls back to the answer LLM. */
+  consolidationLlm?: LlmClient;
+  /** Cache directory for synthesized derived notes. */
+  consolidationCacheDir?: string;
+  /** Query-adaptive retrieval: "on" assembles a strategy-specific context by question intent (a chronological timeline for temporal/event-ordering questions). */
+  queryAdaptive?: "off" | "on";
+  /** Retrieval substrate: "kb" (default, cognitive-core flat retrieval) or "minimem-graph" (structural retrieval on minimem's own graph). */
+  retrieval?: "kb" | "minimem-graph";
+  /** Stage 1: build entity/temporal edges and retrieve by seed-then-traverse (only with retrieval="minimem-graph"). */
+  minimemTraverse?: boolean;
+  /** Query decomposition: split each question into sub-queries and union their graph retrievals (only with retrieval="minimem-graph"). */
+  queryDecompose?: boolean;
+  /** LLM for query decomposition (small/fast; e.g. gpt-4.1). Falls back to the answer LLM. */
+  queryDecomposeLlm?: LlmClient;
+  /** Bet #2: synthesize hierarchical summaries at ingest, added as retrievable domain-summary nodes (only with retrieval="minimem-graph"). */
+  graphSummaries?: boolean;
+  /** LLM for summary synthesis (large budget; e.g. gpt-4.1). Falls back to the consolidation/answer LLM. */
+  graphSummaryLlm?: LlmClient;
+  /** Separate LLM for the final answer generation (isolates answer-model quality from extraction). Falls back to the main LLM. */
+  answerLlm?: LlmClient;
+  /** LLM reranker over retrieved candidates before answering (only with retrieval="minimem-graph"). */
+  rerank?: "off" | "llm";
+  /** LLM for reranking (small/fast; e.g. gpt-4.1). Falls back to the answer LLM. */
+  rerankLlm?: LlmClient;
+  /** Candidate pool retrieved before reranking (default 24); reranked down to topK. */
+  rerankPoolSize?: number;
+  /** Override the minimem-graph store's local embedding model (GGUF hf: path). */
+  minimemEmbeddingModel?: string;
+  /** Cache/work directory for the minimem-graph store (one subdir per instance). */
+  minimemGraphDir?: string;
   /** Optional progress hook for long extraction/indexing steps. */
   onProgress?: (message: string) => void;
+  /**
+   * Override the answer-generation prompt (same signature as
+   * buildLongMemEvalAnswerPrompt). Use for a benchmark-specific prompt, e.g. the
+   * BEAM-tuned prompt. Defaults to buildLongMemEvalAnswerPrompt.
+   */
+  answerPromptOverride?: (
+    question: string,
+    questionDate: string | undefined,
+    excerpts: { ref?: string; text: string }[],
+    questionCategory?: string,
+  ) => string;
 }
 
 interface ExtractedFact {
@@ -176,6 +220,29 @@ interface ObservationCache {
 interface CombinedExtraction {
   facts: ExtractedFact[];
   observations: ExtractedObservation[];
+}
+
+// --- Cross-chunk consolidation (synthesis) ---
+// Derived memory items synthesized from ALL of a conversation's observations
+// (not chunk-local). One synthesis pass, additive kinds. Contradiction is first;
+// timeline / entity-summary / supersession follow incrementally.
+type DerivedKind = "contradiction";
+type ConsolidationMode = "off" | "contradiction";
+
+interface DerivedObservation {
+  kind: DerivedKind;
+  statement: string; // formatted note body — keeps both sides explicit for the answer model
+  entities: string[]; // routing key (inherited from the source observations)
+  dates: string[];
+  sourceTurnIds: string[]; // provenance to all sides
+  confidence: number;
+}
+
+interface DerivedCache {
+  version: number;
+  instanceId: string;
+  kinds: DerivedKind[];
+  derived: DerivedObservation[];
 }
 
 export interface RetrievedExcerpt {
@@ -267,6 +334,8 @@ const DEFAULT_OBSERVATION_LOG_MAX_CHARS = 80_000;
 const DEFAULT_OBSERVATION_MAX_PER_CHUNK = 12;
 const DEFAULT_OBSERVATION_SLOTS = 12;
 const COMBINED_EMPTY_RETRIES = 1;
+const COGCORE_DERIVED_CACHE_VERSION = 1;
+const DERIVED_EMPTY_RETRIES = 1;
 const MAX_EXCERPT_CHARS = 1200;
 const MAX_KNOWLEDGE_TOKENS = 1_000_000;
 const MAX_SCOPED_SYSTEM_KNOWLEDGE_NOTES = 32;
@@ -305,6 +374,16 @@ function addUsage(a: UsageAccumulator, u: LlmUsage): void {
 
 function safeFileName(s: string): string {
   return s.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+/**
+ * Extraction/observation caches are model-specific: a gpt-5-mini run must not
+ * reuse gpt-5.5's extracted facts. We key the cache filename on the deployment,
+ * but leave the default "gpt-5.5" bare so pre-existing caches stay valid.
+ */
+const DEFAULT_CACHE_DEPLOYMENT = "gpt-5.5";
+function modelCacheSuffix(deployment: string): string {
+  return deployment === DEFAULT_CACHE_DEPLOYMENT ? "" : `.${safeFileName(deployment)}`;
 }
 
 function tokenize(s: string): Set<string> {
@@ -654,6 +733,243 @@ function parseCombinedExtraction(raw: string): CombinedExtraction {
     facts: salvageObjects(start !== -1 ? s.slice(start) : s),
     observations: salvageObservationObjects(start !== -1 ? s.slice(start) : s),
   };
+}
+
+// --- Contradiction synthesis (consolidation phase 1) ---
+interface RawContradiction {
+  topic?: unknown;
+  statementA?: unknown;
+  dateA?: unknown;
+  statementB?: unknown;
+  dateB?: unknown;
+  entities?: unknown;
+  sourceTurnIds?: unknown;
+}
+
+function buildContradictionSynthesisPrompt(instanceId: string, observations: ExtractedObservation[]): string {
+  const body = observations
+    .map((o) => `- [${o.date ?? "undated"}] (${o.type}/${o.status}) ${o.statement} {turns: ${o.turnIds.join(",") || "?"}}`)
+    .join("\n");
+  return [
+    "You are auditing a user's long-term memory for CONTRADICTIONS: pairs of statements that conflict about the same thing and were never reconciled",
+    '(e.g. "I have never done X" alongside "I did X / I recently did X", or two mutually exclusive values for the same attribute).',
+    "Scan ALL the dated observations below (they span the whole conversation history) and identify every GENUINE unreconciled contradiction.",
+    "",
+    "Return ONLY a JSON array. Each item must be:",
+    '{"topic":"<short topic the two statements conflict about>", "statementA":"<one side, verbatim or close>", "dateA":"<date or empty>", "statementB":"<the conflicting side>", "dateB":"<date or empty>", "entities":["<people/things the conflict is about>"], "sourceTurnIds":["<turn ids from both sides, if known>"]}',
+    "",
+    "Rules:",
+    "- List only real conflicts a user would call inconsistent. Do NOT list normal updates where a value legitimately changed over time.",
+    "- Each contradiction must have two concretely conflicting statements; include the entities so the conflict can be found later.",
+    "- If there are no genuine contradictions, return exactly: []",
+    "- Return ONLY the JSON array, no prose.",
+    "",
+    `Instance: ${instanceId}`,
+    "Observations:",
+    body,
+  ].join("\n");
+}
+
+function formatContradiction(c: { topic: string; statementA: string; dateA: string; statementB: string; dateB: string }): string {
+  const a = `${c.dateA ? `[${c.dateA}] ` : ""}"${c.statementA}"`;
+  const b = `${c.dateB ? `[${c.dateB}] ` : ""}"${c.statementB}"`;
+  return `CONTRADICTION about ${c.topic}: ${a} vs ${b} — these were never reconciled; it is unclear which is correct.`;
+}
+
+function coerceContradiction(item: unknown): DerivedObservation | null {
+  if (!item || typeof item !== "object") return null;
+  const o = item as RawContradiction;
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const statementA = str(o.statementA);
+  const statementB = str(o.statementB);
+  if (!statementA || !statementB) return null;
+  const dateA = str(o.dateA);
+  const dateB = str(o.dateB);
+  const entities = Array.isArray(o.entities)
+    ? o.entities.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim())
+    : [];
+  const sourceTurnIds = Array.isArray(o.sourceTurnIds)
+    ? o.sourceTurnIds.filter((t): t is string => typeof t === "string" && t.trim().length > 0).map((t) => t.trim())
+    : [];
+  const topic = str(o.topic) || entities.join(", ") || "the record";
+  return {
+    kind: "contradiction",
+    statement: formatContradiction({ topic, statementA, dateA, statementB, dateB }),
+    entities,
+    dates: [dateA, dateB].filter(Boolean),
+    sourceTurnIds,
+    confidence: 0.9,
+  };
+}
+
+function parseContradictions(raw: string): DerivedObservation[] {
+  const s = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  if (start !== -1 && end > start) {
+    try {
+      const parsed = JSON.parse(s.slice(start, end + 1)) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.map(coerceContradiction).filter((d): d is DerivedObservation => d !== null);
+      }
+    } catch {
+      // No salvage path; a malformed synthesis simply yields no derived notes this run.
+    }
+  }
+  return [];
+}
+
+// --- Summary synthesis (bet #2): hierarchical summaries as retrievable nodes ---
+function buildSummarySynthesisPrompt(observations: ExtractedObservation[]): string {
+  const body = observations
+    .map((o) => `- [${o.date ?? "undated"}] ${o.statement}`)
+    .join("\n");
+  return [
+    "You are writing SUMMARY notes for a long conversation's long-term memory, so future 'summarize X' questions can be answered from a synthesized overview instead of scattered fragments.",
+    "From the observations below (spanning the whole history), produce summary notes covering the major topics/themes/projects/threads, PLUS one overall summary.",
+    "",
+    "Return ONLY a JSON array. Each item:",
+    '{"topic":"<short topic label, or \\"Overall\\" for the whole-conversation summary>", "entities":["<key entities>"], "summary":"<a thorough, self-contained summary of everything about this topic across the entire history — names, numbers, decisions, changes over time>"}',
+    "",
+    "Rules:",
+    "- Produce one \"Overall\" summary plus 3-8 topic summaries.",
+    "- Be comprehensive and specific; a good summary reflects the full breadth of the history.",
+    "- Use ONLY the observations; do not invent.",
+    "- Return ONLY the JSON array, no prose.",
+    "",
+    "Observations:",
+    body,
+  ].join("\n");
+}
+
+function parseSummaries(raw: string): SummaryNote[] {
+  const s = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  if (start === -1 || end <= start) return [];
+  try {
+    const parsed = JSON.parse(s.slice(start, end + 1)) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item): SummaryNote | null => {
+        if (!item || typeof item !== "object") return null;
+        const o = item as { topic?: unknown; summary?: unknown; entities?: unknown };
+        const topic = typeof o.topic === "string" ? o.topic.trim() : "";
+        const summary = typeof o.summary === "string" ? o.summary.trim() : "";
+        if (!summary) return null;
+        const entities = Array.isArray(o.entities)
+          ? o.entities.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim())
+          : [];
+        return { topic: topic || "Overall", summary, entities };
+      })
+      .filter((x): x is SummaryNote => x !== null);
+  } catch {
+    return [];
+  }
+}
+
+// --- LLM reranker (Exabase-style precision stage): reorder retrieved candidates by relevance ---
+function buildRerankPrompt(query: string, candidates: { text: string }[]): string {
+  const list = candidates.map((c, i) => `[${i}] ${c.text.replace(/\s+/g, " ").slice(0, 400)}`).join("\n");
+  return [
+    "You are reranking retrieved memory notes by how useful each is for answering a question.",
+    "Given the question and the numbered notes, return the note numbers ordered from MOST to LEAST useful for answering it.",
+    "Prefer notes that directly contain the answer or the evidence needed. Drop clearly irrelevant notes.",
+    "If — and ONLY if — you are confident that NONE of the notes contain information relevant to answering the question, return an empty array [].",
+    "Otherwise return ONLY a JSON array of note numbers (most useful first), e.g. [3,0,7].",
+    "",
+    `Question: ${query}`,
+    "Notes:",
+    list,
+    "",
+    "Ranked note numbers (JSON array):",
+  ].join("\n");
+}
+
+/** Returns ordered indices; [] = reranker judged NO note relevant (abstain signal); null = unparseable. */
+function parseRerankOrder(raw: string, n: number): number[] | null {
+  const s = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  if (start === -1 || end <= start) return null;
+  try {
+    const arr = JSON.parse(s.slice(start, end + 1)) as unknown;
+    if (!Array.isArray(arr)) return null;
+    const seen = new Set<number>();
+    const out: number[] = [];
+    for (const x of arr) {
+      const i = Math.trunc(Number(x));
+      if (Number.isInteger(i) && i >= 0 && i < n && !seen.has(i)) {
+        seen.add(i);
+        out.push(i);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// --- Query decomposition (Exabase-style multi-query retrieval) ---
+function buildDecomposePrompt(question: string): string {
+  return [
+    "You are decomposing a question about a user into focused sub-queries for memory retrieval.",
+    "If answering requires information about MULTIPLE distinct things — different entities, time periods, events, or aspects — break it into 2-4 focused sub-queries, each retrieving ONE piece of the needed evidence.",
+    "If the question asks about a single thing, return just that one query.",
+    "Each sub-query should be a short, self-contained retrieval query (not a yes/no or the final answer).",
+    "Return ONLY a JSON array of sub-query strings, no prose.",
+    "",
+    `Question: ${question}`,
+    "Sub-queries:",
+  ].join("\n");
+}
+
+function parseSubQueries(raw: string, max = 4): string[] {
+  const s = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  if (start !== -1 && end > start) {
+    try {
+      const parsed = JSON.parse(s.slice(start, end + 1)) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim()).slice(0, max);
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return [];
+}
+
+// --- Query-adaptive retrieval helpers ---
+function isTimelineIntent(category?: string): boolean {
+  return category === "temporal_reasoning" || category === "event_ordering";
+}
+
+/** Best-effort parse of an observation date string to a sortable epoch, or null. */
+function parseObsDate(s?: string): number | null {
+  if (!s) return null;
+  const m = s.match(/(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})/);
+  if (m) return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : t;
+}
+
+/** Assemble a chronological timeline from dated observations (query-adaptive context for temporal/ordering questions). */
+function buildTimelineBlock(observations: ExtractedObservation[], maxChars = 15000): string {
+  const dated = observations
+    .map((o) => ({ o, t: parseObsDate(o.date) }))
+    .filter((x): x is { o: ExtractedObservation; t: number } => x.t !== null)
+    .sort((a, b) => a.t - b.t);
+  if (dated.length === 0) return "";
+  let block =
+    "CHRONOLOGICAL TIMELINE (observations sorted by date; use this to establish the order of events and to compute elapsed time):\n";
+  for (const { o } of dated) {
+    const line = `- [${o.date}] ${o.statement}\n`;
+    if (block.length + line.length > maxChars) break;
+    block += line;
+  }
+  return block.trim();
 }
 
 async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -1178,6 +1494,12 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
     private readonly toolExecutor: MemoryToolExecutor | null,
     private readonly maxToolQueries: number,
     private readonly maxToolResults: number,
+    private readonly buildAnswerPrompt: (
+      question: string,
+      questionDate: string | undefined,
+      excerpts: { ref?: string; text: string }[],
+      questionCategory?: string,
+    ) => string = buildLongMemEvalAnswerPrompt,
   ) {}
 
   async execute(prompt: string, options: AgentDelegateOptions): Promise<{ success: boolean; output: string }> {
@@ -1197,7 +1519,7 @@ class LongMemEvalLiveDelegate implements AgentDelegate {
       "Use the injected context and any tool results as your only source of past-memory evidence.",
       "The context may contain KnowledgeBank notes, raw imported turns, extracted facts, and ExperienceMemory excerpts.",
       "",
-      buildLongMemEvalAnswerPrompt(this.question.question, this.question.date, excerpts, this.question.category),
+      this.buildAnswerPrompt(this.question.question, this.question.date, excerpts, this.question.category),
     ].join("\n");
     const res = await this.llm.chat([{ role: "user", content: finalPrompt }]);
     addLlmUsage(this.usage, res.usage);
@@ -1322,7 +1644,7 @@ export class CogcoreLongMemEvalAdapter {
   }
 
   private cachePath(instanceId: string): string {
-    return path.join(this.cacheDir, `${safeFileName(instanceId)}.json`);
+    return path.join(this.cacheDir, `${safeFileName(instanceId)}${modelCacheSuffix(this.llm.deployment)}.json`);
   }
 
   private async loadCache(instanceId: string): Promise<ExtractedFact[] | null> {
@@ -1710,6 +2032,12 @@ export class CogcoreLiveLongMemEvalAdapter {
   private readonly liveToolQueries: number;
   private readonly liveToolPolicy: LiveToolPolicy;
   private readonly liveToolResults: number;
+  private readonly answerPromptOverride?: (
+    question: string,
+    questionDate: string | undefined,
+    excerpts: { ref?: string; text: string }[],
+    questionCategory?: string,
+  ) => string;
   private readonly memoryProfile: CogcoreMemoryProfile;
   private readonly observationMemory: ObservationMemoryMode;
   private readonly observationCacheDir: string;
@@ -1718,6 +2046,23 @@ export class CogcoreLiveLongMemEvalAdapter {
   private readonly observationLogMaxChars: number;
   private readonly observationMaxPerChunk: number;
   private readonly observationSlots: number;
+  private readonly consolidation: ConsolidationMode;
+  private readonly consolidationLlm: LlmClient;
+  private readonly consolidationCacheDir: string;
+  private readonly queryAdaptive: "off" | "on";
+  private readonly retrieval: "kb" | "minimem-graph";
+  private readonly minimemTraverse: boolean;
+  private readonly queryDecompose: boolean;
+  private readonly queryDecomposeLlm: LlmClient;
+  private readonly graphSummaries: boolean;
+  private readonly graphSummaryLlm: LlmClient;
+  private readonly answerLlm: LlmClient;
+  private readonly rerank: "off" | "llm";
+  private readonly rerankLlm: LlmClient;
+  private readonly rerankPoolSize: number;
+  private readonly minimemEmbeddingModel?: string;
+  private readonly minimemGraphDir: string;
+  private minimemStore: MinimemGraphStore | null = null;
   private readonly onProgress?: (message: string) => void;
   private atlas: Atlas | null = null;
   private state: CogcoreState | null = null;
@@ -1727,6 +2072,7 @@ export class CogcoreLiveLongMemEvalAdapter {
   private lastScopedKnowledge: KnowledgeMatch[] = [];
   private lastObservationKnowledge: KnowledgeMatch[] = [];
   private lastObservationLogContext = "";
+  private lastObservations: ExtractedObservation[] = [];
   private lastFormattedKnowledge = "";
   private lastInjectedExperienceCount = 0;
   private lastInjectedPlaybookCount = 0;
@@ -1751,6 +2097,7 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.liveToolQueries = opts.liveToolQueries ?? 2;
     this.liveToolPolicy = opts.liveToolPolicy ?? "auto";
     this.liveToolResults = opts.liveToolResults ?? Math.min(8, this.topK);
+    this.answerPromptOverride = opts.answerPromptOverride;
     this.memoryProfile = opts.memoryProfile ?? "long-memory";
     this.observationMemory = opts.observationMemory ?? "off";
     this.observationCacheDir = opts.observationCacheDir ?? path.resolve("evals/longmemeval/.cache/cogcore-observations");
@@ -1759,6 +2106,22 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.observationLogMaxChars = opts.observationLogMaxChars ?? DEFAULT_OBSERVATION_LOG_MAX_CHARS;
     this.observationMaxPerChunk = opts.observationMaxPerChunk ?? DEFAULT_OBSERVATION_MAX_PER_CHUNK;
     this.observationSlots = opts.observationSlots ?? DEFAULT_OBSERVATION_SLOTS;
+    this.consolidation = opts.consolidation ?? "off";
+    this.consolidationLlm = opts.consolidationLlm ?? this.llm;
+    this.consolidationCacheDir = opts.consolidationCacheDir ?? path.resolve("evals/longmemeval/.cache/cogcore-derived");
+    this.queryAdaptive = opts.queryAdaptive ?? "off";
+    this.retrieval = opts.retrieval ?? "kb";
+    this.minimemTraverse = opts.minimemTraverse ?? false;
+    this.queryDecompose = opts.queryDecompose ?? false;
+    this.queryDecomposeLlm = opts.queryDecomposeLlm ?? this.llm;
+    this.graphSummaries = opts.graphSummaries ?? false;
+    this.graphSummaryLlm = opts.graphSummaryLlm ?? this.llm;
+    this.answerLlm = opts.answerLlm ?? this.llm;
+    this.rerank = opts.rerank ?? "off";
+    this.rerankLlm = opts.rerankLlm ?? this.llm;
+    this.rerankPoolSize = opts.rerankPoolSize ?? 24;
+    this.minimemEmbeddingModel = opts.minimemEmbeddingModel;
+    this.minimemGraphDir = opts.minimemGraphDir ?? path.resolve("evals/longmemeval/.cache/minimem-graph");
     this.onProgress = opts.onProgress;
   }
 
@@ -1768,12 +2131,15 @@ export class CogcoreLiveLongMemEvalAdapter {
   }
 
   private cachePath(instanceId: string): string {
-    return path.join(this.cacheDir, `${safeFileName(instanceId)}.json`);
+    return path.join(this.cacheDir, `${safeFileName(instanceId)}${modelCacheSuffix(this.llm.deployment)}.json`);
   }
 
   private observationCachePath(instanceId: string): string {
     const sourceSuffix = this.observationSource === "chunks" ? "" : `.${this.observationSource}`;
-    return path.join(this.observationCacheDir, `${safeFileName(instanceId)}${sourceSuffix}.json`);
+    return path.join(
+      this.observationCacheDir,
+      `${safeFileName(instanceId)}${sourceSuffix}${modelCacheSuffix(this.llm.deployment)}.json`,
+    );
   }
 
   private async loadCache(instanceId: string): Promise<ExtractedFact[] | null> {
@@ -2060,6 +2426,101 @@ export class CogcoreLiveLongMemEvalAdapter {
     return n;
   }
 
+  private consolidationKinds(): DerivedKind[] {
+    return this.consolidation === "contradiction" ? ["contradiction"] : [];
+  }
+
+  private derivedCachePath(instanceId: string): string {
+    return path.join(
+      this.consolidationCacheDir,
+      `${safeFileName(instanceId)}.${this.consolidation}${modelCacheSuffix(this.consolidationLlm.deployment)}.json`,
+    );
+  }
+
+  private async loadDerivedCache(instanceId: string): Promise<DerivedObservation[] | null> {
+    if (!this.cache || this.consolidation === "off") return null;
+    try {
+      const parsed = JSON.parse(await fs.readFile(this.derivedCachePath(instanceId), "utf-8")) as DerivedCache;
+      if (
+        parsed.version === COGCORE_DERIVED_CACHE_VERSION &&
+        parsed.instanceId === instanceId &&
+        (parsed.kinds ?? []).join(",") === this.consolidationKinds().join(",")
+      ) {
+        return parsed.derived;
+      }
+    } catch {
+      // Cache miss.
+    }
+    return null;
+  }
+
+  private async saveDerivedCache(instanceId: string, derived: DerivedObservation[]): Promise<void> {
+    if (!this.cache || this.consolidation === "off") return;
+    const payload: DerivedCache = {
+      version: COGCORE_DERIVED_CACHE_VERSION,
+      instanceId,
+      kinds: this.consolidationKinds(),
+      derived,
+    };
+    await fs.mkdir(this.consolidationCacheDir, { recursive: true });
+    await fs.writeFile(this.derivedCachePath(instanceId), JSON.stringify(payload), "utf-8");
+  }
+
+  /**
+   * Cross-chunk consolidation (synthesis): read ALL of a conversation's
+   * observations and derive higher-order memory items — contradictions first —
+   * that flat chunk-local retrieval never connects. Cached per instance.
+   */
+  private async consolidate(
+    instance: MemQAInstance,
+    observations: ExtractedObservation[],
+    usage: UsageAccumulator,
+  ): Promise<DerivedObservation[]> {
+    if (this.consolidation === "off" || observations.length === 0) return [];
+    const cached = await this.loadDerivedCache(instance.id);
+    if (cached) {
+      this.onProgress?.(`derived cache hit for ${instance.id}: ${cached.length} notes`);
+      return cached;
+    }
+    const derived: DerivedObservation[] = [];
+    if (this.consolidation === "contradiction") {
+      let parsed: DerivedObservation[] = [];
+      for (let attempt = 0; attempt <= DERIVED_EMPTY_RETRIES; attempt++) {
+        const res = await this.consolidationLlm.chat([
+          { role: "user", content: buildContradictionSynthesisPrompt(instance.id, observations) },
+        ]);
+        addUsage(usage, res.usage);
+        parsed = parseContradictions(res.text);
+        if (parsed.length > 0) break;
+      }
+      derived.push(...parsed);
+    }
+    await this.saveDerivedCache(instance.id, derived);
+    this.onProgress?.(`consolidated ${derived.length} derived notes for ${instance.id} (${this.consolidation})`);
+    return derived;
+  }
+
+  private async addDerivedKnowledge(instance: MemQAInstance, derived: DerivedObservation[]): Promise<number> {
+    if (!this.state || derived.length === 0) return 0;
+    let n = 0;
+    for (const d of derived) {
+      await this.state.kb.addObservation(
+        createObservation({
+          id: `d-${String(n).padStart(6, "0")}`,
+          title: `derived-${d.kind}-${String(n).padStart(6, "0")}`,
+          body: d.statement,
+          domain: [instance.id],
+          entities: d.entities,
+          tags: ["derived", `derived-${d.kind}`, ...d.sourceTurnIds.map((t) => `turn-${safeFileName(t)}`)],
+          confidence: d.confidence,
+          source: { origin: "extracted" },
+        }),
+      );
+      n++;
+    }
+    return n;
+  }
+
   private async scopedInjectedMemory(question: MemQuestion): Promise<MemoryQueryResultV2> {
     if (!this.atlas || !this.currentInstanceId || !this.state) throw new Error("ingest() must run before answer()");
     const base = await this.atlas.queryMemory(question.question, {
@@ -2244,15 +2705,36 @@ export class CogcoreLiveLongMemEvalAdapter {
     const observationsToWrite = useCombinedObservations
       ? (observations ?? [])
       : await this.loadOrExtractObservations(instance, usage);
+    this.lastObservations = observationsToWrite;
+    if (this.retrieval === "minimem-graph") {
+      const summaries = this.graphSummaries
+        ? await this.synthesizeSummaries(instance, observationsToWrite, usage)
+        : [];
+      this.minimemStore = await MinimemGraphStore.build(observationsToWrite as GraphObservation[], {
+        memoryDir: path.join(this.minimemGraphDir, safeFileName(instance.id)),
+        instanceId: instance.id,
+        embedding: this.minimemEmbeddingModel
+          ? { provider: "local", local: { modelPath: this.minimemEmbeddingModel } }
+          : { provider: "local" },
+        topK: this.topK,
+        traverse: this.minimemTraverse,
+        summaries,
+      });
+      this.onProgress?.(
+        `minimem-graph store built for ${instance.id} (${observationsToWrite.length} notes, ${summaries.length} summaries)`,
+      );
+    }
     this.lastObservationLogContext =
       this.observationMemory === "kb" && this.observationContext !== "retrieved"
         ? formatObservationLogContext(observationsToWrite, this.observationLogMaxChars)
         : "";
     const observationCount = await this.addObservationKnowledge(instance, observationsToWrite);
+    const derived = await this.consolidate(instance, observationsToWrite, usage);
+    const derivedCount = await this.addDerivedKnowledge(instance, derived);
     const sessionCount = await this.addSessionExperiences(instance);
     this.onProgress?.(
       `indexing ${facts.length} extracted facts + raw turns + ${observationCount} observations + ` +
-        `${sessionCount} ${this.experienceGranularity} experiences for ${instance.id}`,
+        `${derivedCount} derived + ${sessionCount} ${this.experienceGranularity} experiences for ${instance.id}`,
     );
     await state.kb.defragment();
     await indexAndInject(state, this.embeddings, this.topK, this.keywordHook(), this.mmr);
@@ -2280,6 +2762,7 @@ export class CogcoreLiveLongMemEvalAdapter {
 
   async answer(question: MemQuestion): Promise<AnswerResult> {
     if (!this.atlas || !this.state || !this.currentInstanceId) throw new Error("ingest() must run before answer()");
+    if (this.retrieval === "minimem-graph") return this.answerViaMinimemGraph(question);
     this.lastInjectedMemory = undefined;
     this.lastScopedKnowledge = [];
     this.lastObservationKnowledge = [];
@@ -2293,10 +2776,19 @@ export class CogcoreLiveLongMemEvalAdapter {
       this.toolExecutor,
       effectiveLiveToolQueries,
       this.liveToolResults,
+      this.answerPromptOverride ?? buildLongMemEvalAnswerPrompt,
     );
     this.atlas.setDelegate(delegate);
     const injectedKnowledge = await this.scopedInjectedMemory(question);
-    const systemPromptAdditions = this.scopedSystemPromptAdditions();
+    let systemPromptAdditions = this.scopedSystemPromptAdditions();
+    // Query-adaptive retrieval: for temporal/ordering questions, prepend an explicit
+    // chronological timeline assembled from the observations (a strategy-specific context
+    // that a flat top-K pile does not provide). Summarization intent is handled by the
+    // answer-prompt override (its broad context is already injected).
+    if (this.queryAdaptive === "on" && isTimelineIntent(question.category)) {
+      const timeline = buildTimelineBlock(this.lastObservations);
+      if (timeline) systemPromptAdditions = systemPromptAdditions ? `${timeline}\n\n${systemPromptAdditions}` : timeline;
+    }
     this.atlas.getAgentManager()?.setDiagnosticsCollector((diag) => {
       this.lastInjectedMemory = diag.knowledge;
       this.lastFormattedKnowledge = diag.formattedKnowledge;
@@ -2387,10 +2879,122 @@ export class CogcoreLiveLongMemEvalAdapter {
     };
   }
 
+  /**
+   * Structural-retrieval answer path (Stage 0): retrieve from minimem's own graph
+   * store (hybrid search; Stage 1 adds seed-then-traverse) and answer directly with the
+   * same answer prompt. Isolates the retrieval swap — flat KB vs minimem-graph.
+   */
+  private summaryCachePath(instanceId: string): string {
+    return path.join(
+      this.minimemGraphDir,
+      `${safeFileName(instanceId)}.summaries${modelCacheSuffix(this.graphSummaryLlm.deployment)}.json`,
+    );
+  }
+
+  /** Bet #2: synthesize hierarchical summaries from all observations (cached per instance). */
+  private async synthesizeSummaries(
+    instance: MemQAInstance,
+    observations: ExtractedObservation[],
+    usage: UsageAccumulator,
+  ): Promise<SummaryNote[]> {
+    if (observations.length === 0) return [];
+    if (this.cache) {
+      try {
+        const cached = JSON.parse(await fs.readFile(this.summaryCachePath(instance.id), "utf-8")) as SummaryNote[];
+        if (Array.isArray(cached)) {
+          this.onProgress?.(`summary cache hit for ${instance.id}: ${cached.length} summaries`);
+          return cached;
+        }
+      } catch {
+        // Cache miss.
+      }
+    }
+    let summaries: SummaryNote[] = [];
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      const res = await this.graphSummaryLlm.chat([{ role: "user", content: buildSummarySynthesisPrompt(observations) }]);
+      addUsage(usage, res.usage);
+      summaries = parseSummaries(res.text);
+      if (summaries.length > 0) break;
+    }
+    if (this.cache) {
+      await fs.mkdir(this.minimemGraphDir, { recursive: true });
+      await fs.writeFile(this.summaryCachePath(instance.id), JSON.stringify(summaries), "utf-8");
+    }
+    return summaries;
+  }
+
+  /** Query decomposition: split into sub-queries, always keeping the original. */
+  private async decomposeQuery(question: string): Promise<string[]> {
+    let subs: string[] = [];
+    try {
+      const res = await this.queryDecomposeLlm.chat([{ role: "user", content: buildDecomposePrompt(question) }]);
+      subs = parseSubQueries(res.text);
+    } catch {
+      subs = [];
+    }
+    return [question, ...subs.filter((s) => s.toLowerCase() !== question.toLowerCase())].slice(0, 5);
+  }
+
+  /** LLM reranker: reorder retrieved candidates by relevance, keep topK. Falls back to input order on parse failure. */
+  private async rerankHits(query: string, hits: GraphExcerpt[]): Promise<GraphExcerpt[]> {
+    if (hits.length <= 1) return hits.slice(0, this.topK);
+    let order: number[] | null = null;
+    try {
+      const res = await this.rerankLlm.chat([{ role: "user", content: buildRerankPrompt(query, hits) }]);
+      order = parseRerankOrder(res.text, hits.length);
+    } catch {
+      order = null;
+    }
+    if (order === null) return hits.slice(0, this.topK); // parse failure → keep retrieval order
+    if (order.length === 0) {
+      // Abstention guard: reranker judged NO note relevant → surface a not-found marker so the model abstains.
+      return [{ ref: "no-relevant-notes", text: "No clearly relevant memory notes were found for this question.", score: 0, epoch: null }];
+    }
+    const reranked = order.map((i) => hits[i]);
+    // Append any candidates the reranker dropped, so we never fall below topK on recall.
+    const included = new Set(order);
+    for (let i = 0; i < hits.length; i++) if (!included.has(i)) reranked.push(hits[i]);
+    return reranked.slice(0, this.topK);
+  }
+
+  private async answerViaMinimemGraph(question: MemQuestion): Promise<AnswerResult> {
+    if (!this.minimemStore) throw new Error("minimem-graph store not built");
+    // With reranking on, retrieve a larger candidate pool, then LLM-rerank down to topK.
+    const pool = this.rerank === "llm" ? Math.max(this.rerankPoolSize, this.topK) : this.topK;
+    let hits = this.queryDecompose
+      ? await this.minimemStore.retrieveMany(await this.decomposeQuery(question.question), pool, pool)
+      : await this.minimemStore.retrieve(question.question, pool);
+    if (this.rerank === "llm") hits = await this.rerankHits(question.question, hits.slice(0, pool));
+    // Temporal/ordering intent: present the graph-retrieved (query-relevant) notes in
+    // chronological order — far stronger at scale than a globally-truncated timeline, since
+    // the retrieved set already contains the relevant events and sorting makes order explicit.
+    const timelineMode = this.queryAdaptive === "on" && isTimelineIntent(question.category);
+    const ordered = timelineMode
+      ? [...hits].sort((a, b) => (a.epoch ?? Number.POSITIVE_INFINITY) - (b.epoch ?? Number.POSITIVE_INFINITY))
+      : hits;
+    const excerpts: { ref?: string; text: string }[] = ordered.map((h) => ({ ref: h.ref, text: h.text }));
+    const buildPrompt = this.answerPromptOverride ?? buildLongMemEvalAnswerPrompt;
+    const prompt = buildPrompt(question.question, question.date, excerpts, question.category);
+    const res = await this.answerLlm.chat([{ role: "user", content: prompt }]);
+    const usage = zeroUsage();
+    addLlmUsage(usage, res.usage);
+    const retrieved: RetrievedExcerpt[] = hits.map((h, i) => ({
+      ref: h.ref,
+      text: h.text,
+      channel: "knowledge",
+      sourceRank: i + 1,
+      sourceScore: h.score,
+      selectedBy: "minimem-graph",
+    }));
+    return { answer: res.text.trim(), usage, retrieved };
+  }
+
   async close(): Promise<void> {
     const state = this.state;
     this.state = null;
     this.toolExecutor = null;
+    await this.minimemStore?.close();
+    this.minimemStore = null;
     this.lastInjectedMemory = undefined;
     this.lastScopedKnowledge = [];
     this.lastObservationKnowledge = [];

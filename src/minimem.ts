@@ -142,6 +142,15 @@ export type MinimemConfig = {
     /** Min score threshold (default: 0.3) */
     minScore?: number;
   };
+  /** Knowledge-graph configuration (additive; all behavior off by default). */
+  graph?: {
+    /** Auto-derive entity co-occurrence edges at sync time (default false). */
+    autoEntityLinks?: boolean;
+    /** Skip entities appearing in more than this many notes (noise hubs). Default 24. */
+    maxEntityFanout?: number;
+    /** Cap co-entity edges added per note. Default 16. */
+    maxLinksPerNote?: number;
+  };
   /** File watching configuration */
   watch?: {
     /** Enable file watching (default: true) */
@@ -201,6 +210,11 @@ export class Minimem {
     rrfK: number;
   };
   private readonly queryConfig: { maxResults: number; minScore: number };
+  private readonly graphConfig: {
+    autoEntityLinks: boolean;
+    maxEntityFanout: number;
+    maxLinksPerNote: number;
+  };
   private readonly watchConfig: { enabled: boolean; debounceMs: number };
   private readonly batchConfig: {
     enabled: boolean;
@@ -268,6 +282,11 @@ export class Minimem {
     this.queryConfig = {
       maxResults: config.query?.maxResults ?? 10,
       minScore: config.query?.minScore ?? 0.3,
+    };
+    this.graphConfig = {
+      autoEntityLinks: config.graph?.autoEntityLinks ?? false,
+      maxEntityFanout: config.graph?.maxEntityFanout ?? 24,
+      maxLinksPerNote: config.graph?.maxLinksPerNote ?? 16,
     };
     this.watchConfig = {
       enabled: config.watch?.enabled ?? true,
@@ -457,9 +476,84 @@ export class Minimem {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; type?: string; skipStaleCheck?: boolean },
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      type?: string;
+      skipStaleCheck?: boolean;
+      /** Expand seed results by `graphExpand` hops through knowledge_links (default 0 = off). */
+      graphExpand?: number;
+    },
   ): Promise<MinimemSearchResult[]> {
-    return this.searchWithFilter(query, opts, { sql: "", params: [] });
+    const seeds = await this.searchWithFilter(query, opts, { sql: "", params: [] });
+    const graphExpand = opts?.graphExpand ?? 0;
+    if (graphExpand <= 0) return seeds;
+    return this.expandWithGraph(seeds, graphExpand, opts?.maxResults ?? this.queryConfig.maxResults);
+  }
+
+  /**
+   * Graph-aware expansion: for each seed with a knowledge_id, traverse
+   * `knowledge_links` up to `depth` hops and append representative chunks for
+   * neighbor notes not already among the seeds. Seeds are returned first (their
+   * scores untouched); neighbors get a small score just below the lowest seed.
+   * Result is deduped by path and capped at `maxResults` seeds + `maxResults`
+   * expansion slots.
+   */
+  private expandWithGraph(
+    seeds: MinimemSearchResult[],
+    depth: number,
+    maxResults: number,
+  ): MinimemSearchResult[] {
+    if (seeds.length === 0) return seeds;
+
+    // Resolve each seed's knowledge_id (traversal root). The public result type
+    // has no knowledge_id, so look it up by path rather than widen the type.
+    const seedKnowledgeIds = new Set<string>();
+    const roots: string[] = [];
+    for (const seed of seeds) {
+      const row = this.db
+        .prepare(`SELECT knowledge_id FROM chunks WHERE path = ? AND knowledge_id IS NOT NULL LIMIT 1`)
+        .get(seed.path) as { knowledge_id: string } | undefined;
+      if (row?.knowledge_id && !seedKnowledgeIds.has(row.knowledge_id)) {
+        seedKnowledgeIds.add(row.knowledge_id);
+        roots.push(row.knowledge_id);
+      }
+    }
+    if (roots.length === 0) return seeds;
+
+    const lowestSeed = seeds.reduce((min, r) => Math.min(min, r.score), seeds[0].score);
+    const neighborScore = lowestSeed > 0 ? lowestSeed * 0.5 : 0.1;
+
+    const budget = maxResults + maxResults; // seeds + equal expansion budget
+    const seenPaths = new Set(seeds.map((r) => r.path));
+    const addedIds = new Set<string>();
+    const expanded: MinimemSearchResult[] = [...seeds];
+
+    for (const rootId of roots) {
+      if (expanded.length >= budget) break;
+      const neighbors = getNeighbors(this.db, rootId, depth);
+      for (const neighbor of neighbors) {
+        if (expanded.length >= budget) break;
+        if (seedKnowledgeIds.has(neighbor.id) || addedIds.has(neighbor.id)) continue;
+        const chunk = this.db
+          .prepare(`SELECT path, start_line, end_line, text FROM chunks WHERE knowledge_id = ? LIMIT 1`)
+          .get(neighbor.id) as
+          | { path: string; start_line: number; end_line: number; text: string }
+          | undefined;
+        if (!chunk || seenPaths.has(chunk.path)) continue;
+        seenPaths.add(chunk.path);
+        addedIds.add(neighbor.id);
+        expanded.push({
+          path: chunk.path,
+          startLine: chunk.start_line,
+          endLine: chunk.end_line,
+          score: neighborScore,
+          snippet: chunk.text.slice(0, SNIPPET_MAX_CHARS),
+        });
+      }
+    }
+
+    return expanded;
   }
 
   /**
@@ -711,8 +805,88 @@ export class Minimem {
     // Prune embedding cache
     this.pruneEmbeddingCacheIfNeeded();
 
+    // Auto-derive entity co-occurrence edges (opt-in; leaves frontmatter links untouched).
+    if (this.graphConfig.autoEntityLinks) this.rebuildAutoEntityLinks();
+
     this.dirty = false;
     this.debug?.(`memory sync complete`, { files: files.length });
+  }
+
+  /**
+   * Rebuild the auto-derived entity co-occurrence graph.
+   *
+   * Connects knowledge notes that share an entity with a `co-entity`/`entity`
+   * edge (weight 0.5, `source_path = 'auto:entity'`). Only auto edges are cleared
+   * and rebuilt each run — frontmatter-authored links (any other `source_path`)
+   * are never touched. Entities appearing in more than `maxEntityFanout` notes are
+   * treated as noise hubs and skipped, and each note gains at most `maxLinksPerNote`
+   * auto edges per build.
+   */
+  private rebuildAutoEntityLinks(): void {
+    // Clear prior auto edges so a re-sync rebuilds cleanly.
+    this.db.prepare(`DELETE FROM knowledge_links WHERE source_path = ?`).run("auto:entity");
+
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT knowledge_id, entities FROM chunks
+         WHERE knowledge_id IS NOT NULL AND entities IS NOT NULL`,
+      )
+      .all() as Array<{ knowledge_id: string; entities: string }>;
+
+    // Map each entity -> the set of knowledge ids that reference it.
+    const idsByEntity = new Map<string, Set<string>>();
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.entities);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(parsed)) continue;
+      for (const raw of parsed) {
+        if (typeof raw !== "string") continue;
+        const entity = raw.trim();
+        if (!entity) continue;
+        let set = idsByEntity.get(entity);
+        if (!set) {
+          set = new Set<string>();
+          idsByEntity.set(entity, set);
+        }
+        set.add(row.knowledge_id);
+      }
+    }
+
+    const now = Date.now();
+    // Per-id auto-edge counter for this build, to bound fan-out per note.
+    const autoEdgeCount = new Map<string, number>();
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO knowledge_links (from_id, to_id, relation, layer, weight, source_path, created_at)
+       VALUES (?, ?, 'co-entity', 'entity', 0.5, 'auto:entity', ?)`,
+    );
+
+    for (const [entity, idSet] of idsByEntity) {
+      if (idSet.size < 2) continue;
+      if (idSet.size > this.graphConfig.maxEntityFanout) {
+        this.debug?.(
+          `auto-entity: skipping hub entity "${entity}" (${idSet.size} notes > maxEntityFanout ${this.graphConfig.maxEntityFanout})`,
+        );
+        continue;
+      }
+      // Sorted ids so we only emit edges (a, b) with a < b (string compare).
+      const ids = [...idSet].sort();
+      for (let i = 0; i < ids.length; i++) {
+        const a = ids[i];
+        if ((autoEdgeCount.get(a) ?? 0) >= this.graphConfig.maxLinksPerNote) continue;
+        for (let j = i + 1; j < ids.length; j++) {
+          const b = ids[j];
+          if ((autoEdgeCount.get(a) ?? 0) >= this.graphConfig.maxLinksPerNote) break;
+          if ((autoEdgeCount.get(b) ?? 0) >= this.graphConfig.maxLinksPerNote) continue;
+          insert.run(a, b, now);
+          autoEdgeCount.set(a, (autoEdgeCount.get(a) ?? 0) + 1);
+          autoEdgeCount.set(b, (autoEdgeCount.get(b) ?? 0) + 1);
+        }
+      }
+    }
   }
 
   private async indexFile(entry: MemoryFileEntry): Promise<void> {

@@ -7,6 +7,9 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   getLinksFrom,
@@ -14,6 +17,9 @@ import {
   getNeighbors,
   getPathBetween,
 } from "../search/graph.js";
+import { Minimem } from "../minimem.js";
+import { serializeFrontmatter, type MemoryFrontmatter } from "../session.js";
+import { createMockFetch } from "./helpers.js";
 
 describe("Knowledge graph", () => {
   let db: DatabaseSync;
@@ -144,5 +150,132 @@ describe("Knowledge graph", () => {
     clearLinks();
     const path = getPathBetween(db, "A", "A");
     assert.deepStrictEqual(path, []);
+  });
+});
+
+describe("Auto entity-graph (sync-time co-entity edges)", () => {
+  let originalFetch: typeof fetch;
+
+  // Four observation notes: k-a/k-b share entity "prisma", k-c/k-d share "postgres".
+  const NOTES: Array<{ id: string; entities: string[]; body: string }> = [
+    { id: "k-a", entities: ["prisma"], body: "Alpha migration note about the prisma schema." },
+    { id: "k-b", entities: ["prisma"], body: "Beta rollback note about the prisma client." },
+    { id: "k-c", entities: ["postgres"], body: "Gamma tuning note about the postgres planner." },
+    { id: "k-d", entities: ["postgres"], body: "Delta backup note about the postgres cluster." },
+  ];
+
+  async function writeNotes(dir: string): Promise<void> {
+    const notesDir = path.join(dir, "memory");
+    await fs.mkdir(notesDir, { recursive: true });
+    await fs.writeFile(path.join(dir, "MEMORY.md"), "# Memory\n\nIndex of knowledge notes.\n", "utf8");
+    for (const note of NOTES) {
+      const fm: MemoryFrontmatter = {
+        id: note.id,
+        type: "observation",
+        entities: note.entities,
+        confidence: 0.8,
+      };
+      await fs.writeFile(
+        path.join(notesDir, `${note.id}.md`),
+        `${serializeFrontmatter(fm)}\n\n${note.body}\n`,
+        "utf8",
+      );
+    }
+  }
+
+  async function buildStore(prefix: string, graph?: { autoEntityLinks?: boolean }): Promise<{
+    mm: Minimem;
+    dir: string;
+  }> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+    await writeNotes(dir);
+    const mm = await Minimem.create({
+      memoryDir: dir,
+      embedding: { provider: "openai", model: "text-embedding-3-small" },
+      watch: { enabled: false },
+      query: { minScore: 0 },
+      ...(graph ? { graph } : {}),
+    });
+    await mm.sync({ force: true });
+    return { mm, dir };
+  }
+
+  before(() => {
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = createMockFetch() as unknown as typeof fetch;
+    process.env.OPENAI_API_KEY = "test-api-key-for-knowledge-tests";
+  });
+
+  after(() => {
+    globalThis.fetch = originalFetch;
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it("creates co-entity/entity edges (source_path='auto:entity') for shared-entity notes", async () => {
+    const { mm, dir } = await buildStore("minimem-autograph-on-", { autoEntityLinks: true });
+    try {
+      // prisma pair: k-a -> k-b (a < b string compare).
+      const prismaEdges = mm.getLinks("k-a", "from");
+      const prismaEdge = prismaEdges.find((l) => l.toId === "k-b");
+      assert.ok(prismaEdge, "expected an auto edge k-a -> k-b");
+      assert.strictEqual(prismaEdge.relation, "co-entity");
+      assert.strictEqual(prismaEdge.layer, "entity");
+      assert.strictEqual(prismaEdge.sourcePath, "auto:entity");
+      assert.strictEqual(prismaEdge.weight, 0.5);
+
+      // postgres pair: k-c -> k-d.
+      const postgresEdge = mm.getLinks("k-c", "from").find((l) => l.toId === "k-d");
+      assert.ok(postgresEdge, "expected an auto edge k-c -> k-d");
+      assert.strictEqual(postgresEdge.sourcePath, "auto:entity");
+
+      // Cross-entity notes must NOT be connected.
+      const neighborsOfA = mm.getGraphNeighbors("k-a", 2).map((n) => n.id);
+      assert.ok(!neighborsOfA.includes("k-c"), "prisma and postgres notes must not be linked");
+      assert.ok(!neighborsOfA.includes("k-d"), "prisma and postgres notes must not be linked");
+    } finally {
+      await mm.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("graphExpand surfaces a co-entity neighbor that plain search does not", async () => {
+    const { mm, dir } = await buildStore("minimem-autograph-expand-", { autoEntityLinks: true });
+    try {
+      // "alpha" appears only in k-a's body, so it seeds k-a alone.
+      const plain = await mm.search("alpha", { maxResults: 1, minScore: 0 });
+      const expanded = await mm.search("alpha", { maxResults: 1, minScore: 0, graphExpand: 1 });
+
+      const plainHasB = plain.some((r) => r.path.endsWith("k-b.md"));
+      const expandedHasB = expanded.some((r) => r.path.endsWith("k-b.md"));
+
+      assert.ok(plain.some((r) => r.path.endsWith("k-a.md")), "plain search should seed k-a");
+      assert.ok(!plainHasB, "plain search should not surface the co-entity neighbor k-b");
+      assert.ok(expandedHasB, "graphExpand should surface the co-entity neighbor k-b");
+    } finally {
+      await mm.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates no auto edges when autoEntityLinks is off (default)", async () => {
+    const { mm, dir } = await buildStore("minimem-autograph-off-");
+    try {
+      for (const note of NOTES) {
+        const from = mm.getLinks(note.id, "from");
+        const to = mm.getLinks(note.id, "to");
+        const autoEdges = [...from, ...to].filter((l) => l.sourcePath === "auto:entity");
+        assert.strictEqual(autoEdges.length, 0, `expected no auto edges for ${note.id}`);
+      }
+      // graphExpand is a no-op with no edges: same result set as plain search.
+      const plain = await mm.search("alpha", { maxResults: 1, minScore: 0 });
+      const expanded = await mm.search("alpha", { maxResults: 1, minScore: 0, graphExpand: 1 });
+      assert.deepStrictEqual(
+        expanded.map((r) => r.path),
+        plain.map((r) => r.path),
+      );
+    } finally {
+      await mm.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

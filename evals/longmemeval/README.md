@@ -83,14 +83,38 @@ question/gold/evidence-matching extracted facts and evolution actions even when
 the answer is correct. Use `--record-retries N` to retry transient per-question
 failures, and `--retry-errors-from path.jsonl` to rerun only questions that had
 an `error` in a previous details file.
-Memory-profile flags: `--memory-profile standard|long-memory` chooses the
-default bundle before individual flags are applied. `cogcore-live` defaults to
-`long-memory`, which enables chunk ExperienceMemory with hash scoring,
-KnowledgeBank observation memory from the combined extraction pass, retrieved
-observation notes plus a bounded chronological observation log, and adaptive live
-tool use. The default injected observation log cap is 40,000 characters. Use
-`--memory-profile standard` to reproduce the older conservative defaults, or
-override any specific flag below.
+### Pareto frontier profiles
+
+`--memory-profile` chooses a bundle that positions the run on the
+accuracy↔efficiency frontier before individual flags are applied. Each profile
+is a complete point (answer-time channels + `k` + `maxFactsPerChunk` + answer
+model). The frontier collapses from every channel on (accurate, expensive) to a
+single primary mechanism — the stable, cacheable observation log (cheap):
+
+| profile | channels | log cap | live tools | k | answer model | intent |
+|---------|----------|--------:|-----------|--:|--------------|--------|
+| `max-accuracy` | all 5 | 64k | always | 20 | gpt-5.5 | accuracy ceiling |
+| `long-memory` (default) | all 5 | 40k | auto | 16 | gpt-5.5 | validated 93.0% point |
+| `cacheable` | log-primary | 40k | off | 8 | gpt-5.5 | **banked**: cacheable ctx, ~93% (n=60: 93.3%) |
+| `efficient` | log + light retrieval | 24k | off | 8 | gpt-5-mini | cacheable, cheaper |
+| `lean` | **observation log only** | 16k | off | 6 | gpt-5-mini | single primary mechanism |
+| `standard` | retrieved notes only | 80k | auto | 10 | gpt-5.5 | legacy conservative |
+
+`cogcore-live` defaults to `long-memory`. Override any bundled knob with the
+specific flags below (e.g. `--memory-profile lean --k 8`).
+
+Model flags: `--answer-deployment <name>` sets the answer/extraction/tool model
+(profile-driven; e.g. `gpt-5-mini`). `--judge-deployment <name>` sets a separate,
+fixed judge model so every frontier point is scored identically (defaults to the
+answer model; the judge runs on its own client and its tokens are accounted
+apart from answer+extraction). Extraction/observation caches are keyed by model,
+so a `gpt-5-mini` run will not reuse `gpt-5.5` caches (the default `gpt-5.5`
+keeps bare filenames, preserving existing caches).
+
+Cost accounting: every run reports its frontier point — `answer+extract` vs
+`judge` calls/tokens, mean answer-time context chars, mean observation-log chars,
+and mean live-tool calls per question — in the `cost:`/`frontier-point:` lines
+and the `arm-summary` detail record, so a sweep of profiles traces the curve.
 System-arm ExperienceMemory tuning flags: `--experience-granularity session|chunk|turn`,
 `--experience-chunk-turns N`, `--experience-embedding none|hash`,
 `--experience-scope knowledge-sessions|all`, `--experience-pool-size N`,
