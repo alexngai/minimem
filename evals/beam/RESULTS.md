@@ -1,4 +1,4 @@
-# Retrieval results — BEAM + LOCOMO
+# Retrieval results — BEAM + LOCOMO + LongMemEval
 
 **Corrected headline (see "Attribution" below).** Routing memory retrieval through
 **minimem's focused hybrid search** — instead of the cognitive-core
@@ -14,10 +14,17 @@ result is the retrieval *substrate*, not the graph.
 > decomposition below isolates them and corrects the record.
 
 > Judge/scale caveats: BEAM's reference judge is `gpt-4.1-mini`; this harness uses
-> `gpt-4.1`. LOCOMO uses the mem0 "J" correctness judge (`gpt-4.1`). Answer model:
-> `gpt-5.5`. All numbers are same-judge, same-data deltas between arms, not
-> leaderboard-exact absolutes. BEAM cells are majority-of-3; LOCOMO is single-sample
-> over 300 stratified questions.
+> `gpt-4.1`. LongMemEval uses the **official per-question-type rubric judge** (validated
+> to match within 0 flips → the 93.0% is legitimately official-metric). LOCOMO uses the
+> mem0 "J" **LLM-judge** (`gpt-4.1`) — a **vendor convention, not an author-official
+> metric**: original LOCOMO scores token-F1, which every memory system (mem0/Zep/cognee)
+> abandons because it collapses on correct-but-verbose answers. (Sanity check: our
+> judge-correct LOCOMO answers score only ~10% raw token-F1 — gold is a 2–4 word span,
+> our answer is a correct 40-word response with evidence — so raw F1 measures formatting,
+> not correctness. The 79.3% is directly comparable to how competitors report; it is not
+> "official-F1.") Answer model: `gpt-5.5`. All numbers are same-judge, same-data deltas
+> between arms, not leaderboard-exact absolutes. BEAM cells are majority-of-3; LOCOMO is
+> single-sample over 300 stratified questions.
 
 ## Peak scores
 
@@ -34,8 +41,41 @@ per-benchmark config/judge caveats below.
 Answer model gpt-5.5 throughout. **LongMemEval is a full-benchmark run** (500 questions,
 the most rigorous — validated across three judges); LOCOMO and BEAM are representative
 subsets. Absolute numbers are same-family-judge, not leaderboard-exact (the leaders use
-gpt-4.1-mini). The LongMemEval peak is the cogcore-live arm; BEAM/LOCOMO peaks are the
-minimem-graph arm (the substrate finding below is what earns the BEAM/LOCOMO numbers).
+gpt-4.1-mini). The LongMemEval peak is the **full cogcore-live pipeline** (retrieval +
+live search tools); **minimem retrieval *alone* reaches ~84% on LongMemEval** — see the
+retrieval-vs-pipeline decomposition below. BEAM/LOCOMO peaks are the minimem-graph arm
+(the substrate finding below is what earns the BEAM/LOCOMO numbers).
+
+## LongMemEval — minimem retrieval-only vs the full pipeline
+
+The 93.0% peak is the **full cogcore-live pipeline** (extraction + minimem retrieval +
+**live search tools** at answer time). To isolate what minimem's retrieval alone
+delivers, we ran **minimem-flat** (hybrid RRF retrieval over the same extracted
+observations, **no live tools**, official judge) on a 90-question, category-stratified
+subset:
+
+| category | minimem-flat (retrieval only) | full pipeline (cogcore-live) |
+|---|---:|---:|
+| single-session-preference | 100.0% | 100% |
+| single-session-user | 93.3% | 99% |
+| **single-session-assistant** | **46.7%** | **98%** |
+| knowledge-update | 93.3% | 95% |
+| temporal-reasoning | 93.3% | 92% |
+| multi-session | 80.0% | 86% |
+| **OVERALL** | **84.4%** (n=90; dist-weighted to full-500 = 84.9%) | **93.0%** (n=500) |
+
+**minimem retrieval alone reaches ~84–85% on LongMemEval**, and the entire ~9pp gap to
+the full pipeline is **one category: single-session-assistant (46.7% vs 98%)** — every
+other category is within noise. The mechanism is clean: single-session-assistant asks
+*"what did the assistant say/recommend?"*, but observation-extraction summarizes
+conversations into **user-centric** observations, so assistant-turn statements are
+under-captured and static retrieval can't surface what was never extracted. Only the
+**live-tool arm** (searching the raw haystack at answer time) recovers them — that single
+mechanism accounts for almost the whole retrieval-only → full-pipeline delta.
+
+Honest front-page attribution: **LOCOMO (79.3%) and BEAM (72.7%) are pure minimem
+retrieval; LongMemEval is ~84% minimem retrieval → 93% with the live-tool pipeline** —
+and we can name exactly what the extra ~9pp buys.
 
 ## Attribution — the clean three-arm decomposition
 
@@ -162,6 +202,10 @@ npx tsx evals/beam/diff-details.tmp.ts evals/beam/results/500k-minimem-graph_--g
 npx tsx evals/locomo/run-graph.tmp.ts --conversations 10 --max-q 30 --retrieval kb --details-out evals/locomo/results/locomo-kb-details.jsonl
 npx tsx evals/locomo/run-graph.tmp.ts --conversations 10 --max-q 30 --retrieval minimem-graph --graph-traverse off --details-out evals/locomo/results/locomo-flat-details.jsonl
 npx tsx evals/locomo/run-graph.tmp.ts --conversations 10 --max-q 30 --retrieval minimem-graph --graph-traverse on --details-out evals/locomo/results/locomo-graph-details.jsonl
+
+# LongMemEval — minimem retrieval-only (official judge), category-stratified subset
+npx tsx evals/longmemeval/run-flat.tmp.ts --n 90 --retrieval minimem-graph --graph-traverse off \
+  --answer-deployment gpt-5.5 --out evals/longmemeval/results/lme-flat-n90.json
 ```
 
 ## Takeaway

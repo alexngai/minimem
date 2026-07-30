@@ -34,16 +34,18 @@ Long-term-memory QA benchmark results for an agent memory pipeline (extract → 
 
 | benchmark | score | retrieval | notes |
 |---|---:|---|---|
-| [LongMemEval_S](https://github.com/xiaowu0162/LongMemEval) | **93.0%** | full pipeline | full 500-question run; ~1.9pp behind Mastra (94.87%) |
-| [LOCOMO](https://github.com/snap-research/locomo) | **79.3%** | **minimem** | 10 multi-session conversations, mem0 judge |
+| [LongMemEval_S](https://github.com/xiaowu0162/LongMemEval) | **93.0%** | full pipeline | 500-question run, official judge; **minimem retrieval alone = ~84%**, the live-tool pipeline adds ~9pp (assistant-turn recovery). ~1.9pp behind Mastra (94.87%) |
+| [LOCOMO](https://github.com/snap-research/locomo) | **79.3%** | **minimem** | 10 multi-session conversations; mem0 LLM-judge (vendor convention, not author-official F1) |
 | [BEAM](https://github.com/mohammadtavakoli78/BEAM) | **72.7%** | **minimem** | ICLR 2026 long-horizon memory, 500K-token conversations |
 
 The retrieval finding that earns the LOCOMO/BEAM numbers: **minimem's focused hybrid
 retrieval beats a dump-everything KB baseline by +13pp at 500K tokens and +43pp on LOCOMO,
 and the gap widens with scale** (the KB's context dump truncates; minimem retrieves the
-right notes regardless of store size). Scores are same-family-judge, not leaderboard-exact.
-Full methodology, the clean substrate-vs-graph decomposition, and honest per-benchmark
-caveats: [evals/beam/RESULTS.md](evals/beam/RESULTS.md).
+right notes regardless of store size). On LongMemEval, minimem retrieval alone reaches ~84%;
+the full pipeline's remaining ~9pp is almost entirely the live-tool arm recovering
+assistant-turn statements that user-centric extraction under-captures. Scores are
+same-family-judge, not leaderboard-exact. Full methodology, the clean substrate-vs-graph
+decomposition, and honest per-benchmark caveats: [evals/beam/RESULTS.md](evals/beam/RESULTS.md).
 
 ## Installation
 
