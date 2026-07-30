@@ -19,6 +19,8 @@ export default defineConfig({
       "src/store/__tests__/store-graph.test.ts",
       // concurrency tests open node:sqlite directly — run via test:db
       "src/db/__tests__/concurrency.test.ts",
+      // local-embedding tests load node-llama-cpp (native) — run via test:embeddings
+      "src/embeddings/__tests__/local-concurrency.test.ts",
     ],
     // Run tests sequentially to avoid XDG_CONFIG_HOME conflicts
     pool: "forks",
