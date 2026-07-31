@@ -28,7 +28,7 @@ echo "=== scoring $DOMAIN ==="
   --out_dir "$OUTDIR" \
   --use_llm_judge --judge_provider llama --judge_model gpt-4.1 \
   --judge_api_base http://127.0.0.1:8787 --judge_api_key_env GATEMEM_DUMMY_KEY \
-  --judge_concurrency 6 2>&1 | tail -2)
+  --judge_concurrency ${GM_JUDGE_CONC:-4} 2>&1 | tail -2)
 
 SUMMARY="$OUTDIR/summary.json" DOMAIN="$DOMAIN" TAG="$TAG" GATEMEM_ROOT="$GM" \
   PRED="/Users/alexngai/GitHub/minimem/$PRED" python3 evals/gatemem/report.tmp.py
