@@ -44,6 +44,28 @@ reconstruction cut F to 5.0 (medical and office to 0.0) at no utility cost.
 **Strength.** Clean mechanism, large effect, cheap intervention.
 **Threat.** n=1 per cell. Needs replication before it can be asserted.
 
+### C3b — Storage-layer erasure does not imply behavioural erasure *(strongest candidate)*
+**Evidence.** GateMem's hidden `attack_type` field isolates the attacks that exist to test
+whether deletion was real. With structural file deletion but **no** prompt guard, the
+recovery family still leaks: `post_delete_recovery` **12/129 = 9.3%**,
+`split_reconstruction` 2.4%, `post_delete_direct` 6.1% — 5.9% overall. Deleting *more*
+aggressively does not help (loose deletion: 6.2%). Adding one generation-time sentence
+takes the family to **0.5%** — `post_delete_recovery` and `split_reconstruction` both to
+**0/129 and 0/126**. A 12x reduction the architecture never delivered.
+**Why it matters.** minimem's own selling point is that file deletion makes `no_memory`
+*true* rather than claimed — and it does, at the storage layer: you can grep the directory
+and prove the record is gone, which a tombstoned vector store cannot offer. But the
+information stays derivable from surviving context, so **auditable record-deletion is
+necessary and not sufficient**. Closing the gap is a generation-time constraint, not a
+storage property.
+**Strength.** Cuts *against* our own architecture's marketing claim, which makes it
+credible rather than self-serving; mechanism isolated at the attack-type level; the
+residual (`update_delete_conflict`, 4.8%) is coherently the supersession family seen in
+office and education.
+**Threat.** n=1. We have no per-attack-type baseline numbers (the leaderboard publishes
+aggregate F only), so the comparison to other systems is currently absolute, not relative.
+Novelty vs the machine-unlearning / RAG-unlearning literature is unchecked.
+
 ### C4 — Deletion can be net-negative under multiplicative scoring
 **Evidence.** With `literal-max-share` at 0.34, deletion spent 17.8 U to buy 9.4 F —
 scoring *lower* than not deleting at all (50.7 vs 59.1). Tightening recovered office
@@ -86,6 +108,30 @@ likely built on **C3, C4 and C5** — findings about *governance* evaluation (fo
 the U/F trade, and label-instruction misalignment) rather than about retrieval quality.
 
 Re-verify this before committing; the check predates this session's findings.
+
+## Multi-principal vs multi-agent — an architectural argument with NO evidence
+
+Logged explicitly so it does not drift into the paper as though it were measured.
+
+**What we have tested is multi-principal**: one memory store, one writer, many *askers*
+with different roles and entitlements. That is what GateMem measures, and it is well
+covered.
+
+**What we have not tested is multi-agent**: many agents both reading and writing shared
+memory, concurrently. Untested properties include concurrent writes and lost updates,
+cross-agent contamination (one agent's write poisoning another's retrieval), read-your-
+writes consistency and staleness across agents, provenance of an entry to its writing
+agent, and whether shared memory measurably beats per-agent isolated memory on a task
+requiring coordination.
+
+The file-first substrate has a plausible story here — sharing is a directory, concurrency
+is WAL, history is git, scoping is paths — and the WAL/`busy_timeout` work did validate
+that four concurrent processes do not corrupt the index. **That is engineering
+validation, not a research result**, and none of our four benchmarks exercises concurrent
+writes at all. Do not put this argument next to measured claims.
+
+Open question under investigation: whether any published benchmark covers this, or whether
+a minimum credible one would have to be built.
 
 ## Threats to validity, applying to everything above
 
