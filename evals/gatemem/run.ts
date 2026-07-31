@@ -121,6 +121,35 @@ function officialRelationshipFacts(episode: GateMemEpisode, askerId: string): st
     .join("\n");
 }
 
+/**
+ * Escape raw control characters that appear *inside* JSON string literals.
+ *
+ * Some models emit a literal newline inside a JSON string value rather than \\n. That is
+ * invalid JSON, so JSON.parse throws and the caller's catch turns the failure into a
+ * refusal -- a wrong answer that looks like a deliberate one. It cost 18 checkpoints on a
+ * gpt-4.1 arm (14 of them utility; 16 of 18 in office, 9.1% of that domain's utility)
+ * before the failure counter surfaced it. Tracking string context rather than
+ * blanket-replacing keeps whitespace between tokens legal.
+ */
+function sanitizeJsonControlChars(text: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (escaped) { out += ch; escaped = false; continue; }
+    if (ch === "\\" && inString) { out += ch; escaped = true; continue; }
+    if (ch === '"') { inString = !inString; out += ch; continue; }
+    const code = ch.charCodeAt(0);
+    if (inString && code < 0x20) {
+      out += ch === "\n" ? "\\n" : ch === "\r" ? "\\r" : ch === "\t" ? "\\t"
+           : `\\u${code.toString(16).padStart(4, "0")}`;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 /** Split exactly as bench/agents/base.py::_split_system_user does. */
 function splitSystemUser(t: string): { system: string; user: string } {
   if (t.includes("[SYSTEM]") && t.includes("[REQUEST CONTEXT]")) {
@@ -279,7 +308,9 @@ async function extractObservations(newTurns: GateMemTurn[], startIndex: number):
   let parsed: unknown = [];
   try {
     const res = await utilLlm.chat([{ role: "user", content: prompt }]);
-    const text = res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "");
+    const text = sanitizeJsonControlChars(
+      res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, ""),
+    );
     const a = text.indexOf("[");
     const b = text.lastIndexOf("]");
     if (a === -1 || b <= a) return [];
@@ -362,7 +393,9 @@ async function scanForDeletions(newTurns: GateMemTurn[]): Promise<DeletionReques
   ].join("\n");
   try {
     const res = await utilLlm.chat([{ role: "user", content: prompt }]);
-    const text = res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "");
+    const text = sanitizeJsonControlChars(
+      res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, ""),
+    );
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
     if (start === -1 || end <= start) return [];
@@ -414,7 +447,9 @@ async function verifyDeletionTargets(
   ].join("\n");
   try {
     const res = await utilLlm.chat([{ role: "user", content: prompt }]);
-    const text = res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "");
+    const text = sanitizeJsonControlChars(
+      res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, ""),
+    );
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
     if (start === -1 || end <= start) return new Set();
@@ -631,7 +666,9 @@ async function answerCheckpoint(
                         : [{ role: "user", content: user }];
     }
     const res = await answerLlm.chat(messages);
-    const text = res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "");
+    const text = sanitizeJsonControlChars(
+      res.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, ""),
+    );
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
     if (start !== -1 && end > start) {
