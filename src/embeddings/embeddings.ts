@@ -175,11 +175,28 @@ async function acquireSharedLocalModel(
   }
 }
 
+/**
+ * Keep a model resident once loaded, rather than disposing when the last holder closes.
+ *
+ * Repeatedly loading and disposing a model on the shared ggml backend destabilizes it:
+ * a batch job that opened one Minimem per work item survived a single item but aborted
+ * natively (`ggml_abort` via `ggml_metal_device_free`) after ~15 load/dispose cycles in one
+ * process. Retaining also makes the common cases faster — a long-lived MCP server or a
+ * batch run loads the weights once instead of once per store.
+ *
+ * The cost is that closing every Minimem no longer frees the weights (~320 MB); process
+ * exit reclaims them. Set MINIMEM_EMBED_RETAIN=0 to restore eager disposal.
+ */
+function retainLoadedModels(): boolean {
+  return process.env.MINIMEM_EMBED_RETAIN !== "0";
+}
+
 async function releaseSharedLocalModel(key: string): Promise<void> {
   const slot = localModelCache.get(key);
   if (!slot) return;
   slot.refs--;
   if (slot.refs > 0) return;
+  if (retainLoadedModels()) return; // stay resident for the next acquire
   localModelCache.delete(key);
   if (processExiting) return;
   try {
