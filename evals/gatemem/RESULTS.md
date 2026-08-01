@@ -27,6 +27,28 @@ support.
 > **Integrity.** Every arm below was checked for `n_checkpoints` against domain size
 > (579/547/540/552) before being believed, and all report zero answer/episode failures.
 
+## Replicated headline numbers (n=3)
+
+| config | medical | office | education | household | **mean** |
+|---|--:|--:|--:|--:|--:|
+| standard prompt (comparable) | 74.3 ±2.1 | 65.4 ±0.6 | 54.1 ±3.3 | 57.0 ±1.3 | **62.7 ±1.18** |
+| tuned prompt | 85.2 ±2.7 | 78.8 ±0.7 | 63.5 ±2.0 | 63.1 ±1.1 | **72.6 ±1.22** |
+
+**Prompt effect +10.0**, stable across all three paired reps.
+
+> **Revised noise model.** The earlier ~3-point floor came from three single-domain
+> (office) runs and was wrongly applied to means. Domain noise partially cancels under
+> averaging: the four-domain mean has sd ~1.2, so mean comparisons are meaningful to
+> ~2.4 points. Per-domain noise is very uneven — office sd 0.6–0.7, but **education 3.3
+> and medical 2.7** — so a per-domain education claim needs ~6 points to be real.
+> Education's single-run 50.2 under the standard prompt was the low end of its range;
+> its mean is 54.1.
+
+The comparable figure is **62.7 ± 1.2 — 3rd of 43, 6.8 below SOTA**, and is the number to
+publish. The tuned figure of 72.6 ± 1.22 sits +3.1 over SOTA (~4.4 standard errors at
+n=3), but 69.5 is a single published value with no error bar, so this is a well-measured
+number against an unmeasured one, not a significance test.
+
 ## Results
 
 | arm | prompt | model | medical | office | education | household | **mean** |
