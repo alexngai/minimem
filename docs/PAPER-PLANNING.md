@@ -76,6 +76,23 @@ utility-bearing notes).
 forgetting destroys utility faster than it buys compliance" — is the publishable version
 and needs to be shown to generalise beyond our implementation.
 
+### C4b — Retrieval commoditises task competence; it does not commoditise judgment
+**Evidence.** Three backbones on an identical tuned config. Utility is flat-to-inverted —
+gpt-4.1 **84.8**, gpt-5.5 78.3, gpt-5.6-sol 78.2 — i.e. the *weakest* model has the best
+utility and refuses almost nothing (over-refusal 2.4% vs 13.2%). Capability appears
+almost entirely in governance: A 19.9 -> 7.4, F 10.1 -> 1.5. Our spread across backbones
+is 10.9 MGS against Long-Context's 22.4, and along a different axis.
+**Why it matters.** Practical form: retrieval-QA can be served by a cheap model, but
+governance needs a frontier one. It also warns against reading leaderboard backbone
+spreads as capability rankings — here the weakest model wins on utility.
+**Corroborates C5 and the education diagnosis.** Education's over-refusal was claimed to
+be model conservatism rather than retrieval failure; gpt-4.1 on education scores
+over-refusal 2.2% and utility 85.6 vs gpt-5.5's 65.6, on identical retrieval. Two
+independent lines of evidence agreeing.
+**Threat.** n=1 per cell; three models from two families. The `no_memory` guard is also
+markedly less effective on gpt-4.1 (F 10.1 vs 1.5), so C3b's fix is itself
+capability-dependent — worth stating rather than hiding.
+
 ### C5 — Instruction-following is penalised when instructions are misaligned with labels
 **Evidence.** GateMem's medical policy grants care-team access "ONLY when assigned to
 that patient… Otherwise: refuse", but nurse/pharmacist/scheduler appear in **zero**
@@ -87,9 +104,13 @@ theirs), not a main effect.
 it is a claim about *evaluation design* rather than about our system — which makes it
 harder to dismiss as self-serving.
 **Threat.** Two models is a thin basis for "capability" claims; could be a conservatism
-difference rather than compliance. The weak-backbone arm (gpt-4.1) tests this directly —
-if a *less* capable model scores *higher* under the standard prompt, the claim firms up
-considerably.
+difference rather than compliance.
+**Update — partially confirmed.** The gpt-4.1 arm ran on the *tuned* prompt, so it does
+not test the misaligned-policy case directly, but it is monotonic in the predicted
+direction: less compliant model → answers more → utility up, governance down (see C4b).
+The clean test of C5 remains **standard prompt + gpt-4.1**; if the *weakest* model scores
+*highest* under the policy that is unsatisfiable against its own labels, the claim is
+established. Not yet run.
 
 ### C6 — Low leakage is judgment, not thin retrieval
 **Evidence.** The secret is in our prompt context on 69% of office privacy checkpoints
@@ -100,14 +121,41 @@ advantage survives conditioning on exposure.
 
 ## Prior art that constrains novelty
 
-An earlier literature check found much of the above already published: Memanto
-(2604.22085), MemDelta (2606.29914), RAG-vs-GraphRAG (2502.11371), and "Same Ranking,
-Different Winner" (2605.24060). **C1 and C2 are likely reproductions**, valuable as
-independent confirmation but not as contributions. If there is a paper here, it is more
-likely built on **C3, C4 and C5** — findings about *governance* evaluation (forgetting,
-the U/F trade, and label-instruction misalignment) rather than about retrieval quality.
+An earlier check found much of C1/C2 already published: Memanto (2604.22085), MemDelta
+(2606.29914), RAG-vs-GraphRAG (2502.11371), "Same Ranking, Different Winner" (2605.24060).
+**C1 and C2 are likely reproductions** — useful as independent confirmation at new scale,
+not as contributions.
 
-Re-verify this before committing; the check predates this session's findings.
+A second pass (search-summary level only; none of these read in full) found:
+
+**On C3b (erasure).** The general claim — deleting the record is insufficient because the
+information can be re-derived — **is established**: "When Machine Unlearning Meets RAG"
+(2410.15267), "Subtract or Replay? Exact Deletion from Language-Model Memory" (2607.27539),
+SoK: PETs in AI (2506.14576). But that literature attributes residue to *embeddings
+surviving text deletion* and *training-data influence in weights*, neither of which applies
+here: we never train on the data and we rebuild the index, so the record is provably gone.
+The surviving narrow claim is that a **file-based store makes storage-layer erasure
+verifiable, which cleanly separates it from behavioural erasure** — in a vector store you
+cannot tell whether a leak is embedding residue or reconstruction. In that clean setting
+behavioural leakage persists at 9.3%, deleting *more* does not help (10.1%), and one
+generation-time constraint closes it. The contribution is the decomposition and the
+quantification, not the insufficiency.
+
+**On multi-agent.** There is a benchmark-shaped hole but *not* a research-shaped one.
+Concurrency in multi-agent LLM memory is actively formalised: "Verified Detection and
+Prevention of Concurrency Anomalies in Multi-Agent LLM Systems" (2606.17182) gives a
+machine-checked consistency hierarchy in TLA+ over four anomalies (stale-generation,
+phantom-tool, causal-cascade, tool-effect reordering), verified against LangGraph and
+AutoGen and reproducing a live lost update in a shipped app. See also Governed Shared
+Memory for Multi-Agent LLM Systems (2606.24535), CoAgent (2606.15376), Multi-Agent Memory
+from a Computer Architecture Perspective (2603.10062), and the Always-On Agents survey
+(2606.30306). **A "files + WAL + git" argument would land inside an active formal-methods
+conversation and must engage with it**, not claim the territory.
+
+**Candidate benchmarks, unverified.** MemoryArena (2602.16313, interdependent
+multi-session agentic tasks) and MemoryAgentBench (ICLR 2026, incremental multi-turn) are
+the closest found; both look multi-*session* rather than multi-*agent*, so neither
+obviously tests concurrent writes. Read before planning around them.
 
 ## Multi-principal vs multi-agent — an architectural argument with NO evidence
 

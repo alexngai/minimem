@@ -40,7 +40,7 @@ support.
 | official prompt (UNFAITHFUL — superseded) | standard* | gpt-5.5 | 63.2 | 67.1 | 50.2 | 56.3 | **59.2** |
 | official prompt (faithful) | standard | gpt-5.5 | 74.5 | 66.0 | 50.2 | 55.7 | **61.6** |
 | official prompt + newer model | standard | gpt-5.6-sol | 58.4 | 58.3 | 51.5 | 57.9 | **56.5** |
-| tuned + weak model | tuned | gpt-4.1 | — | — | — | — | *not run* |
+| tuned + weak model | tuned | gpt-4.1 | 71.7 | 45.9 | 66.3 | 60.6 | **61.1** |
 
 
 ### U / A / F / over-refusal detail
@@ -83,7 +83,10 @@ support.
 | official prompt + newer model | office | 68.2 | 14.0 | 0.5 | 58.3 | 17.5 |
 | official prompt + newer model | education | 53.9 | 3.3 | 1.1 | 51.5 | 39.4 |
 | official prompt + newer model | household | 66.8 | 12.0 | 1.6 | 57.9 | 20.1 |
-
+| tuned + weak model | medical | 92.4 | 17.2 | 6.2 | 71.7 | 0.5 |
+| tuned + weak model | office | 85.1 | 36.3 | 15.3 | 45.9 | 2.6 |
+| tuned + weak model | education | 85.6 | 10.0 | 13.9 | 66.3 | 2.2 |
+| tuned + weak model | household | 76.1 | 16.3 | 4.9 | 60.6 | 4.3 |
 
 `standard*` = the official prompt with our own relationship-fact rendering substituted.
 That arm is **superseded and should not be cited** — see Corrections.

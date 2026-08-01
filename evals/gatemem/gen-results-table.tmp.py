@@ -9,7 +9,7 @@ ARMS=[("full","baseline (session start)","tuned","gpt-5.5"),
       ("officialp","official prompt (UNFAITHFUL — superseded)","standard*","gpt-5.5"),
       ("officialfx","official prompt (faithful)","standard","gpt-5.5"),
       ("stdsol","official prompt + newer model","standard","gpt-5.6-sol"),
-      ("weak","tuned + weak model","tuned","gpt-4.1")]
+      ("weak2","tuned + weak model","tuned","gpt-4.1")]
 def cell(tag,d):
     p=f"/tmp/gm-{tag}-{d}/summary.json"
     if not os.path.exists(p): return None
