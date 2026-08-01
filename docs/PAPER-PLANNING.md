@@ -37,12 +37,13 @@ mis-attribution strengthens rather than weakens it.
 below). The novel part is only that *deployed memory systems don't do it*, which is an
 observation about the field, not a technique.
 
-### C3 — Forgetting fails by reconstruction, not by failure to delete
-**Evidence.** Education F ranged only 12.2–21.7 across the *entire* deletion sweep,
-including deletion fully off — deletion policy could not move it. One sentence forbidding
-reconstruction cut F to 5.0 (medical and office to 0.0) at no utility cost.
-**Strength.** Clean mechanism, large effect, cheap intervention.
-**Threat.** n=1 per cell. Needs replication before it can be asserted.
+### C3 — Forgetting fails by reconstruction, not by failure to delete *(subsumed by C3b)*
+**Original evidence.** Education F ranged only 12.2–21.7 across the *entire* deletion
+sweep, including deletion fully off — no deletion policy could move it. One sentence
+forbidding reconstruction cut F to 5.0 (medical and office to 0.0) at no utility cost.
+**Status.** C3b's 2x2 tests the same proposition with a proper control and supersedes this
+on evidence. Keep C3 only as the narrative route in (the observation that F was immovable
+across the deletion sweep is what motivated building the control); cite C3b for the claim.
 
 ### C3b — Storage erasure is not the mechanism of behavioural forgetting *(strongest; 2x2 complete)*
 **Evidence.** GateMem's hidden `attack_type` isolates the attacks that test whether

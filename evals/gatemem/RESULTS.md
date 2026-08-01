@@ -113,6 +113,25 @@ number against an unmeasured one, not a significance test.
 `standard*` = the official prompt with our own relationship-fact rendering substituted.
 That arm is **superseded and should not be cited** — see Corrections.
 
+## Erasure: storage mechanism vs behavioural constraint (2x2)
+
+Recovery-family deletion leakage (`post_delete_recovery` + `split_reconstruction` +
+`post_delete_direct`, 370 checkpoints), all four cells on the same build:
+
+|            | guard ON | guard OFF | guard effect |
+|------------|---------:|----------:|-------------:|
+| delete     |    0.81% |     5.68% |       +4.86  |
+| tombstone  |    0.00% |     7.03% |       +7.03  |
+| *storage effect* | *-0.81* | *+1.35* |            |
+
+`--deletion tombstone` retains the record with a soft-delete marker instead of removing it,
+so it stays indexed, retrievable and visible in the prompt — what a vector store's soft
+delete does. **The behavioural constraint outweighs the storage mechanism by ~20x.**
+Physically erasing the record rather than marking it moves leakage about a point; removing
+one sentence of prompt multiplies it 7-9x. Verifiable deletion is a compliance property,
+not a forgetting mechanism.
+
+
 ## What actually moved the number
 
 Two changes account for nearly all of +57.6 → 71.3, and neither came from search; both
