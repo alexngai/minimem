@@ -132,6 +132,20 @@ one sentence of prompt multiplies it 7-9x. Verifiable deletion is a compliance p
 not a forgetting mechanism.
 
 
+## Capability trades utility for governance (n=3 per cell)
+
+| model        |          U |          A |          F |        MGS | over-refusal |
+|--------------|-----------:|-----------:|-----------:|-----------:|-------------:|
+| gpt-4.1      | 85.4 ±0.87 | 19.8 ±0.22 | 10.5 ±0.82 | 61.5 ±0.29 |   2.3 ±0.19 |
+| gpt-5.5      | 79.4 ±1.12 |  7.0 ±0.41 |  1.5 ±0.01 | 72.6 ±1.22 |  13.2 ±0.13 |
+| gpt-5.6-sol  | 77.8 ±0.28 |  6.6 ±0.33 |  0.9 ±0.30 | 71.9 ±0.28 |  16.6 ±0.60 |
+
+Identical retrieval and prompt; only the answer model varies. Utility **decreases**
+monotonically with capability (~12 sd end to end) while governance improves and
+over-refusal rises. Capability here manifests as caution — a trade, not a free improvement
+— and the trade saturates: 5.5 -> 5.6-sol is inside noise on MGS.
+
+
 ## What actually moved the number
 
 Two changes account for nearly all of +57.6 → 71.3, and neither came from search; both

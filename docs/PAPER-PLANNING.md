@@ -90,25 +90,35 @@ utility-bearing notes).
 forgetting destroys utility faster than it buys compliance" — is the publishable version
 and needs to be shown to generalise beyond our implementation.
 
-### C4b — Retrieval commoditises task competence; it does not commoditise judgment
-**Evidence.** Three backbones on an identical tuned config. Utility is flat-to-inverted —
-gpt-4.1 **84.8**, gpt-5.5 78.3, gpt-5.6-sol 78.2 — i.e. the *weakest* model has the best
-utility and refuses almost nothing (over-refusal 2.4% vs 13.2%). Capability appears
-almost entirely in governance: A 19.9 -> 7.4, F 10.1 -> 1.5. Our spread across backbones
-is 10.9 MGS against Long-Context's 22.4, and along a different axis.
-**Why it matters.** Practical form: retrieval-QA can be served by a cheap model, but
-governance needs a frontier one. It also warns against reading leaderboard backbone
-spreads as capability rankings — here the weakest model wins on utility.
-**Corroborates the education diagnosis, and C5's *mechanism* only.** Education's
-over-refusal was claimed to be model conservatism rather than retrieval failure; gpt-4.1
-on education scores over-refusal 2.2% and utility 85.6 vs gpt-5.5's 65.6, on identical
-retrieval — two independent lines agreeing. It also confirms C5's mechanism (less
-compliance → more answering → higher U) while C5's *consequence* was refuted: the same
-gpt-4.1 scores worst overall, because governance losses exceed the utility gain. C4b and
-C5 are the same finding seen from two sides — capability buys governance, not utility.
-**Threat.** n=1 per cell; three models from two families. The `no_memory` guard is also
-markedly less effective on gpt-4.1 (F 10.1 vs 1.5), so C3b's fix is itself
-capability-dependent — worth stating rather than hiding.
+### C4b — Capability trades utility for governance *(n=3 every cell; monotonic)*
+**Evidence.** Three backbones, identical retrieval and prompt, four domains, n=3 per cell:
+
+| model        |          U |          A |          F |        MGS | over-refusal |
+|--------------|-----------:|-----------:|-----------:|-----------:|-------------:|
+| gpt-4.1      | 85.4 ±0.87 | 19.8 ±0.22 | 10.5 ±0.82 | 61.5 ±0.29 |   2.3 ±0.19 |
+| gpt-5.5      | 79.4 ±1.12 |  7.0 ±0.41 |  1.5 ±0.01 | 72.6 ±1.22 |  13.2 ±0.13 |
+| gpt-5.6-sol  | 77.8 ±0.28 |  6.6 ±0.33 |  0.9 ±0.30 | 71.9 ±0.28 |  16.6 ±0.60 |
+
+**Every axis is monotonic in capability.** Utility *decreases* (85.4 -> 77.8; 7.6 apart at
+pooled sd 0.65, ~12 sd). Governance improves (A 19.8 -> 6.6, F 10.5 -> 0.9). Over-refusal
+rises (2.3% -> 16.6%), which is the mechanism connecting the two.
+
+**Claim.** Given the same retrieval, frontier capability manifests as *caution*, and caution
+is a trade rather than a free improvement: more capable models refuse more, which costs
+utility and buys governance. Under a multiplicative score the trade pays (MGS 61.5 -> 72.6)
+but it **saturates** -- 5.5 -> 5.6-sol is 72.6 vs 71.9, inside noise, so governance gains
+have flattened while the utility cost keeps accruing.
+**Why it matters.** Retrieval-QA can be served by a cheap model *and served better*;
+governance cannot. It also warns against reading leaderboard backbone spreads as capability
+rankings, since the weakest model here is the most useful one. And the saturation suggests
+buying a newer model is not a governance strategy past a point.
+**Relation to C5.** Same finding from two sides. C5's mechanism (less compliance -> more
+answering -> higher U) is confirmed; C5's *consequence* was refuted because governance
+losses exceed the utility gain. Also relevant to C3b: the no-reconstruct guard is markedly
+weaker on gpt-4.1 (F 10.5 vs 1.5), so that fix is itself capability-dependent.
+**Threat.** Three models from two families, one provider; "capability" is an ordering we
+assume rather than measure. The monotonicity is clean but three points cannot distinguish a
+trend from a coincidence of these particular models.
 
 ### C5 — The policy is unsatisfiable against its own labels *(narrowed; capability framing REFUTED)*
 **What survives.** GateMem's medical policy grants care-team access "ONLY when assigned to
