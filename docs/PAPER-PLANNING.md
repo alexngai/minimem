@@ -183,8 +183,32 @@ that four concurrent processes do not corrupt the index. **That is engineering
 validation, not a research result**, and none of our four benchmarks exercises concurrent
 writes at all. Do not put this argument next to measured claims.
 
-Open question under investigation: whether any published benchmark covers this, or whether
-a minimum credible one would have to be built.
+**Checked (abstract level; ArgusFleet URL checked directly).** No adoptable public
+benchmark exists:
+
+- **MemoryArena** (2602.16313) — confirmed **multi-session single-agent**, not multi-agent:
+  "agents acquire memory while interacting with the environment, and subsequently rely on
+  that memory to solve future tasks." Not a vehicle for this direction. It *is* a candidate
+  for C1's synthesis hole though — its domains are agentic (web navigation,
+  preference-constrained planning, progressive information search, sequential formal
+  reasoning) rather than QA, and it reports that agents near-saturated on LoCoMo perform
+  poorly on it.
+- **Governed Shared Memory / MemClaw** (2606.24535) — a **system paper, not a benchmark**.
+  It does evaluate concurrent multi-agent read/write (intra-fleet visibility, zero
+  cross-fleet leakage, write-to-visible latency), but against no baseline — it measures a
+  live production service. Its harness, ArgusFleet, is **not public** (github.com/caura-ai/
+  argusfleet returns 404).
+
+**So: build or nothing.** That is a real cost and should be a deliberate decision, not a
+default.
+
+**Positioning warning.** MemClaw already formalises four failure modes — *unauthorized
+leakage, stale propagation, contradiction persistence, provenance collapse* — and names
+*temporal supersession* as a primitive. That is exactly the family behind our office stale
+values, education current-value queries, and `update_delete_conflict` (4.8%, our largest
+residual). **Our supersession findings are measurement, not problem-identification**, and
+must cite this. Its conclusion — "long-context retrieval alone is insufficient for
+production multi-agent memory" — also partly pre-empts the framing we would reach for.
 
 ## Threats to validity, applying to everything above
 
