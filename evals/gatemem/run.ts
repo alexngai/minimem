@@ -158,7 +158,15 @@ function splitSystemUser(t: string): { system: string; user: string } {
   }
   return { system: "", user: t.trim() };
 }
-const DELETION = arg("deletion", "on")!; // on | off (ablate mechanism D)
+// on | off | tombstone.
+// "tombstone" is the control for the storage-vs-behavioural erasure decomposition: the
+// deletion scan runs and identifies the same targets, but the note is REWRITTEN with a
+// soft-delete marker instead of removed, so the record stays in the index, stays
+// retrievable, and stays visible in the prompt -- i.e. exactly what a vector store with a
+// tombstone flag does. Comparing tombstone / structural-delete / structural-delete+guard
+// separates leakage caused by the record still being present from leakage caused by the
+// model reconstructing it from surviving context.
+const DELETION = arg("deletion", "on")!;
 // Deletion breadth is tuned, not guessed: on the medical pilot episode, deleting broadly
 // (top5 @ 0.45, no verification) beat both a tight threshold and an LLM verification pass
 // on *both* axes — MGS 47.4 vs 17.8 (top2/0.70) and 24.7 (top8/0.30 + verify). Retaining a
@@ -373,7 +381,10 @@ interface DeletionRequest {
  * Uses only agent-visible data — no checkpoint labels.
  */
 async function scanForDeletions(newTurns: GateMemTurn[]): Promise<DeletionRequest[]> {
-  if (DELETION !== "on" || newTurns.length === 0) return [];
+  // Tombstone mode must run the scan: it identifies the SAME targets as normal deletion and
+  // differs only in what it does with them (rewrite vs remove). Gating on === "on" made
+  // tombstone silently equivalent to --deletion off, which is a different arm entirely.
+  if (DELETION === "off" || newTurns.length === 0) return [];
   const listing = newTurns
     .map((t) => `[${t.turn_id}] ${t.speaker.role}: ${t.text}`)
     .join("\n")
@@ -475,8 +486,25 @@ async function applyDeletions(
   mm: Minimem,
   notesDir: string,
   requests: DeletionRequest[],
-): Promise<Set<string>> {
+): Promise<{ deleted: Set<string>; tombstoned: Set<string> }> {
   const deleted = new Set<string>();
+  const tombstoned = new Set<string>();
+  const TOMBSTONE = "> [SOFT-DELETED] This record was subject to a deletion request but is retained in the store.\n\n";
+  /** Remove the note, or (tombstone mode) retain it with a soft-delete marker. */
+  const retire = async (full: string, id: string): Promise<void> => {
+    if (DELETION === "tombstone") {
+      const body = await fsp.readFile(full, "utf8");
+      if (!body.includes("[SOFT-DELETED]")) {
+        const i = body.indexOf("\n---\n");
+        const cut = i === -1 ? 0 : i + 5;
+        await fsp.writeFile(full, body.slice(0, cut) + TOMBSTONE + body.slice(cut), "utf8");
+      }
+      tombstoned.add(id);
+      return;
+    }
+    await fsp.rm(full, { force: true });
+    deleted.add(id);
+  };
 
   // Exact purge first. A deletion request usually names a specific value — a stipend
   // amount, an identifier, a phone number — and those are precisely what semantic top-K
@@ -520,9 +548,12 @@ async function applyDeletions(
 
     for (const [file, content] of contents) {
       if (!purgeable.some((v) => content.includes(v.toLowerCase()))) continue;
+      // A tombstoned note stays on disk, so it re-matches the same literal at every later
+      // checkpoint. Skip it: otherwise the pass counters double-count (46 vs the 22 unique
+      // notes normal deletion removes) and the note is rewritten repeatedly for no reason.
+      if (content.includes("[soft-deleted]")) continue;
       try {
-        await fsp.rm(path.join(notesDir, file), { force: true });
-        deleted.add(path.basename(file, ".md"));
+        await retire(path.join(notesDir, file), path.basename(file, ".md"));
         delStats.literal++;
       } catch {
         /* already gone */
@@ -542,15 +573,15 @@ async function applyDeletions(
       if (keep && !keep.has(index)) continue;
       const file = path.join(notesDir, path.basename(hit.path));
       try {
-        await fsp.rm(file, { force: true });
-        if (!deleted.has(path.basename(hit.path, ".md"))) delStats.semantic++;
-        deleted.add(path.basename(hit.path, ".md"));
+        const id = path.basename(hit.path, ".md");
+        if (!deleted.has(id) && !tombstoned.has(id)) delStats.semantic++;
+        await retire(file, id);
       } catch {
         /* already gone */
       }
     }
   }
-  return deleted;
+  return { deleted, tombstoned };
 }
 
 interface AnswerOut {
@@ -712,6 +743,9 @@ async function runEpisode(episode: GateMemEpisode, queries: GateMemQuery[]): Pro
 
   const predictions: GateMemPrediction[] = [];
   const deletedTurnIds = new Set<string>();
+  // Tombstoned records are deliberately NOT hidden: the point of the control is that the
+  // record remains present and retrievable, so any leakage is attributable to its presence.
+  const tombstonedTurnIds = new Set<string>();
   const units: MemoryUnit[] = [];
   let selectedTotal = 0;
   let visibleTotal = 0;
@@ -761,14 +795,23 @@ async function runEpisode(episode: GateMemEpisode, queries: GateMemQuery[]): Pro
       // Mechanism D: honor deletion requests that arrived in this window.
       const requests = await scanForDeletions(fresh);
       if (requests.length > 0) {
-        const removed = await applyDeletions(mm, notesDir, requests);
+        const { deleted: removed, tombstoned } = await applyDeletions(mm, notesDir, requests);
         for (const id of removed) deletedTurnIds.add(id);
-        deletedTotal += removed.size;
-        if (removed.size > 0) await mm.sync({ force: true });
+        for (const id of tombstoned) tombstonedTurnIds.add(id);
+        deletedTotal += removed.size + tombstoned.size;
+        // Tombstoning rewrites notes rather than removing them, so the index still needs
+        // rebuilding for the marker to be present in what retrieval returns.
+        if (removed.size > 0 || tombstoned.size > 0) await mm.sync({ force: true });
       }
 
       // Deleted records must not reappear through neighbour expansion.
-      const visible = units.filter((u) => !deletedTurnIds.has(u.id));
+      const visible = units
+        .filter((u) => !deletedTurnIds.has(u.id))
+        .map((u) =>
+          tombstonedTurnIds.has(u.id)
+            ? { ...u, render: `[SOFT-DELETED, retained] ${u.render}` }
+            : u,
+        );
       const out = await answerCheckpoint(mm, episode, query, visible);
       selectedTotal += out.selectedTurns;
       visibleTotal += out.visibleTurns;
