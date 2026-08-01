@@ -98,24 +98,30 @@ independent lines of evidence agreeing.
 markedly less effective on gpt-4.1 (F 10.1 vs 1.5), so C3b's fix is itself
 capability-dependent — worth stating rather than hiding.
 
-### C5 — Instruction-following is penalised when instructions are misaligned with labels
-**Evidence.** GateMem's medical policy grants care-team access "ONLY when assigned to
+### C5 — The policy is unsatisfiable against its own labels *(narrowed; capability framing REFUTED)*
+**What survives.** GateMem's medical policy grants care-team access "ONLY when assigned to
 that patient… Otherwise: refuse", but nurse/pharmacist/scheduler appear in **zero**
-relationship facts — the precondition is unsatisfiable. Under that prompt a newer model
-complies more faithfully and scores **worse**: −5.1 mean, medical −16.1, over-refusal
-11.9%→29.5%. Backbone effect is an interaction (+0.7 under our prompt, −5.1 under
-theirs), not a main effect.
-**Strength.** Genuinely surprising, mechanistically traced to specific checkpoints, and
-it is a claim about *evaluation design* rather than about our system — which makes it
-harder to dismiss as self-serving.
-**Threat.** Two models is a thin basis for "capability" claims; could be a conservatism
-difference rather than compliance.
-**Update — partially confirmed.** The gpt-4.1 arm ran on the *tuned* prompt, so it does
-not test the misaligned-policy case directly, but it is monotonic in the predicted
-direction: less compliant model → answers more → utility up, governance down (see C4b).
-The clean test of C5 remains **standard prompt + gpt-4.1**; if the *weakest* model scores
-*highest* under the policy that is unsatisfiable against its own labels, the claim is
-established. Not yet run.
+relationship facts, so the precondition cannot be met. 49 utility checkpoints flip
+answer→refuse under that policy, every one in a role absent from the scaffold. This is a
+benchmark-design defect verifiable from the data alone, independent of any model
+comparison, and it costs utility for every backbone we tried.
+
+**What was refuted.** The prediction on record was that a *less* compliant model would
+therefore score *higher* under this policy. It scored **lowest**: standard prompt MGS is
+gpt-4.1 **48.5**, gpt-5.5 **61.6**, gpt-5.6-sol **56.5** — non-monotonic, peaking in the
+middle, with both gaps (13.1 and 5.1) outside the ~3-point noise floor.
+
+**The mechanism held; the consequence did not.** gpt-4.1 refuses half as much (8.4% vs
+16.7%) and gets *higher* utility (75.0 vs 70.0) exactly as predicted — but loses far more
+on governance than it gains. Office is the clean case: **identical U (78.6 both), MGS 31.8
+vs 66.0**; the whole 34-point gap is leakage.
+
+**Revised claim.** *Compliance is not separable.* The property that makes a model
+over-refuse under a misspecified policy is the same one that makes it not leak under a
+good one. Utility lost to a bad policy cannot be bought back with a less compliant model.
+Neither "more capable is better" nor "less compliant is better" holds.
+**Threat.** n=1 per cell; three models, two families. The non-monotonicity is outside
+noise but the *shape* of the curve rests on single runs.
 
 ### C6 — Low leakage is judgment, not thin retrieval
 **Evidence.** The secret is in our prompt context on 69% of office privacy checkpoints
