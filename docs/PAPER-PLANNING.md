@@ -64,7 +64,12 @@ residual (`update_delete_conflict`, 4.8%) is coherently the supersession family 
 office and education.
 **Threat.** n=1. We have no per-attack-type baseline numbers (the leaderboard publishes
 aggregate F only), so the comparison to other systems is currently absolute, not relative.
-Novelty vs the machine-unlearning / RAG-unlearning literature is unchecked.
+**Novelty is partial** — the general "record deletion is insufficient" claim is published
+(see Prior art). What survives is narrower: a file store makes storage-layer erasure
+*verifiable*, which is what lets storage and behavioural erasure be separated at all, plus
+the quantification (9.3% residual, unmoved by deleting more, closed by one generation-time
+constraint). Frame as the decomposition, not the insufficiency. Also see C4b — the fix is
+itself capability-dependent.
 
 ### C4 — Deletion can be net-negative under multiplicative scoring
 **Evidence.** With `literal-max-share` at 0.34, deletion spent 17.8 U to buy 9.4 F —
