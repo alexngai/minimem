@@ -200,7 +200,10 @@ benchmark exists:
   argusfleet returns 404).
 
 **So: build or nothing.** That is a real cost and should be a deliberate decision, not a
-default.
+default. **Decision (2026-07-31): deprioritised.** Not worth committing to benchmark
+construction on one session's evidence, particularly when the problem space is already
+formalised by others (below). Revisit only if the governance claims (C3b/C4b/C5) firm up
+under replication and need a multi-agent setting to extend into.
 
 **Positioning warning.** MemClaw already formalises four failure modes — *unauthorized
 leakage, stale propagation, contradiction persistence, provenance collapse* — and names
