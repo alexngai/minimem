@@ -44,32 +44,40 @@ reconstruction cut F to 5.0 (medical and office to 0.0) at no utility cost.
 **Strength.** Clean mechanism, large effect, cheap intervention.
 **Threat.** n=1 per cell. Needs replication before it can be asserted.
 
-### C3b — Storage-layer erasure does not imply behavioural erasure *(strongest candidate)*
-**Evidence.** GateMem's hidden `attack_type` field isolates the attacks that exist to test
-whether deletion was real. With structural file deletion but **no** prompt guard, the
-recovery family still leaks: `post_delete_recovery` **12/129 = 9.3%**,
-`split_reconstruction` 2.4%, `post_delete_direct` 6.1% — 5.9% overall. Deleting *more*
-aggressively does not help (loose deletion: 6.2%). Adding one generation-time sentence
-takes the family to **0.5%** — `post_delete_recovery` and `split_reconstruction` both to
-**0/129 and 0/126**. A 12x reduction the architecture never delivered.
-**Why it matters.** minimem's own selling point is that file deletion makes `no_memory`
-*true* rather than claimed — and it does, at the storage layer: you can grep the directory
-and prove the record is gone, which a tombstoned vector store cannot offer. But the
-information stays derivable from surviving context, so **auditable record-deletion is
-necessary and not sufficient**. Closing the gap is a generation-time constraint, not a
-storage property.
-**Strength.** Cuts *against* our own architecture's marketing claim, which makes it
-credible rather than self-serving; mechanism isolated at the attack-type level; the
-residual (`update_delete_conflict`, 4.8%) is coherently the supersession family seen in
-office and education.
-**Threat.** n=1. We have no per-attack-type baseline numbers (the leaderboard publishes
-aggregate F only), so the comparison to other systems is currently absolute, not relative.
-**Novelty is partial** — the general "record deletion is insufficient" claim is published
-(see Prior art). What survives is narrower: a file store makes storage-layer erasure
-*verifiable*, which is what lets storage and behavioural erasure be separated at all, plus
-the quantification (9.3% residual, unmoved by deleting more, closed by one generation-time
-constraint). Frame as the decomposition, not the insufficiency. Also see C4b — the fix is
-itself capability-dependent.
+### C3b — Storage erasure is not the mechanism of behavioural forgetting *(strongest; 2x2 complete)*
+**Evidence.** GateMem's hidden `attack_type` isolates the attacks that test whether
+deletion was real. Crossing storage mechanism against behavioural constraint, all four
+cells matched on the same build, 370 recovery-family checkpoints:
+
+|            | guard ON | guard OFF | guard effect |
+|------------|---------:|----------:|-------------:|
+| delete     |    0.81% |     5.68% |       +4.86  |
+| tombstone  |    0.00% |     7.03% |       +7.03  |
+| *storage effect* | *-0.81* | *+1.35* |            |
+
+**The constraint outweighs the architecture by ~20x.** Removing one sentence multiplies
+recovery leakage 7-9x. Whether the record is physically erased or merely marked moves it
+about a point. `tombstone` retains the record, marked, indexed, retrievable and visible in
+the prompt -- i.e. what a vector store's soft delete does -- so this is a real control, not
+an argued one.
+
+**Claim.** A file-first store makes erasure *auditable* (grep the directory, prove the
+record is gone), and that auditability is precisely what makes this decomposition
+measurable -- in a vector store you cannot separate residue from reconstruction. But
+auditable erasure buys ~1 point of leakage; the generation-time constraint buys ~6.
+**Verifiable deletion is a compliance property, not a forgetting mechanism.**
+
+**Strength.** Cuts against how file-backed and "true deletion" memory systems are marketed,
+including our own, which makes it credible rather than self-serving. Effect sizes are far
+apart (~6 vs ~1), so the ordering is robust even though only the delete+guard cell is n=3
+(0.81 +/- 0.27). Novelty is the decomposition and the quantification: the general "record
+deletion is insufficient" claim is published, but attributed to embedding residue and
+weight influence, neither of which applies to a store that is rebuilt from files.
+**Threat.** Three cells are n=1. The two modes select overlapping but not identical target
+sets (18 vs 22 on a smoke episode) because `literal-max-share` is a share of a corpus that
+shrinks under real deletion but not under tombstoning; acceptable at these effect sizes, a
+matched replay would be needed for finer comparisons. The guard's effectiveness is also
+capability-dependent (C4b: much weaker on gpt-4.1).
 
 ### C4 — Deletion can be net-negative under multiplicative scoring
 **Evidence.** With `literal-max-share` at 0.34, deletion spent 17.8 U to buy 9.4 F —
