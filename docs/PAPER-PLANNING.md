@@ -90,10 +90,13 @@ is 10.9 MGS against Long-Context's 22.4, and along a different axis.
 **Why it matters.** Practical form: retrieval-QA can be served by a cheap model, but
 governance needs a frontier one. It also warns against reading leaderboard backbone
 spreads as capability rankings — here the weakest model wins on utility.
-**Corroborates C5 and the education diagnosis.** Education's over-refusal was claimed to
-be model conservatism rather than retrieval failure; gpt-4.1 on education scores
-over-refusal 2.2% and utility 85.6 vs gpt-5.5's 65.6, on identical retrieval. Two
-independent lines of evidence agreeing.
+**Corroborates the education diagnosis, and C5's *mechanism* only.** Education's
+over-refusal was claimed to be model conservatism rather than retrieval failure; gpt-4.1
+on education scores over-refusal 2.2% and utility 85.6 vs gpt-5.5's 65.6, on identical
+retrieval — two independent lines agreeing. It also confirms C5's mechanism (less
+compliance → more answering → higher U) while C5's *consequence* was refuted: the same
+gpt-4.1 scores worst overall, because governance losses exceed the utility gain. C4b and
+C5 are the same finding seen from two sides — capability buys governance, not utility.
 **Threat.** n=1 per cell; three models from two families. The `no_memory` guard is also
 markedly less effective on gpt-4.1 (F 10.1 vs 1.5), so C3b's fix is itself
 capability-dependent — worth stating rather than hiding.
