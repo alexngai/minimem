@@ -102,15 +102,37 @@ shrinks under real deletion but not under tombstoning; acceptable at these effec
 matched replay would be needed for finer comparisons. The guard's effectiveness is also
 capability-dependent (C4b: much weaker on gpt-4.1).
 
-### C4 — Deletion can be net-negative under multiplicative scoring
-**Evidence.** With `literal-max-share` at 0.34, deletion spent 17.8 U to buy 9.4 F —
-scoring *lower* than not deleting at all (50.7 vs 59.1). Tightening recovered office
-+15.6 U and household +16.3 U at zero F cost.
-**Strength.** Quantified trade with a clear mechanism (collateral deletion of
-utility-bearing notes).
-**Threat.** Partly a bug report about our own default. The general form — "aggressive
-forgetting destroys utility faster than it buys compliance" — is the publishable version
-and needs to be shown to generalise beyond our implementation.
+### C4 — The primary metric cannot distinguish forgetting from declining to say *(inverted)*
+**Evidence.** The one cell never run -- deletion fully off, behavioural guard on -- against
+the same config with deletion, four domains:
+
+| config                | MGS (answer) | MGS e2e | F answer | F e2e  |
+|-----------------------|-------------:|--------:|---------:|-------:|
+| deletion OFF + guard  |     **77.8** | **0.0** |    0.89% | 99.73% |
+| delete + guard (n=3)  |         72.6 | **9.4** |    1.51% | 24.06% |
+| tombstone + guard     |         71.6 |     0.0 |    0.14% | 99.86% |
+
+Deleting nothing is **optimal on the leaderboard metric** -- 77.8, our best number and 8.3
+above SOTA -- and scores **exactly zero** end-to-end, because the content is still in
+context on 99.7% of safety checkpoints. On the answer axis deletion looks purely harmful
+(-6.0 U, and F actually *worse* by 0.62pp via supersession: `update_delete_conflict` 4.76%
+with deletion vs 1.90% without). On the e2e axis it is the only thing that scores at all.
+
+**Claim (rewritten).** The original -- "deletion can be net-negative under multiplicative
+scoring" -- is the wrong lesson. `compliance_utility_score` grades the *answer*, so it
+cannot separate "forgot" from "still holds it and declines to say", and it therefore rewards
+retaining everything plus a refusal instruction. GateMem's own `_e2e` variant exists to
+catch this and does so decisively.
+**Why it matters.** This is a claim about evaluation design, verifiable from the benchmark's
+own metrics, and it is a caution against an optimisation that is *available and attractive*:
+a system can climb this leaderboard by not forgetting.
+**Consequence for C3b.** Narrows it. The tombstone arm's apparent win is also e2e 0.0, so
+"constraint beats architecture" holds *for the reported metric*, not for forgetting as such.
+Both findings are really the same one seen twice.
+**Defensible config.** delete + guard (72.6 answer / 9.4 e2e) -- the only arm scoring
+non-zero on both.
+**Threat.** The deletion-off arm is n=1. The direction is far outside noise (+5.2 answer,
+-9.4 e2e) but unreplicated.
 
 ### C4b — Capability trades utility for governance *(n=3 every cell; monotonic)*
 **Evidence.** Three backbones, identical retrieval and prompt, four domains, n=3 per cell:
