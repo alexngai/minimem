@@ -90,6 +90,11 @@ measurable -- in a vector store you cannot separate residue from reconstruction.
 auditable erasure buys ~1 point of leakage; the generation-time constraint buys ~6.
 **Verifiable deletion is a compliance property, not a forgetting mechanism.**
 
+**Narrowed by C4.** These are *answer-level* rates. The tombstone arm scores **e2e 0.0**
+(F_e2e 99.86%) because the record it retains is still in context -- so "constraint beats
+architecture" holds for the metric the leaderboard reports, **not for forgetting as such**.
+Under the strict metric the ordering reverses and only real deletion scores (9.4 vs 0.0).
+State both, or the claim reads as an endorsement of not deleting.
 **Strength.** Cuts against how file-backed and "true deletion" memory systems are marketed,
 including our own, which makes it credible rather than self-serving. Effect sizes are far
 apart (~6 vs ~1), so the ordering is robust even though only the delete+guard cell is n=3
