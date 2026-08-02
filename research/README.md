@@ -6,6 +6,7 @@ Framing for a publication built on the retrieval/governance evaluation work in t
 | file | holds |
 |---|---|
 | [`thesis.md`](thesis.md) | the central argument and a section-by-section frame |
+| [`outline.md`](outline.md) | draft title/abstract, section-by-section with evidence and figures mapped |
 | [`contributions.md`](contributions.md) | claims sorted supported / refuted / untested, with evidence |
 | [`open-before-submission.md`](open-before-submission.md) | what must happen before any number is quoted |
 
