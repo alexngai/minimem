@@ -195,11 +195,14 @@ Neither "more capable is better" nor "less compliant is better" holds.
 noise but the *shape* of the curve rests on single runs.
 
 ### C6 — Low leakage is judgment, not thin retrieval
-**Evidence.** The secret is in our prompt context on 69% of office privacy checkpoints
-and we leak 11% of those; Long-Context holds it 100% of the time and leaks 19.3%. So the
-advantage survives conditioning on exposure.
-**Strength.** The obvious deflationary explanation is measured and rejected.
-**Threat.** One domain. Should be run across all four.
+**Evidence.** Extended to all four domains x n=3. The secret is in our prompt context on
+**74.7%** of privacy checkpoints and we leak **9.2%** of those; Long-Context holds it 100% of
+the time and leaks 19.3%. Per domain (held / leak-given-held): medical 84.4/9.0, office
+74.7/11.0, education 89.1/0.6, household 50.7/16.0. Leak-rate sd across reps is 0.6-1.4.
+**Strength.** The obvious deflationary explanation is measured and rejected, and the effect
+is stable across reps.
+**Threat.** **Household is the exception** -- it holds the secret only 50.7% of the time, so
+there the advantage genuinely is partly retrieval omission. State per-domain, not globally.
 
 ## Prior art that constrains novelty
 
@@ -292,8 +295,10 @@ production multi-agent memory" — also partly pre-empts the framing we would re
 
 ## Threats to validity, applying to everything above
 
-1. **n=1.** Every arm is a single run against a measured ~3-point noise floor. "1st of
-   43" is a tie, not a win. Only office (+11.0 over best-on-board) is clearly outside it.
+1. **n varies by claim.** Both GateMem headlines and the C4b capability curve are now n=3
+   (mean sd ~1.2). Still n=1: the C4 deletion-off arm, three of the four C3b 2x2 cells, and
+   the C1 comparison. Noise is domain-dependent -- office sd 0.6, education 3.3 -- so
+   per-domain claims need ~6 points where mean claims need ~2.4.
 2. **Judge mismatch.** We judge with `gpt-4.1`; the GateMem paper uses `gpt-4o`, BEAM's
    reference is `gpt-4.1-mini`. Deltas between our arms are sound; absolutes are not
    leaderboard-exact.
@@ -302,17 +307,26 @@ production multi-agent memory" — also partly pre-empts the framing we would re
 4. **Scale selection.** GateMem episodes are 7–8K tokens, so Long-Context is a
    no-retrieval oracle and every memory system on that board is handicapped. Our
    retrieval story is strongest at BEAM's 500K–1M, where the comparison set is thinner.
-5. **Synthesis untested.** See C1. Nothing here measures abstraction or aggregation.
+5. **Synthesis** is now tested for *representation* (C1) but not for *layering* -- the
+   verbatim+observations+summaries arm has never been built.
 
 ## Highest-value next work
 
-- **Replication.** 3x the two headline configs. Converts most claims from "suggestive" to
-  "measured" and is pure compute.
-- **The synthesis experiment.** Three arms (verbatim / derived+summaries / both) at fixed
-  context budget, per-question paired comparison. Directly attacks C1's biggest hole.
+- ~~**Replication** of the two headline configs~~ — **done** (62.7 ±1.18 / 72.6 ±1.22).
+- ~~**Weak-backbone arm**~~ — **done**; became C4b, n=3 per cell.
+- ~~**Synthesis untested**~~ — **done** for representation (C1). The *layered* arm
+  (verbatim + observations + summaries, fixed context budget, per-question paired) is still
+  open, and the groundwork stands: of 31,381 cached observations, 28.3% cite a single turn,
+  67.2% stay within one session, and only **4.4% join across sessions** — so the layer meant
+  to provide synthesis rarely crosses the boundary `multi-session` questions are built on.
+- **Education's categorical-credential refusal** — ~19pp of one domain, traced, unfixed.
+- **C1 budget-matched arm.** Verbatim carries 3.2x more notes at the same top-k, so part of
+  its synthesis loss is retrieval budget. Needed before citing the −12.2/+5.9 exchange rate;
+  the two large category effects survive without it.
+- **Close the n=1 cells**: C4 deletion-off, and the three C3b 2x2 cells other than
+  delete+guard.
   Measured groundwork: of 31,381 cached observations, 28.3% cite a single turn, 67.2%
   stay within one session, and only **4.4% join across sessions** — so the layer that
   exists to provide synthesis almost never crosses the boundary LongMemEval's
   `multi-session` questions are built on.
-- **Weak-backbone arm** for C5.
-- **Education's categorical-credential refusal** — ~19pp of one domain, traced, unfixed.
+
