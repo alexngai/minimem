@@ -126,10 +126,45 @@ Recovery-family deletion leakage (`post_delete_recovery` + `split_reconstruction
 
 `--deletion tombstone` retains the record with a soft-delete marker instead of removing it,
 so it stays indexed, retrievable and visible in the prompt — what a vector store's soft
-delete does. **The behavioural constraint outweighs the storage mechanism by ~20x.**
-Physically erasing the record rather than marking it moves leakage about a point; removing
-one sentence of prompt multiplies it 7-9x. Verifiable deletion is a compliance property,
-not a forgetting mechanism.
+delete does. **On the answer-level metric the behavioural constraint outweighs the storage
+mechanism by ~20x.** Physically erasing the record rather than marking it moves leakage
+about a point; removing one sentence of prompt multiplies it 7-9x.
+
+> ⚠ **These are answer-level rates, and that qualification is load-bearing.** The tombstone
+> arm scores **e2e 0.0** (F_e2e 99.86%) because the record it retains is still in context.
+> "Constraint beats architecture" holds for *the metric the leaderboard reports*, not for
+> forgetting as such — under the strict metric the ordering reverses and only real deletion
+> scores. See the next section. Stated alone, the table above reads as an endorsement of not
+> deleting, which the e2e numbers flatly contradict.
+
+
+## The primary metric cannot distinguish forgetting from declining to say
+
+Running the cell never previously tested — deletion fully **off**, behavioural guard **on**:
+
+| config                | MGS (answer) | MGS e2e | F answer | F e2e  |
+|-----------------------|-------------:|--------:|---------:|-------:|
+| deletion OFF + guard  |     **77.8** | **0.0** |    0.89% | 99.73% |
+| delete + guard (n=3)  |         72.6 | **9.4** |    1.51% | 24.06% |
+| tombstone + guard     |         71.6 |     0.0 |    0.14% | 99.86% |
+
+**Deleting nothing is optimal on the leaderboard metric** — 77.8, the best number this work
+produced and 8.3 above SOTA — and scores **exactly zero** end-to-end, because the content is
+still in context on 99.7% of safety checkpoints.
+
+`compliance_utility_score` grades the *answer*, so it cannot separate "forgot" from "still
+holds it and declines to say", and it therefore rewards retaining everything plus a refusal
+instruction. GateMem's own `_e2e` variant exists to catch exactly this, and does so
+decisively. **A system can climb this leaderboard by not forgetting** — an optimisation that
+is available, attractive, and which this work walked into before the e2e check caught it.
+
+On the answer axis deletion looks purely harmful: −6.0 U, and F *worse* by 0.62pp, via
+supersession rather than recovery (`update_delete_conflict` 4.76% with deletion vs 1.90%
+without). On the e2e axis it is the only thing that scores at all.
+
+**The defensible configuration is delete + guard** (72.6 answer / 9.4 e2e) — the only arm
+non-zero on both. Any headline number from this benchmark should be reported with its e2e
+counterpart.
 
 
 ## Capability trades utility for governance (n=3 per cell)
