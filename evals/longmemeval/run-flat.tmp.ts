@@ -29,12 +29,17 @@ const OUT = arg("out");
 // between arms is what the notes contain.
 const OBS_CACHE = arg("observation-cache-dir");
 const LIVE_TOOLS = arg("live-tools", "auto")!; // auto | always | off
+// Retrieval depth. Needed for the C1 budget control: extraction and verbatim cannot be
+// matched on tokens AND coverage at once (an extracted note is 268.8 chars and cites ~2.0
+// source turns; a verbatim note is 1001.3 chars and covers 1). Equal top-k already hands
+// verbatim ~3.7x MORE context, so the fair-to-verbatim setting is coverage-matched k=32.
+const TOP_K = Number(arg("top-k", "16"));
 
 const answerModelLlm = ANSWER_MODEL ? new LlmClient({ deployment: ANSWER_MODEL, maxCompletionTokens: 8192, maxRetries: 5 }) : undefined;
 
 function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
   return new CogcoreLiveLongMemEvalAdapter(llm, "cogcore-live", {
-    topK: 16,
+    topK: TOP_K,
     embeddings: "local",
     extractConcurrency: 3,
     chunkTurns: 40,
