@@ -16,15 +16,37 @@ See `evals/gatemem/RESULTS.md`, `evals/beam/RESULTS.md`, `evals/locomo/RESULTS.m
 
 ## Candidate claims, strongest first
 
-### C1 — Write-time compression is a bad trade when the task is exact recall
-**Evidence.** GateMem, de-confounded with deletion off: extracted observations 24.4 MGS
-vs verbatim turns 59.1, over-refusal 55.6%. Extraction compressed 186 turns to ~20
-observations and destroyed the exact tokens/amounts/dates that are graded. Same direction
-on BEAM/LOCOMO: hybrid retrieval over verbatim beat the KB observation-dump by +13/+43pp.
-**Strength.** Large, far outside noise, and consistent across three benchmarks.
-**Threat.** Every benchmark cited grades *exact recall*. The claim as stated is nearly
-tautological unless we test the converse — that compression *helps* synthesis. Untested.
-This is the single biggest hole.
+### C1 — Compression trades recall for synthesis, at a measurable exchange rate *(controlled; CONFIRMED)*
+**Evidence.** LongMemEval n=200, live tools **off**, same adapter, retrieval, prompt, answer
+model and judge in both arms; the only variable is the observation cache (derived statements
+vs one note per turn holding raw text -- 154 vs 493 notes/instance, 3.2:1 compression).
+
+|                    | extracted | verbatim |            |
+|--------------------|----------:|---------:|------------|
+| **recall** (n=98)  |     85.7% | **98.0%**| verbatim **+12.2** |
+| **synthesis** (n=102) | **85.3%** | 79.4% | extraction **+5.9** |
+| overall            |     85.5% |    88.5% |            |
+
+Driven by two categories, both mechanistically legible: `single-session-assistant`
+61.8% -> **100.0%** (+38.2) for verbatim -- these ask what the *assistant* said, and
+extraction paraphrases it away; and `multi-session` 76.5% -> **55.9%** (-20.6) for
+extraction -- these need cross-session assembly, and verbatim floods retrieval at fixed
+top-k. `temporal-reasoning` and `single-session-user` are dead level, so this is not a
+global shift.
+
+**Claim (rewritten).** The original framing -- "compression is a bad trade" -- is **wrong**.
+Neither representation dominates: compression buys synthesis and sells recall, at roughly
+-12.2 for +5.9 here. Which wins is determined by what the benchmark grades.
+**This explains rather than contradicts GateMem**, where extraction collapsed (24.4 vs
+59.1): GateMem grades exact recall only, so it measures one side of a two-sided trade. That
+result does not generalise, and we would have reported half a trade as a general law.
+**Strength.** The first genuinely controlled test of this claim; effects are large and in
+opposite directions, which rules out a global confound.
+**Threat.** n=200 single run, no error bars -- the two large category deltas (+38.2, -20.6)
+are far outside plausible noise, but the aggregate +5.9/-12.2 split is not replicated. One
+benchmark, one judge. The verbatim arm also carries 3.2x more notes at the same top-k, so
+part of its synthesis loss is retrieval budget rather than representation per se -- a
+budget-matched arm would separate those.
 
 ### C2 — The retrieval substrate, not the architecture on top of it, carries the result
 **Evidence.** Three-arm decomposition on BEAM/LOCOMO: substrate +13.1/+42.7, graph layer

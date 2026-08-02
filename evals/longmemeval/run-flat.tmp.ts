@@ -24,6 +24,11 @@ const CONC = Number(arg("concurrency", "5"));
 const RETRIEVAL = arg("retrieval", "minimem-graph")!;
 const GRAPH_TRAVERSE = arg("graph-traverse", "off")!;
 const OUT = arg("out");
+// C1 control: point the adapter at a different observation cache (e.g. the verbatim one from
+// make-verbatim-cache.tmp.ts) and disable live search tools, so the only thing varying
+// between arms is what the notes contain.
+const OBS_CACHE = arg("observation-cache-dir");
+const LIVE_TOOLS = arg("live-tools", "auto")!; // auto | always | off
 
 const answerModelLlm = ANSWER_MODEL ? new LlmClient({ deployment: ANSWER_MODEL, maxCompletionTokens: 8192, maxRetries: 5 }) : undefined;
 
@@ -44,11 +49,12 @@ function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
     observationLogMaxChars: 40_000,
     observationMaxPerChunk: 12,
     observationSlots: 12,
-    liveToolPolicy: "auto",
+    liveToolPolicy: LIVE_TOOLS as "auto" | "always" | "off",
     liveToolQueries: 2,
     liveToolResults: 6,
     memoryProfile: "long-memory",
     onProgress: () => {},
+    ...(OBS_CACHE ? { observationCacheDir: OBS_CACHE } : {}),
     ...(answerModelLlm ? { answerLlm: answerModelLlm } : {}),
     ...(RETRIEVAL === "minimem-graph" ? { retrieval: "minimem-graph" as const, minimemTraverse: GRAPH_TRAVERSE === "on" } : {}),
   });
