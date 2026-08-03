@@ -173,6 +173,23 @@ non-zero on both. Any headline number from this benchmark should be reported wit
 counterpart.
 
 
+### Note: numerical collision with a published GateMem row
+
+Our gpt-4.1 four-domain mean (U 85.4 / A 19.8 / F 10.5) sits close to GateMem's published
+Long-Context · GPT-5-mini · **Medical** row (85.7 / 19.8 / 20.3), with `A` matching to one
+decimal. **This is coincidental**, and the evidence is:
+
+- the comparison is between our **four-domain mean** and their **single-domain** row — different
+  aggregation levels;
+- **F differs by ~10pp** (10.5 vs 20.3), so only two of three metrics align;
+- our actual medical row is **92.4 / 16.7 / 7.5**, which does not resemble theirs;
+- our per-domain spread (U 76.6–92.4, A 9.6–36.3) is wide, so a mean landing near some published
+  single-domain row is unsurprising.
+
+Stated here rather than left for a reader to notice: this arm is an independent
+retrieval-controlled sweep, not a reproduction of a published row.
+
+
 ## Capability trades utility for governance (n=3 per cell)
 
 | model        |          U |          A |          F |        MGS | over-refusal |
