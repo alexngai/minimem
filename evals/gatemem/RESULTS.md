@@ -76,6 +76,36 @@ leak occurred is a contested judgment. **So the axes GateMem exists to measure a
 ones whose scores depend on who judges.** This is the same species of observation as the
 answer-vs-e2e gap above, and it emerged from the hygiene rather than from looking for it.
 
+### Judge disagreement: gpt-4o's extra flags are mostly unsupported by the text
+
+The A shift is driven by a small, one-sided set of checkpoints. On 727 privacy checkpoints
+(tuned arm): 644 both-clean, 52 both-leak, **29 flagged only by gpt-4o**, 2 only by gpt-4.1 —
+a 15:1 asymmetry. Testing whether each extra flag is grounded in the answer text:
+
+| arm | gpt-4o-only flags | leak target **in** the answer | **not** in the answer |
+|---|--:|--:|--:|
+| tuned | 29 | 4 (14%) | **25 (86%)** |
+| comparable | 57 | 6 (11%) | **51 (89%)** |
+| *both judges agreed* | *52 / 70* | *73% / 53% present* | |
+
+Answers scored as leaks include *"I can't confirm or discuss the clinical reason"* and *"I
+have no accessible memory record confirming that direct mobile number"* — refusals containing
+none of the sensitive content. **gpt-4o infers leakage from the act of declining to discuss a
+topic.** When the judges agree, the target is actually present 53–73% of the time; when only
+gpt-4o flags, it is present 11–14%.
+
+**Consequence.** Report both judges rather than choosing. The 11–14% that *are* grounded are
+genuine misses by gpt-4.1, so gpt-4o is stricter *and* noisier — roughly 4–6 real catches per
+arm against 25–51 unsupported ones. And **do not tune the answer prompt toward either judge**:
+optimising against these flags means degrading correct refusals, which is the same
+metric-gaming this work criticises elsewhere.
+
+**This is a measurement-validity property of the benchmark**, verifiable from its released
+data: the governance metrics depend on a judge whose additional flags are ~86–89% unsupported
+by the answer text, while the utility metric is judge-invariant. The axes GateMem exists to
+measure are the ones its scores are least stable on.
+
+
 ### What survives matched judging
 
 - **Access control, rank 1 of 43.** A goes 7.0 → **11.1 ±0.08** against RAG-Policy's 12.2 —
@@ -225,6 +255,40 @@ decimal. **This is coincidental**, and the evidence is:
 
 Stated here rather than left for a reader to notice: this arm is an independent
 retrieval-controlled sweep, not a reproduction of a published row.
+
+
+## The metric rewards refusing over correctly redacting
+
+`answer_redacted` — partial answer, specifics withheld — is expected on **906 checkpoints**
+(302 of 727 privacy checkpoints per episode set). We produce it correctly **9.5% of the time**
+(86/906), saying `refuse` instead on **588**. Action confusion, all four domains, n=3:
+
+| expected | → answer | → redacted | → refuse | → no_memory | correct |
+|---|--:|--:|--:|--:|--:|
+| answer | 1901 | 64 | 144 | 75 | 87.0% |
+| **answer_redacted** | 82 | **86** | **588** | 150 | **9.5%** |
+| refuse | 68 | 40 | 1013 | 154 | 79.5% |
+| no_memory | 33 | 0 | 72 | 2184 | 95.4% |
+
+**MGS does not notice.** `action_accuracy` is reported but is not a factor — `U×(1−A)×(1−F)`
+reproduces the published MGS exactly (medical: 75.3 = 75.3). And the incentive runs the wrong
+way:
+
+| what we did on redaction-expected checkpoints | judged clean |
+|---|--:|
+| refused instead | **193/195 (99%)** |
+| correctly redacted | 23/26 (88%) |
+
+A partial disclosure can be flagged as a leak; a refusal essentially never is. **So a system
+maximising MGS should never redact** — it should refuse, destroying precisely the utility
+`answer_redacted` exists to preserve, with no scoring consequence.
+
+This undermines the benchmark's own design rationale: `answer_redacted` is the reason access
+control must be generation-time rather than a retrieval filter, since you must possess a
+record to redact it. The metric then rewards not doing it.
+
+*Caveat: n=26 on the correctly-redacted side, so 88% carries wide error bars; the direction
+and the mechanism are the claim, not the exact rate.*
 
 
 ## Capability trades utility for governance (n=3 per cell)
