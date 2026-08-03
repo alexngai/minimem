@@ -7,46 +7,54 @@ the evidence behind them and the reason each might not survive review. Not a dra
 
 | benchmark | scale | our number | comparison point |
 |---|---|--:|---|
-| GateMem | ~7–8K tok/episode | **61.6** standard prompt / 72.0 tuned | SOTA 69.5 (Long-Context/Deepseek) |
+| GateMem | ~7–8K tok/episode | **62.7 ±1.18** standard prompt / 72.6 ±1.22 tuned (n=3) | SOTA 69.5 (Long-Context/Deepseek) |
 | BEAM | 500K–1M tok | 72.7% (500K) | +13pp over cogcore KB baseline |
 | LOCOMO | 10 conv | 79.3% | +43pp over cogcore KB baseline |
 | LongMemEval_S | full 500 | 93.0% (full pipeline), ~84% (retrieval alone) | Mastra 94.87% |
 
 See `evals/gatemem/RESULTS.md`, `evals/beam/RESULTS.md`, `evals/locomo/RESULTS.md`.
 
+> **The GateMem row above is answer-level only.** Per C4, that axis cannot distinguish
+> forgetting from silence, so no GateMem figure should travel without its e2e counterpart.
+> The tuned 72.6 pairs with **e2e 9.4**; the higher 77.8 (deletion off) pairs with **e2e 0.0**.
+> Quoting either alone reproduces the defect the paper is about.
+
 ## Candidate claims, strongest first
 
-### C1 — Compression trades recall for synthesis, at a measurable exchange rate *(controlled; CONFIRMED)*
-**Evidence.** LongMemEval n=200, live tools **off**, same adapter, retrieval, prompt, answer
-model and judge in both arms; the only variable is the observation cache (derived statements
-vs one note per turn holding raw text -- 154 vs 493 notes/instance, 3.2:1 compression).
+### C1 — At matched retrieval budget, compression buys quality nothing; it buys cost *(budget-controlled; trade framing REFUTED)*
+**Evidence.** LongMemEval n=200, live tools off, same adapter/retrieval/prompt/answer
+model/judge; only the observation cache and top-k vary.
 
-|                    | extracted | verbatim |            |
-|--------------------|----------:|---------:|------------|
-| **recall** (n=98)  |     85.7% | **98.0%**| verbatim **+12.2** |
-| **synthesis** (n=102) | **85.3%** | 79.4% | extraction **+5.9** |
-| overall            |     85.5% |    88.5% |            |
+| category            | extract k16 | verbatim k16 | **verbatim k32** |
+|---------------------|------------:|-------------:|-----------------:|
+| multi-session       |       76.5% |        55.9% |        **70.6%** |
+| knowledge-update    |       94.1% |        97.1% |            97.1% |
+| temporal-reasoning  |       85.3% |        85.3% |            88.2% |
+| **synthesis**       |   **85.3%** |        79.4% |        **85.3%** |
+| **recall**          |       85.7% |        98.0% |        **99.0%** |
+| overall             |       85.5% |        88.5% |        **92.0%** |
 
-Driven by two categories, both mechanistically legible: `single-session-assistant`
-61.8% -> **100.0%** (+38.2) for verbatim -- these ask what the *assistant* said, and
-extraction paraphrases it away; and `multi-session` 76.5% -> **55.9%** (-20.6) for
-extraction -- these need cross-session assembly, and verbatim floods retrieval at fixed
-top-k. `temporal-reasoning` and `single-session-user` are dead level, so this is not a
-global shift.
+k=32 is **coverage-matched**: an extracted note cites ~2.0 source turns, so extraction at
+k=16 reaches ~32 turns. It is also generous on tokens — an extracted note is 268.8 chars vs
+verbatim's 1001.3, so verbatim at k=32 carries ~7x the context.
 
-**Claim (rewritten).** The original framing -- "compression is a bad trade" -- is **wrong**.
-Neither representation dominates: compression buys synthesis and sells recall, at roughly
--12.2 for +5.9 here. Which wins is determined by what the benchmark grades.
-**This explains rather than contradicts GateMem**, where extraction collapsed (24.4 vs
-59.1): GateMem grades exact recall only, so it measures one side of a two-sided trade. That
-result does not generalise, and we would have reported half a trade as a general law.
-**Strength.** The first genuinely controlled test of this claim; effects are large and in
-opposite directions, which rules out a global confound.
-**Threat.** n=200 single run, no error bars -- the two large category deltas (+38.2, -20.6)
-are far outside plausible noise, but the aggregate +5.9/-12.2 split is not replicated. One
-benchmark, one judge. The verbatim arm also carries 3.2x more notes at the same top-k, so
-part of its synthesis loss is retrieval budget rather than representation per se -- a
-budget-matched arm would separate those.
+**At matched coverage, extraction's synthesis advantage disappears** (85.3 vs 85.3; 87/102
+both), recall goes to verbatim by 13.3 and overall by 6.5. The +5.9 synthesis gap measured at
+equal top-k was a **retrieval-budget artifact**.
+
+**Claim (rewritten, 3rd time).** Compression does not trade recall for synthesis. At matched
+budget it is *dominated*. What it buys is **cost** — near-parity synthesis at ~1/7 the
+context tokens. The trade is quality-vs-cost.
+**Explains GateMem.** Episodes there are 7-8K tokens, so nothing is context-bound;
+compression costs quality and saves nothing (24.4 vs 59.1). Predicts extraction should pay
+where context *is* binding — BEAM at 500K-1M, untested.
+**Threat.** n=200, single run per arm. `multi-session` still favours extraction (70.6 vs
+76.5); the aggregate synthesis tie is a sum of opposing category effects, not uniform parity.
+Cost-matched (rather than coverage-matched) comparison is untested, and that is the setting
+where extraction should win.
+**Process note.** This claim has been framed three ways. The budget objection was raised,
+then wrongly dismissed by measuring *tokens* (verbatim had 3.7x more) when the binding axis
+was *coverage*. The control settled it; the reasoning about what it would show did not.
 
 ### C2 — The retrieval substrate, not the architecture on top of it, carries the result
 **Evidence.** Three-arm decomposition on BEAM/LOCOMO: substrate +13.1/+42.7, graph layer
