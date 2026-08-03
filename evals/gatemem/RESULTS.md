@@ -52,6 +52,43 @@ publish. The tuned figure of 72.6 ± 1.22 sits +3.1 over SOTA (~4.4 standard err
 n=3), but 69.5 is a single published value with no error bar, so this is a well-measured
 number against an unmeasured one, not a significance test.
 
+## Judge-matched results (gpt-4o, GateMem's reference judge)
+
+Every number elsewhere in this file was judged with `gpt-4.1`. GateMem's own configs
+(`paper_main.yaml`, `paper_matrix.yaml`) specify **`gpt-4o`**, and the published leaderboard
+was produced with it. Re-scoring the same predictions under the reference judge:
+
+| config | gpt-4.1 | **gpt-4o (matched)** | Δ |
+|---|--:|--:|--:|
+| tuned | 72.6 ±1.22 | **67.8 ±0.93** | −4.9 |
+| comparable (standard prompt) | 62.7 ±1.18 | **55.1 ±0.29** | −7.6 |
+| deletion-off + guard | 78.1 ±0.29 | **71.9 ±0.55** | −6.2 |
+
+**Against SOTA 69.5: tuned −1.7 (was +3.1), comparable −14.4 (was −6.8).** Every leaderboard
+comparison made with the gpt-4.1 judge was mismatched in our favour by 5–8 MGS. **No "beats
+SOTA" claim survives judge-matching.**
+
+### The judge effect is not uniform — and that is itself a finding
+
+Utility and over-refusal are judge-**invariant** (identical to the decimal on the pilot);
+`A` and `F` roughly **double**. Whether an answer is correct is largely mechanical; whether a
+leak occurred is a contested judgment. **So the axes GateMem exists to measure are exactly the
+ones whose scores depend on who judges.** This is the same species of observation as the
+answer-vs-e2e gap above, and it emerged from the hygiene rather than from looking for it.
+
+### What survives matched judging
+
+- **Access control, rank 1 of 43.** A goes 7.0 → **11.1 ±0.08** against RAG-Policy's 12.2 —
+  still first with no ACL machinery, but the margin narrows from 5.2 to **1.1**.
+- **Answer-vs-e2e (unaffected — it is a contrast, not a level).** Deletion-off **71.9 answer /
+  0.0 e2e**; delete+guard **67.8 / 9.2**.
+- **The capability curve.** U stays inverted and monotonic (86.2 → 77.8 → 76.1) while
+  governance improves (A 24.1 → 11.1 → 11.3; F 14.4 → 1.9 → 1.5).
+
+Re-scores are in `/tmp/gm4o-*`; the gpt-4.1 originals are preserved under `judged/`.
+Reproduce with `zsh evals/gatemem/run-judge4o.tmp.sh`.
+
+
 ## Results
 
 | arm | prompt | model | medical | office | education | household | **mean** |
