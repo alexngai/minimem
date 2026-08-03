@@ -23,8 +23,17 @@ result is the retrieval *substrate*, not the graph.
 > our answer is a correct 40-word response with evidence — so raw F1 measures formatting,
 > not correctness. The 79.3% is directly comparable to how competitors report; it is not
 > "official-F1.") Answer model: `gpt-5.5`. All numbers are same-judge, same-data deltas
-> between arms, not leaderboard-exact absolutes. BEAM cells are majority-of-3; LOCOMO is
+> between arms, not leaderboard-exact absolutes. BEAM cells are **mean-of-3**; LOCOMO is
 > single-sample over 300 stratified questions.
+>
+> ⚠ **Correction (2026-08-02): these were previously described as "majority-of-3". They are
+> not.** `run.ts:287` regenerates the answer on each of the three samples, judges each one,
+> and averages: `scores.reduce((a,b) => a+b) / scores.length`. Because a BEAM score is a
+> rubric *fraction*, mean and majority differ — a stored row with `sampleScores [0,1,0]`
+> yields `score 0.3333`, where a majority vote gives 0. **No number in this file changes**;
+> every figure was produced by the mean. Only the description was wrong. One consequence
+> matters for re-judging: only the *last* of the three answers reaches `--details-out`, so
+> stored details cannot reproduce the 3-sample statistic offline.
 
 ## Peak scores
 
@@ -84,7 +93,7 @@ changes **two** things at once: the retrieval **substrate** (cognitive-core KB +
 obs-log dump → minimem hybrid + focused context) *and* the **graph traversal**.
 Isolated with a third arm (minimem-flat = minimem hybrid retrieval, graph off):
 
-| arm | BEAM 500K (6 conv, maj-3) | LOCOMO (10 conv, 300 q) |
+| arm | BEAM 500K (6 conv, mean-3) | LOCOMO (10 conv, 300 q) |
 |---|---:|---:|
 | cognitive-core KB (obs-log dump + KB retrieval) | 55.3 | 35.3 |
 | **minimem-flat** (hybrid RRF search, focused 16-note context, **no graph**) | **68.4** | **78.0** |
@@ -93,7 +102,7 @@ Isolated with a third arm (minimem-flat = minimem hybrid retrieval, graph off):
 | → graph delta (flat → graph) | +1.9 | +1.2 |
 
 **The substrate is the win. The graph traversal is marginal — +1.9 / +1.2, inside
-the noise (n=12 maj-3 / n=62-per-category single-sample)** — and it carries a
+the noise (n=12 mean-3 / n=62-per-category single-sample)** — and it carries a
 consistent downside (abstention −13.9 @BEAM, from over-retrieval). It is **not** a
 proven win on this evidence.
 
@@ -133,7 +142,7 @@ meaningfully in either regime.
 
 ## The "push past SOTA" bets (on top of the substrate+graph champion)
 
-Three retrieval-side levers, each a majority-of-3 ablation vs the champion (6 conv,
+Three retrieval-side levers, each a mean-of-3 ablation vs the champion (6 conv,
 1M). All failed or landed in noise — consistent with a substrate that already
 captures the retrievable signal:
 
@@ -148,7 +157,7 @@ captures the retrievable signal:
 - **Isolate one variable at a time.** The original KB-vs-graph comparison
   conflated substrate + graph; the three-arm decomposition (KB / flat / graph) is
   the honest form. Always include the flat control.
-- **Majority-of-3 on BEAM** (single-sample per-dim std ≈ ±8pp; the "69.0% tuned
+- **Mean-of-3 on BEAM** (single-sample per-dim std ≈ ±8pp; the "69.0% tuned
   @100K" was an optimistic single draw). LOCOMO's binary mem0-J over 300 questions
   is stable single-sample for the overall.
 - **Cache-collision gotcha:** splits/benchmarks reuse ids; observation/graph caches
@@ -190,7 +199,7 @@ recall — but neither is a universal win, and the answer model does not close t
 ## Reproduce
 
 ```sh
-# BEAM three-arm decomposition @500K (majority-of-3); extraction cached after arm 1
+# BEAM three-arm decomposition @500K (mean-of-3); extraction cached after arm 1
 for arm in "kb" "minimem-graph --graph-traverse off" "minimem-graph --graph-traverse on"; do
   npx tsx evals/beam/run.ts --data evals/beam/cache/beam-500K.json --conversations 6 --samples 3 \
     --retrieval ${=arm} --details-out "evals/beam/results/500k-${arm// /_}.jsonl"

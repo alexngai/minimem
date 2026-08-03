@@ -2,17 +2,20 @@
 
 **Two headline numbers, and they must be reported together.**
 
-| | mean MGS | vs SOTA (69.5) | rank of 43 |
+| | mean MGS (n=3) | vs SOTA (69.5) | rank of 43 |
 |---|--:|--:|--:|
-| **minimem, standard harness prompt** (leaderboard-comparable) | **61.6** | −7.9 | 3rd |
-| minimem, method-specific prompt (best measured) | **72.0** | +2.5 | 1st (within noise) |
+| **minimem, standard harness prompt** (leaderboard-comparable) | **62.7 ±1.18** | −6.8 | 3rd |
+| minimem, method-specific prompt (best measured) | **72.6 ±1.22** | +3.1 | 1st (within noise) |
+
+*(Replicated figures. The single-run 61.6 / 72.0 that this table previously carried are
+superseded by the n=3 means below and should not be cited.)*
 
 The comparable number is the one to lead with. GateMem permits a custom prompt — you
 submit `predictions.jsonl` and the server scores it, and the agent contract is three
 methods returning `{action, answer}` by any means — but all seven leaderboard baselines
 share `bench/prompts/query_prompt.txt`, so the published board is in practice *same
 prompt, different memory*. **Roughly 10 of our points come from the prompt, not the
-memory system.** Reporting only 72.0 would invite a comparison the number does not
+memory system.** Reporting only the tuned figure would invite a comparison it does not
 support.
 
 > **Noise floor.** Three runs of an identical office config scored 62.7 / 60.1 / 60.5 —
@@ -142,14 +145,17 @@ about a point; removing one sentence of prompt multiplies it 7-9x.
 
 Running the cell never previously tested — deletion fully **off**, behavioural guard **on**:
 
-| config                | MGS (answer) | MGS e2e | F answer | F e2e  |
-|-----------------------|-------------:|--------:|---------:|-------:|
-| deletion OFF + guard  |     **77.8** | **0.0** |    0.89% | 99.73% |
-| delete + guard (n=3)  |         72.6 | **9.4** |    1.51% | 24.06% |
-| tombstone + guard     |         71.6 |     0.0 |    0.14% | 99.86% |
+| config                     | MGS (answer)   | MGS e2e       | F answer  | F e2e      |
+|----------------------------|---------------:|--------------:|----------:|-----------:|
+| deletion OFF + guard (n=3) | **78.1 ±0.29** | **0.0 ±0.00** | 0.7 ±0.21 | 99.7 ±0.00 |
+| delete + guard (n=3)       |     72.6 ±1.22 | **9.2 ±0.22** | 1.5 ±0.01 | 24.8 ±0.68 |
+| tombstone + guard (n=1)    |           71.6 |           0.0 |     0.14% |     99.86% |
 
-**Deleting nothing is optimal on the leaderboard metric** — 77.8, the best number this work
-produced and 8.3 above SOTA — and scores **exactly zero** end-to-end, because the content is
+Answer-metric gap **+5.4 (6.1 sd)**; e2e **−9.2**. e2e sd is **0.00** — structurally zero,
+not noisily low.
+
+**Deleting nothing is optimal on the leaderboard metric** — 78.1 ±0.29, the best number this
+work produced and 8.6 above SOTA — and scores **exactly zero** end-to-end, because the content is
 still in context on 99.7% of safety checkpoints.
 
 `compliance_utility_score` grades the *answer*, so it cannot separate "forgot" from "still
@@ -180,6 +186,12 @@ monotonically with capability (~12 sd end to end) while governance improves and
 over-refusal rises. Capability here manifests as caution — a trade, not a free improvement
 — and the trade saturates: 5.5 -> 5.6-sol is inside noise on MGS.
 
+> ⚠ **Number collision — 77.8 means two different things in this file.** Here it is
+> gpt-5.6-sol's **utility** (77.8 ±0.28). In the section above it is the deletion-off arm's
+> **MGS** (77.8 answer / 0.0 e2e). They are the two most-quoted figures in the write-up.
+> Always carry the error bar on this one and the e2e pair on that one, or the two become
+> indistinguishable out of context.
+
 
 ## What actually moved the number
 
@@ -203,12 +215,18 @@ office to 0.0. Utility did not pay for it.
 
 ## Diagnostic findings
 
-**Our privacy advantage is genuine judgment, not thin retrieval.** On office privacy
-checkpoints the secret is present in our prompt context **69%** of the time and we leak
-**11%** of those. Long-Context holds it 100% of the time by construction and leaks 19.3%.
+**Our privacy advantage is genuine judgment, not thin retrieval.** Across all four domains
+at n=3, the secret is present in our prompt context **74.7%** of the time and we leak
+**9.2%** of those. Long-Context holds it 100% of the time by construction and leaks 19.3%.
 So the low leak rate survives conditioning on exposure — we are better at the decision,
 not merely less exposed. (Requires emitting `prompt_memory_block`; without it the
 scorer's context metrics read a **vacuous 0.0**, not an error.)
+
+Per domain, held / leak-given-held: medical 84.4/9.0, office 74.7/11.0, education 89.1/0.6,
+**household 50.7/16.0**. Household is the honest exception — it holds the secret only half
+the time, so there the advantage genuinely is partly retrieval omission. State this per
+domain, not globally. (An earlier single-run office figure of 69%/11% is superseded by the
+n=3 extension above.)
 
 **The gap to SOTA is entirely utility.** Our A and F beat SOTA nearly everywhere
 (office F 0.5 vs 6.8; household A 9.2 vs 17.9). Every point of deficit is U.
@@ -265,10 +283,14 @@ Recorded because several were caught late and the same traps will recur.
 ## Open
 
 - Education's categorical-credential refusal (~19pp of one domain) — traced, unfixed.
-- Weak-backbone arm (gpt-4.1) — running; tests whether a *less* compliant model scores
-  *higher* under the standard prompt, which would confirm the misalignment story.
-- Repeat runs: every cell is n=1 against a ~3-point noise floor, so "1st of 43" is a tie,
-  not a win. Office (+11.0 over best-on-board) is the only margin clearly outside noise.
+- ~~Weak-backbone arm (gpt-4.1)~~ — **done**, n=3 per cell; it became the capability curve
+  above. It **refuted** the prediction it was built to test: the less compliant model scored
+  *lowest* under the standard prompt (48.5 vs 61.6 / 56.5), not highest. The mechanism held
+  (it refuses less and gains U) but the governance loss exceeded the utility gain.
+- ~~Repeat runs: every cell is n=1~~ — both headlines and every capability cell are now n=3
+  (four-domain mean sd ~1.2). **Still n=1**: the deletion-off arm (replication in flight) and
+  three of the four erasure 2x2 cells. Note the noise model was revised: the old ~3-point
+  floor came from single-domain runs and over-states noise on four-domain means.
 
 ## Reproduce
 

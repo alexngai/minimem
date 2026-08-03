@@ -119,11 +119,15 @@ capability-dependent (C4b: much weaker on gpt-4.1).
 **Evidence.** The one cell never run -- deletion fully off, behavioural guard on -- against
 the same config with deletion, four domains:
 
-| config                | MGS (answer) | MGS e2e | F answer | F e2e  |
-|-----------------------|-------------:|--------:|---------:|-------:|
-| deletion OFF + guard  |     **77.8** | **0.0** |    0.89% | 99.73% |
-| delete + guard (n=3)  |         72.6 | **9.4** |    1.51% | 24.06% |
-| tombstone + guard     |         71.6 |     0.0 |    0.14% | 99.86% |
+| config                    | MGS (answer)   | MGS e2e      | F answer  | F e2e       |
+|---------------------------|---------------:|-------------:|----------:|------------:|
+| deletion OFF + guard (n=3)| **78.1 ±0.29** | **0.0 ±0.00**| 0.7 ±0.21 | 99.7 ±0.00  |
+| delete + guard (n=3)      |     72.6 ±1.22 | **9.2 ±0.22**| 1.5 ±0.01 | 24.8 ±0.68  |
+| tombstone + guard (n=1)   |           71.6 |          0.0 |     0.14% |      99.86% |
+
+Answer-metric gap **+5.4 (6.1 sd)**; e2e gap **−9.2**. The e2e figures carry sd **0.00** —
+structurally zero across every rep, not noisily low: if nothing is deleted the content is
+always present.
 
 Deleting nothing is **optimal on the leaderboard metric** -- 77.8, our best number and 8.3
 above SOTA -- and scores **exactly zero** end-to-end, because the content is still in
@@ -144,8 +148,9 @@ a system can climb this leaderboard by not forgetting.
 Both findings are really the same one seen twice.
 **Defensible config.** delete + guard (72.6 answer / 9.4 e2e) -- the only arm scoring
 non-zero on both.
-**Threat.** The deletion-off arm is n=1. The direction is far outside noise (+5.2 answer,
--9.4 e2e) but unreplicated.
+**Threat.** Replicated at n=3 (both arms); the tombstone cell remains n=1. One benchmark —
+the claim is about GateMem's metric specifically, though the failure mode (answer-level
+grading cannot see retained context) applies to any benchmark scoring only the response.
 
 ### C4b — Capability trades utility for governance *(n=3 every cell; monotonic)*
 **Evidence.** Three backbones, identical retrieval and prompt, four domains, n=3 per cell:
