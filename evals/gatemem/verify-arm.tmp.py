@@ -93,14 +93,24 @@ def main() -> int:
     else:
         warns.append("no CONFIG banner found -- cannot confirm which flags took effect")
 
-    # 6 -- deletion actually happened when enabled
+    # 6 -- forgetting actually happened when enabled. "deletion=redact" removes facts rather
+    #      than notes, so counting deletions alone would flag every redact arm as inert.
     if banner and "deletion=off" not in banner:
-        deleted = sum(int(x) for f in logs
-                      for x in re.findall(r"(\d+) notes deleted", open(f, errors="ignore").read()))
-        if deleted == 0:
-            fails.append("config says deletion is enabled but 0 notes were deleted -- inert flag")
+        blobs = [open(f, errors="ignore").read() for f in logs]
+        deleted = sum(int(x) for b in blobs for x in re.findall(r"(\d+) notes deleted", b))
+        redacted = sum(int(x) for b in blobs for x in re.findall(r"(\d+) facts redacted", b))
+        refused = sum(int(x) for b in blobs for x in re.findall(r"\((\d+) refused\)", b))
+        if deleted + redacted == 0:
+            fails.append("config says deletion is enabled but nothing was deleted or redacted "
+                         "-- inert flag")
         else:
-            print(f"  notes deleted: {deleted}")
+            print(f"  notes deleted: {deleted}   facts redacted: {redacted}")
+        if "deletion=redact" in banner and redacted == 0:
+            fails.append("deletion=redact but 0 facts redacted -- the redact path did not run")
+        if refused:
+            warns.append(f"{refused} redactions refused by the blast-radius guard -- the "
+                         f"harness pre-filter and the library limit disagree; deletions are "
+                         f"narrower than the config implies")
 
     # 5 -- provenance field readable in at least one schema
     preds = sorted(glob.glob(f"evals/gatemem/results/{tag}-*.jsonl"))

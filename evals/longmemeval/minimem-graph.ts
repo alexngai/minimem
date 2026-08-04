@@ -49,6 +49,8 @@ export interface MinimemGraphOptions {
   maxContext?: number;
   /** Synthesized hierarchical summaries, written as retrievable domain-summary nodes. */
   summaries?: SummaryNote[];
+  /** Post-fusion selection (diversity / supersede / recency / quotas). Defaults to off. */
+  retrieval?: MinimemConfig["retrieval"];
 }
 
 export interface GraphExcerpt {
@@ -164,6 +166,7 @@ export class MinimemGraphStore {
       query: { maxResults: opts.topK ?? 16, minScore: 0 },
       // Product graph feature: build co-entity edges at sync when we intend to traverse.
       ...(opts.traverse ? { graph: { autoEntityLinks: true } } : {}),
+      ...(opts.retrieval ? { retrieval: opts.retrieval } : {}),
     });
     await mm.sync({ force: true });
     return new MinimemGraphStore(mm, opts, metas);

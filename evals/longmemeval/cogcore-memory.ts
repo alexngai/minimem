@@ -32,7 +32,7 @@ import { HashEmbeddingProvider } from "cognitive-core/embeddings";
 import { createLlmMemoryEvolver, type MemoryEvolutionPlan } from "cognitive-core/memory";
 import type { MemQAInstance, MemQuestion } from "swarmkit-eval";
 
-import { MemoryToolExecutor, type ToolResult } from "../../src/index.js";
+import { MemoryToolExecutor, type ToolResult, type MinimemConfig } from "../../src/index.js";
 import {
   closeBank,
   defaultScratchRoot,
@@ -149,6 +149,11 @@ export interface CogcoreLongMemEvalOptions {
   minimemEmbeddingModel?: string;
   /** Cache/work directory for the minimem-graph store (one subdir per instance). */
   minimemGraphDir?: string;
+  /**
+   * Post-fusion selection passed straight through to minimem (only with
+   * retrieval="minimem-graph"; the "kb" substrate does not go through minimem at all).
+   */
+  minimemRetrieval?: MinimemConfig["retrieval"];
   /** Optional progress hook for long extraction/indexing steps. */
   onProgress?: (message: string) => void;
   /**
@@ -2062,6 +2067,7 @@ export class CogcoreLiveLongMemEvalAdapter {
   private readonly rerankPoolSize: number;
   private readonly minimemEmbeddingModel?: string;
   private readonly minimemGraphDir: string;
+  private readonly minimemRetrieval?: MinimemConfig["retrieval"];
   private minimemStore: MinimemGraphStore | null = null;
   private readonly onProgress?: (message: string) => void;
   private atlas: Atlas | null = null;
@@ -2122,6 +2128,7 @@ export class CogcoreLiveLongMemEvalAdapter {
     this.rerankPoolSize = opts.rerankPoolSize ?? 24;
     this.minimemEmbeddingModel = opts.minimemEmbeddingModel;
     this.minimemGraphDir = opts.minimemGraphDir ?? path.resolve("evals/longmemeval/.cache/minimem-graph");
+    this.minimemRetrieval = opts.minimemRetrieval;
     this.onProgress = opts.onProgress;
   }
 
@@ -2719,6 +2726,7 @@ export class CogcoreLiveLongMemEvalAdapter {
         topK: this.topK,
         traverse: this.minimemTraverse,
         summaries,
+        ...(this.minimemRetrieval ? { retrieval: this.minimemRetrieval } : {}),
       });
       this.onProgress?.(
         `minimem-graph store built for ${instance.id} (${observationsToWrite.length} notes, ${summaries.length} summaries)`,
