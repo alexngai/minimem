@@ -19,6 +19,7 @@ import {
   vectorToBlob,
 } from "./internal.js";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./search/hybrid.js";
+import { selectResults } from "./search/select.js";
 import { searchKeyword, searchVector, buildKnowledgeFilterSql } from "./search/search.js";
 import { ensureMemoryIndexSchema } from "./db/schema.js";
 import { parseFrontmatter, type MemoryFrontmatter, type KnowledgeLink } from "./session.js";
@@ -151,6 +152,23 @@ export type MinimemConfig = {
     /** Cap co-entity edges added per note. Default 16. */
     maxLinksPerNote?: number;
   };
+  /**
+   * Post-fusion result selection (additive; every option defaults to previous behaviour).
+   *
+   * Hybrid fusion ranks by relevance alone, so the top-k can be k views of one passage
+   * while other facts the query asked for never surface. These knobs trade a little
+   * relevance for coverage, currency and layer balance, and exist to be ablated.
+   */
+  retrieval?: {
+    /** Redundancy penalty in [0,1]. 0 (default) = pure relevance order. */
+    diversity?: number;
+    /** Drop candidates superseded by another candidate in the pool (default false). */
+    supersede?: boolean;
+    /** Blend normalised recency into the score, [0,1]. 0 (default) = off. */
+    recency?: number;
+    /** Per-knowledge-type floors, e.g. `{ observation: 20, "domain-summary": 6 }`. */
+    quotas?: Record<string, number>;
+  };
   /** File watching configuration */
   watch?: {
     /** Enable file watching (default: true) */
@@ -210,6 +228,12 @@ export class Minimem {
     rrfK: number;
   };
   private readonly queryConfig: { maxResults: number; minScore: number };
+  private readonly retrievalConfig: {
+    diversity: number;
+    supersede: boolean;
+    recency: number;
+    quotas?: Record<string, number>;
+  };
   private readonly graphConfig: {
     autoEntityLinks: boolean;
     maxEntityFanout: number;
@@ -282,6 +306,12 @@ export class Minimem {
     this.queryConfig = {
       maxResults: config.query?.maxResults ?? 10,
       minScore: config.query?.minScore ?? 0.3,
+    };
+    this.retrievalConfig = {
+      diversity: config.retrieval?.diversity ?? 0,
+      supersede: config.retrieval?.supersede ?? false,
+      recency: config.retrieval?.recency ?? 0,
+      ...(config.retrieval?.quotas ? { quotas: config.retrieval.quotas } : {}),
     };
     this.graphConfig = {
       autoEntityLinks: config.graph?.autoEntityLinks ?? false,
@@ -683,16 +713,64 @@ export class Minimem {
       rrfK: this.hybrid.rrfK,
     });
 
-    return merged
-      .filter((entry) => entry.score >= minScore)
-      .slice(0, maxResults)
-      .map((r) => ({
-        path: r.path,
-        startLine: r.startLine,
-        endLine: r.endLine,
-        score: r.score,
-        snippet: r.snippet,
-      }));
+    const eligible = merged.filter((entry) => entry.score >= minScore);
+
+    // Fast path: with no selection options set, this is the previous behaviour exactly —
+    // score-ordered truncation, and no per-candidate metadata lookup.
+    const sel = this.retrievalConfig;
+    const selectionOn =
+      sel.diversity > 0 || sel.recency > 0 || sel.supersede || (sel.quotas && Object.keys(sel.quotas).length > 0);
+    const withMeta = selectionOn
+      ? eligible.map((r) => ({ ...r, ...this.selectionMetadata(r.id) }))
+      : eligible.map((r) => ({ ...r }));
+    const chosen = selectionOn
+      ? selectResults(withMeta, {
+          limit: maxResults,
+          diversity: sel.diversity,
+          recency: sel.recency,
+          supersede: sel.supersede,
+          ...(sel.quotas ? { quotas: sel.quotas } : {}),
+        })
+      : withMeta.slice(0, maxResults);
+
+    return chosen.map((r) => ({
+      path: r.path,
+      startLine: r.startLine,
+      endLine: r.endLine,
+      score: r.score,
+      snippet: r.snippet,
+    }));
+  }
+
+  /**
+   * Metadata a selection pass needs but fusion does not carry. Looked up only when a
+   * selection option is active, so the default retrieval path is unchanged.
+   */
+  private selectionMetadata(id: string): {
+    knowledgeType?: string | null;
+    knowledgeId?: string | null;
+    supersedes?: string | null;
+    createdAt?: number | null;
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT knowledge_type, knowledge_id, supersedes, created_at_ms FROM chunks WHERE id = ?`,
+      )
+      .get(id) as
+      | {
+          knowledge_type: string | null;
+          knowledge_id: string | null;
+          supersedes: string | null;
+          created_at_ms: number | null;
+        }
+      | undefined;
+    if (!row) return {};
+    return {
+      knowledgeType: row.knowledge_type,
+      knowledgeId: row.knowledge_id,
+      supersedes: row.supersedes,
+      createdAt: row.created_at_ms,
+    };
   }
 
   async sync(opts?: { reason?: string; force?: boolean }): Promise<void> {
@@ -901,6 +979,17 @@ export class Minimem {
     const entities = frontmatter?.entities ?? null;
     const confidence = frontmatter?.confidence ?? null;
     const links = frontmatter?.links ?? null;
+    // `supersedes` has been in the frontmatter convention and parsed by session.ts since the
+    // knowledge format landed, but was never persisted -- so retrieval had no way to tell a
+    // superseded note from the note that replaced it. `created` is the note's stated date,
+    // which is what recency should rank on rather than file mtime.
+    const supersedes = frontmatter?.supersedes ?? null;
+    const createdMs = (() => {
+      const raw = frontmatter?.created;
+      if (!raw) return null;
+      const t = Date.parse(String(raw));
+      return Number.isFinite(t) ? t : null;
+    })();
 
     // Get embeddings
     const embeddings = await this.embedChunks(chunks);
@@ -946,8 +1035,8 @@ export class Minimem {
 
       this.db
         .prepare(
-          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, type, knowledge_type, knowledge_id, domains, entities, confidence)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, type, knowledge_type, knowledge_id, domains, entities, confidence, supersedes, created_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           chunkId,
@@ -966,6 +1055,8 @@ export class Minimem {
           domains ? JSON.stringify(domains) : null,
           entities ? JSON.stringify(entities) : null,
           confidence,
+          supersedes,
+          createdMs,
         );
 
       // Insert into vector table if available
