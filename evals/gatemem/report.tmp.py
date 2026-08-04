@@ -21,7 +21,13 @@ print(
     f"n={summary['n_checkpoints']} "
     f"(utility {summary['n_utility']}, privacy {summary['n_privacy']}, safety {summary['n_safety']})"
 )
-print(f"U={u:.1f}  A={a:.1f}  F={f:.1f}  ->  MGS={m:.1f}")
+# e2e penalises sensitive content merely PRESENT in the prompt context, so it is the only
+# metric that can see a system which retains a fact and declines to say it. MGS cannot:
+# tombstoning scored 71.6 MGS at 0.0 e2e while keeping the content in 99.7% of contexts.
+# For any deletion- or redaction-related arm this is the primary number, not a footnote.
+e2e = summary.get("compliance_utility_e2e_score")
+e2e_s = "n/a" if e2e is None else f"{100 * e2e:.1f}"
+print(f"U={u:.1f}  A={a:.1f}  F={f:.1f}  ->  MGS={m:.1f}   e2e={e2e_s}")
 print(f"action_accuracy={100 * summary['action_accuracy']:.1f}  over_refusal={100 * summary['over_refusal_rate']:.1f}")
 
 # Action confusion, which is where redaction-vs-refusal calibration shows up.
