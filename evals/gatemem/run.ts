@@ -43,7 +43,13 @@ import {
   type GateMemTurn,
   type GateMemAction,
 } from "swarmkit-eval";
-import { Minimem, serializeFrontmatter, type MemoryFrontmatter } from "../../src/index.js";
+import {
+  Minimem,
+  applyRedactions,
+  isFullyRedacted,
+  serializeFrontmatter,
+  type MemoryFrontmatter,
+} from "../../src/index.js";
 import { LlmClient } from "../locomo/llm.js";
 
 function arg(name: string, def?: string): string | undefined {
@@ -213,6 +219,19 @@ const QUOTAS = (() => {
 // RECORDED. Kept separable so "recorded but not enforced" is a testable state rather than a
 // silent one.
 const REDACTION = arg("redaction", "on")! === "on";
+// Redaction granularity. "block" removes the enclosing line; "span" removes only the matched
+// characters. The library defaults to block because span leaves a value derivable from its
+// own sentence ("raised by 200 from the previous 2400" reconstructs a masked 2600).
+//
+// That default assumes a record spans several lines. GateMem turn bodies are ONE line each
+// (186/186 on the first education episode, median 196 chars), so a block IS the whole record
+// and block-mode redaction degenerates into deleting the record's content while keeping its
+// note -- which measured U -8.50 against plain deletion, because the emptied note still
+// occupies a retrieval slot that deletion would have freed. Use span to test field-level
+// forgetting on single-line records.
+const REDACT_GRANULARITY = (arg("redact-granularity", "block")! === "span" ? "span" : "block") as
+  | "span"
+  | "block";
 // Episodes in parallel. Keep at 1 with local embeddings: each episode opens its own
 // Minimem, and the llama.cpp Metal device is process-global — concurrent init/teardown
 // aborts natively (ggml_abort in ggml_metal_device_free). evals/longmemeval/qa.ts
@@ -600,7 +619,7 @@ async function applyDeletions(
         try {
           const plan = await mm.redact({
             match: value,
-            granularity: "block",
+            granularity: REDACT_GRANULARITY,
             reason: "gatemem deletion request",
             maxShare: LITERAL_MAX_SHARE,
           });
@@ -693,10 +712,29 @@ async function answerCheckpoint(
   }
   // Chronological order reconstructs coherent slices of the conversation rather than a
   // relevance-shuffled pile, which is how the policy statement stays attached to its fact.
-  const records = selected.size
-    ? [...selected].sort((a, b) => a - b).map((i) => visible[i].render).join("\n")
-    : "(no records matched)";
-  const selectedTurns = selected.size;
+  //
+  // Redaction is re-applied HERE, not just inherited from search. `visible[].render` is the
+  // harness's own copy of the turn text; minimem is consulted only for which indices to
+  // include, so a rule enforced on the retrieval path never touched this string. The first
+  // redact arm measured 0.0 e2e on all four domains and a prompt block ~1KB LARGER than the
+  // deletion arm -- the deleted content was retained and rendered verbatim, and the +5.3 MGS
+  // it scored was the not-forgetting artifact, not a win.
+  //
+  // The general lesson, worth keeping: read-time redaction protects only what flows through
+  // the store. Any caller holding its own copy of the text must filter it too.
+  const rules = mm.listRedactions();
+  const rendered: string[] = [];
+  for (const i of [...selected].sort((a, b) => a - b)) {
+    const unit = visible[i];
+    if (rules.length === 0) {
+      rendered.push(unit.render);
+      continue;
+    }
+    const { text } = applyRedactions(unit.render, rules, { path: `memory/${unit.id}.md` });
+    if (!isFullyRedacted(text)) rendered.push(text);
+  }
+  const records = rendered.length ? rendered.join("\n") : "(no records matched)";
+  const selectedTurns = rendered.length;
   const visibleTurns = visible.length;
   const asker = episode.entities.principals.find((p) => p.principal_id === query.asker.principal_id);
 
@@ -763,7 +801,8 @@ async function answerCheckpoint(
       `[gatemem] CONFIG deletion=${DELETION} reconstruct-guard=${RECONSTRUCT_GUARD} ` +
         `prompt-mode=${PROMPT_MODE} model=${ANSWER_DEP} answer-prompt-chars=${prompt.length} ` +
         `diversity=${DIVERSITY} recency=${RECENCY} supersede=${SUPERSEDE ? "on" : "off"} ` +
-        `quotas=${QUOTAS ? JSON.stringify(QUOTAS) : "none"} redaction=${REDACTION ? "on" : "off"}\n`,
+        `quotas=${QUOTAS ? JSON.stringify(QUOTAS) : "none"} redaction=${REDACTION ? "on" : "off"} ` +
+        `redact-granularity=${REDACT_GRANULARITY}\n`,
     );
   }
   try {
