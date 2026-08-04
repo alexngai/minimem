@@ -35,6 +35,21 @@ export {
 // mergeHybridResults) are not exported. Import from source files directly if needed.
 
 // Batch embedding
+// Retrieval selection + field-level redaction
+export { selectResults, type SelectCandidate, type SelectOptions } from "./search/select.js";
+export {
+  applyRedactions,
+  isFullyRedacted,
+  normalizeRule,
+  parseRedactionManifest,
+  serializeRedactionRule,
+  DEFAULT_REPLACEMENT,
+  type RedactionRule,
+  type RedactionRuleInput,
+  type RedactionGranularity,
+  type RedactionResult,
+} from "./search/redact.js";
+
 export { runOpenAiEmbeddingBatches, type OpenAiBatchRequest } from "./embeddings/batch-openai.js";
 export { runGeminiEmbeddingBatches, type GeminiBatchRequest } from "./embeddings/batch-gemini.js";
 

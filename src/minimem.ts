@@ -20,6 +20,15 @@ import {
 } from "./internal.js";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./search/hybrid.js";
 import { selectResults } from "./search/select.js";
+import {
+  applyRedactions,
+  isFullyRedacted,
+  normalizeRule,
+  parseRedactionManifest,
+  serializeRedactionRule,
+  type RedactionRule,
+  type RedactionRuleInput,
+} from "./search/redact.js";
 import { searchKeyword, searchVector, buildKnowledgeFilterSql } from "./search/search.js";
 import { ensureMemoryIndexSchema } from "./db/schema.js";
 import { parseFrontmatter, type MemoryFrontmatter, type KnowledgeLink } from "./session.js";
@@ -168,6 +177,12 @@ export type MinimemConfig = {
     recency?: number;
     /** Per-knowledge-type floors, e.g. `{ observation: 20, "domain-summary": 6 }`. */
     quotas?: Record<string, number>;
+    /**
+     * Apply the store's redaction manifest to every content-returning path (default true).
+     * Costs one `stat` per call when no manifest exists. Exists to be switched off for
+     * ablation; switching it off in production re-exposes redacted facts.
+     */
+    redaction?: boolean;
   };
   /** File watching configuration */
   watch?: {
@@ -233,7 +248,10 @@ export class Minimem {
     supersede: boolean;
     recency: number;
     quotas?: Record<string, number>;
+    redaction: boolean;
   };
+  /** Redaction rules, reloaded when the manifest's mtime changes. */
+  private redactionCache: { mtimeMs: number; rules: RedactionRule[] } | null = null;
   private readonly graphConfig: {
     autoEntityLinks: boolean;
     maxEntityFanout: number;
@@ -312,6 +330,7 @@ export class Minimem {
       supersede: config.retrieval?.supersede ?? false,
       recency: config.retrieval?.recency ?? 0,
       ...(config.retrieval?.quotas ? { quotas: config.retrieval.quotas } : {}),
+      redaction: config.retrieval?.redaction ?? true,
     };
     this.graphConfig = {
       autoEntityLinks: config.graph?.autoEntityLinks ?? false,
@@ -733,13 +752,73 @@ export class Minimem {
         })
       : withMeta.slice(0, maxResults);
 
-    return chosen.map((r) => ({
-      path: r.path,
-      startLine: r.startLine,
-      endLine: r.endLine,
-      score: r.score,
-      snippet: r.snippet,
-    }));
+    // Redaction is applied to what is *returned*, and a result that redacts down to nothing
+    // is dropped rather than returned empty. Dropping would silently shrink the result set,
+    // so backfill from the candidates selection left behind.
+    //
+    // Note the deliberate limit: rules do not affect *ranking*, so a query for a redacted
+    // fact still ranks its note highly. That is an existence side channel, not a content
+    // leak; closing it would mean redacting before scoring, at a cost the default path
+    // should not pay.
+    const rules = this.retrievalConfig.redaction ? this.loadRedactionRules() : [];
+    if (rules.length === 0) {
+      return chosen.map((r) => ({
+        path: r.path,
+        startLine: r.startLine,
+        endLine: r.endLine,
+        score: r.score,
+        snippet: r.snippet,
+      }));
+    }
+
+    const chosenIds = new Set(chosen.map((r) => r.id));
+    const ordered = [...chosen, ...withMeta.filter((r) => !chosenIds.has(r.id))];
+    const out: MinimemSearchResult[] = [];
+    for (const r of ordered) {
+      if (out.length >= maxResults) break;
+      const { text } = applyRedactions(r.snippet, rules, { path: r.path });
+      if (isFullyRedacted(text)) continue;
+      out.push({
+        path: r.path,
+        startLine: r.startLine,
+        endLine: r.endLine,
+        score: r.score,
+        snippet: text,
+      });
+    }
+    return out;
+  }
+
+  /** Absolute path of the store's redaction manifest. */
+  private redactionManifestPath(): string {
+    return path.join(this.memoryDir, ".redactions.jsonl");
+  }
+
+  /**
+   * Load redaction rules, re-reading only when the manifest changes. Rules live in a file
+   * rather than the index because memory files are the source of truth: an index-only
+   * redaction is undone by the next sync, which turns a privacy guarantee into a leak that
+   * reappears on a schedule.
+   */
+  private loadRedactionRules(): RedactionRule[] {
+    const file = this.redactionManifestPath();
+    let mtimeMs: number;
+    try {
+      mtimeMs = fsSync.statSync(file).mtimeMs;
+    } catch {
+      this.redactionCache = null;
+      return [];
+    }
+    if (this.redactionCache && this.redactionCache.mtimeMs === mtimeMs) {
+      return this.redactionCache.rules;
+    }
+    try {
+      const rules = parseRedactionManifest(fsSync.readFileSync(file, "utf-8"));
+      this.redactionCache = { mtimeMs, rules };
+      return rules;
+    } catch {
+      return this.redactionCache?.rules ?? [];
+    }
   }
 
   /**
@@ -1445,6 +1524,18 @@ export class Minimem {
   }
 
   async readFile(relativePath: string): Promise<string | null> {
+    const raw = await this.readFileRaw(relativePath);
+    if (raw === null) return null;
+    const rules = this.retrievalConfig.redaction ? this.loadRedactionRules() : [];
+    if (rules.length === 0) return raw;
+    return applyRedactions(raw, rules, { path: relativePath }).text;
+  }
+
+  /**
+   * Unredacted read. Private on purpose: indexing reads files directly via `fs`, so the only
+   * internal caller is `readLines`, which must slice against original line numbers.
+   */
+  private async readFileRaw(relativePath: string): Promise<string | null> {
     const absPath = path.join(this.memoryDir, relativePath);
     try {
       return await fs.readFile(absPath, "utf-8");
@@ -1460,7 +1551,10 @@ export class Minimem {
     relativePath: string,
     opts?: { from?: number; lines?: number },
   ): Promise<{ content: string; startLine: number; endLine: number } | null> {
-    const content = await this.readFile(relativePath);
+    // Slice the raw file: a search result's startLine/endLine index the file as indexed, and
+    // block redaction removes lines. Redacting first would shift every offset and return the
+    // wrong region. Redaction is applied to the slice below instead.
+    const content = await this.readFileRaw(relativePath);
     if (content === null) return null;
 
     const allLines = content.split("\n");
@@ -1471,11 +1565,94 @@ export class Minimem {
     const endIdx = Math.min(startIdx + lines, allLines.length);
     const selectedLines = allLines.slice(startIdx, endIdx);
 
+    const rules = this.retrievalConfig.redaction ? this.loadRedactionRules() : [];
+    const sliced = selectedLines.join("\n");
     return {
-      content: selectedLines.join("\n"),
+      content:
+        rules.length === 0
+          ? sliced
+          : applyRedactions(sliced, rules, { path: relativePath }).text,
       startLine: from,
       endLine: startIdx + selectedLines.length,
     };
+  }
+
+  /**
+   * Redact a fact across the store: record a rule that every content-returning path then
+   * applies. Deliberately does not rewrite memory files — see the note on `mode` below.
+   *
+   * The blast-radius guard is not incidental. The precursor to this API purged any literal
+   * appearing in under a *third* of notes; it destroyed ~16 points of utility per domain at
+   * zero benefit, and tightening that one threshold to 10% was the largest single scoring
+   * improvement measured. A redaction matching most of the store is nearly always a
+   * too-generic pattern rather than a genuine mass deletion, so it fails loudly.
+   */
+  async redact(
+    input: RedactionRuleInput & {
+      /** Refuse if the rule matches more than this share of notes. Default 0.10. */
+      maxShare?: number;
+      /**
+       * Never refuse at or below this many matched notes, whatever the share. Default 3.
+       *
+       * A share threshold alone is meaningless on a small store — redacting one secret from
+       * one note in a three-note store is 33% and entirely legitimate. The 10% figure was
+       * derived from episodes holding hundreds of notes. What the guard is actually for is a
+       * too-generic pattern sweeping a large store, which needs both a high share *and* a
+       * meaningful absolute count.
+       */
+      minNotes?: number;
+      /** Compute and return the plan without recording it. */
+      dryRun?: boolean;
+    },
+  ): Promise<{
+    rule: RedactionRule;
+    /** Memory-relative paths the rule matches. */
+    matchedPaths: string[];
+    totalNotes: number;
+    share: number;
+    applied: boolean;
+  }> {
+    const rule = normalizeRule({ ...input, at: input.at ?? new Date().toISOString() });
+    const maxShare = input.maxShare ?? 0.1;
+    const minNotes = input.minNotes ?? 3;
+    const dryRun = input.dryRun ?? false;
+
+    const files = await listMemoryFiles(this.memoryDir);
+    const matchedPaths: string[] = [];
+    for (const abs of files) {
+      const rel = path.relative(this.memoryDir, abs);
+      let content: string;
+      try {
+        content = await fs.readFile(abs, "utf-8");
+      } catch {
+        continue;
+      }
+      if (applyRedactions(content, [rule], { path: rel }).hits > 0) matchedPaths.push(rel);
+    }
+    const share = files.length === 0 ? 0 : matchedPaths.length / files.length;
+
+    if (!dryRun && share > maxShare && matchedPaths.length > minNotes) {
+      throw new Error(
+        `Redaction refused: "${rule.match}" matches ${matchedPaths.length}/${files.length} ` +
+          `notes (${(share * 100).toFixed(1)}%), above the ${(maxShare * 100).toFixed(1)}% ` +
+          `blast-radius limit. Narrow the pattern, scope it with \`paths\`, or raise ` +
+          `\`maxShare\` deliberately. Re-run with \`dryRun\` to inspect the matches.`,
+      );
+    }
+
+    if (!dryRun) {
+      const file = this.redactionManifestPath();
+      await ensureDir(path.dirname(file));
+      await fs.appendFile(file, `${serializeRedactionRule(rule)}\n`, "utf-8");
+      this.redactionCache = null;
+    }
+
+    return { rule, matchedPaths, totalNotes: files.length, share, applied: !dryRun };
+  }
+
+  /** Rules currently in force. */
+  listRedactions(): RedactionRule[] {
+    return this.loadRedactionRules();
   }
 
   /**
