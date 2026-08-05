@@ -410,6 +410,57 @@ Recorded because several were caught late and the same traps will recur.
   three of the four erasure 2x2 cells. Note the noise model was revised: the old ~3-point
   floor came from single-domain runs and over-states noise on four-domain means.
 
+## Retrieval-lever ablation (2026-08-04)
+
+Ablating the four `retrieval` knobs added in 56c28da / 5263019 / 3e555c1. All arms n=1, one
+judge (gpt-4.1), so **deltas only** — these are not leaderboard-comparable. Four-domain means:
+
+| arm | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (control) | 79.38 | 7.55 | 2.48 | 71.53 | 7.88 |
+| `--deletion redact` (block) | 70.88 | 7.40 | 2.50 | 64.00 | 10.10 |
+| `--deletion redact` (span) | 78.33 | 7.55 | **1.52** | 71.20 | **9.18** |
+| `--diversity 0.3` | 81.65 | 7.25 | 2.23 | **74.12** | 8.85 |
+| `--recency 0.2` | 77.95 | 7.95 | 2.52 | 69.97 | 9.25 |
+
+**The control reproduced the 71.3 best (71.53), confirming the new knobs are inert by default.**
+
+- **Field-level redaction at span granularity matches note-level deletion** (MGS −0.33, far
+  inside the ±2.4 noise floor) while removing more sensitive content from context (e2e +1.30)
+  and leaking less on forgetting (F −0.95). The architectural claim it supports is modest but
+  real: you can stop destroying whole records and pay nothing on the headline. **The mean
+  hides a 3-up-1-down split** — medical +3.6, office +1.0, household +1.3, education **−7.2**
+  (education's own noise floor is ±6.6, so that regression is right at the edge of real).
+- **Granularity was worth 7.20 MGS** (span vs block), the largest single effect measured here.
+  GateMem turn bodies are one line each (186/186, median 196 chars), so block granularity —
+  which removes the enclosing line — deleted each record's entire content while keeping its
+  note, which is *worse* than deletion: the emptied note still holds a top-k slot deletion
+  would have freed. The library default stays `block` (span leaves values derivable from
+  their own sentence); single-line record stores should set `span`.
+- **`--diversity 0.3`: +2.60 MGS**, clearing the 2.4 floor by 0.2 at n=1, e2e also up so it is
+  not a retention artifact. Promising, not established.
+- **`--recency 0.2`: null** (−1.55).
+- **Not run**: `--supersede` and `--quotas` are inexpressible in this harness — every note is
+  written without a `supersedes` field and with type `observation`, so both arms would have
+  been guaranteed nulls.
+
+### Two harness defects this ablation exposed
+
+1. **The first redact arm scored +5.30 MGS and was an artifact.** `run.ts` rendered the prompt
+   from the harness's own copy of the turn text; minimem was consulted only for *which*
+   indices to include, so read-time redaction never reached the prompt. Caught by e2e reading
+   exactly **0.00 on all four domains** and prompt blocks ~1KB *larger* than base. Generalizes
+   beyond the eval: **read-time redaction protects only what flows through the store** — any
+   caller holding its own copy of the text must filter it too.
+2. `report.tmp.py` was not printing `compliance_utility_e2e_score` at all, which is the only
+   metric that can see this class of failure.
+
+Both predictions were pre-registered before their runs. Predicting "e2e sharply up" is what
+made 0.00 legible as a red flag rather than a footnote under a +5.3 headline. Both
+predictions were also partly **wrong** — U fell under block (not rose), and F fell under span
+(not rose) — and in each case the miss localised the mechanism faster than a correct guess
+would have.
+
 ## Reproduce
 
 ```bash
