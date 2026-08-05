@@ -425,6 +425,35 @@ judge (gpt-4.1), so **deltas only** — these are not leaderboard-comparable. Fo
 
 **The control reproduced the 71.3 best (71.53), confirming the new knobs are inert by default.**
 
+### Replicated: base vs span at paired n=3 (2026-08-05)
+
+| | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (n=3) | 79.20 ±0.70 | 7.33 ±0.20 | 2.54 ±0.35 | 71.53 ±0.82 | 8.37 ±0.49 |
+| span (n=3) | 77.07 ±1.28 | 7.43 ±0.13 | **1.18 ±0.55** | 70.37 ±1.10 | **9.47 ±0.26** |
+| span − base | −2.13 (marginal) | +0.09 n.s. | **−1.36 (t=−3.60)** | −1.16 **n.s.** | **+1.11 (t=+3.46)** |
+
+**Field-level redaction at span granularity improves both governance metrics significantly —
+forgetting leakage −1.36 and context leakage +1.11 — at statistically indistinguishable
+headline MGS (−1.16, n.s.).** That is the defensible claim: you can move the unit of
+forgetting from the record to the fact and pay nothing on the score the leaderboard ranks,
+while measurably leaking less.
+
+**The entire cost is one domain.** medical +1.3 MGS, office +0.2, household +0.3, education
+**−6.4** (U −9.4). Education's regression is diagnosed, not mysterious: redaction rules are a
+*standing* filter that keeps firing on records ingested after the request, so marker density
+climbs from a median of 11 in an episode's first quarter to 27–29 thereafter, and regressed
+utility contexts carry 24 markers against 12 on survivors. The blast-radius guard does not
+catch this because it is evaluated **once, at record time** — a rule matching 1 note of 40
+can be matching 30 of 200 by the end of the episode with nothing re-checking. Scoping rules
+to `matchedPaths` at record time is the untested fix.
+
+**`--diversity 0.3` does not replicate.** Combined with span it gave MGS 71.03, −0.50 vs base,
+against a predicted +2.6. Its standalone +2.60 cleared the noise floor by 0.2 at n=1 and
+should be treated as noise. One directional signal worth a later look: under span, diversity
+recovered education U by +5.5 (66.1 vs 60.6), consistent with diverse retrieval reducing
+redundant redacted records and hence marker density. n=1.
+
 - **Field-level redaction at span granularity matches note-level deletion** (MGS −0.33, far
   inside the ±2.4 noise floor) while removing more sensitive content from context (e2e +1.30)
   and leaking less on forgetting (F −0.95). The architectural claim it supports is modest but
