@@ -173,6 +173,71 @@ describe("Redaction E2E", () => {
     assert.ok(!JSON.stringify(results).includes("Quarterly planning"));
   });
 
+  describe("scope", () => {
+    // A store-scoped rule keeps firing on notes written LATER. That is right for "never
+    // surface this string again" and wrong for "forget what these records said" -- and it
+    // cost one benchmark domain 9.4 points of utility, because a literal that is not unique
+    // to the sensitive fact shreds later legitimate records too.
+    it("store-scoped rules redact notes written after the rule", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-scope-store-"));
+      await fs.mkdir(path.join(dir, "memory"));
+      await fs.writeFile(path.join(dir, "MEMORY.md"), "# M\n");
+      await fs.writeFile(path.join(dir, "memory", "a.md"), "- The rate is 2600 USD.\n");
+      const mm = await Minimem.create({
+        memoryDir: dir,
+        embedding: { provider: "openai", model: "text-embedding-3-small" },
+        watch: { enabled: false },
+        query: { minScore: 0.0 },
+      });
+      try {
+        await mm.redact({ match: "2600", minNotes: 100 });
+        await fs.writeFile(path.join(dir, "memory", "later.md"), "- Unrelated: 2600 attendees.\n");
+        const after = await mm.readFile(path.join("memory", "later.md"));
+        assert.ok(!after?.includes("2600"), "store scope should reach the later note");
+      } finally {
+        mm.close();
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("matched-scoped rules leave later notes alone", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-scope-matched-"));
+      await fs.mkdir(path.join(dir, "memory"));
+      await fs.writeFile(path.join(dir, "MEMORY.md"), "# M\n");
+      await fs.writeFile(path.join(dir, "memory", "a.md"), "- The rate is 2600 USD.\n");
+      const mm = await Minimem.create({
+        memoryDir: dir,
+        embedding: { provider: "openai", model: "text-embedding-3-small" },
+        watch: { enabled: false },
+        query: { minScore: 0.0 },
+      });
+      try {
+        const plan = await mm.redact({ match: "2600", scope: "matched", minNotes: 100 });
+        assert.equal(plan.applied, true);
+        assert.deepEqual(plan.rule.paths, [path.join("memory", "a.md")]);
+
+        const original = await mm.readFile(path.join("memory", "a.md"));
+        assert.ok(!original?.includes("2600"), "the matched note is still redacted");
+
+        await fs.writeFile(path.join(dir, "memory", "later.md"), "- Unrelated: 2600 attendees.\n");
+        const after = await mm.readFile(path.join("memory", "later.md"));
+        assert.ok(after?.includes("2600"), "a note written later must be untouched");
+      } finally {
+        mm.close();
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    // normalizeRule drops an empty `paths`, which would silently widen a matched-scope rule
+    // to the whole store -- the exact opposite of what was asked for.
+    it("a matched-scope rule that matches nothing is not recorded", async () => {
+      const before = minimem.listRedactions().length;
+      const plan = await minimem.redact({ match: "no-such-string-anywhere", scope: "matched" });
+      assert.equal(plan.applied, false);
+      assert.equal(minimem.listRedactions().length, before);
+    });
+  });
+
   it("can be switched off for ablation", async () => {
     const off = await Minimem.create({
       memoryDir: tempDir,

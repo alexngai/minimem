@@ -1409,27 +1409,42 @@ export class Minimem {
     const result = new Map<string, number[]>();
     if (!this.cache.enabled || hashes.length === 0) return result;
 
-    const placeholders = hashes.map(() => "?").join(",");
-    const rows = this.db
-      .prepare(
-        `SELECT hash, embedding FROM ${EMBEDDING_CACHE_TABLE}
-         WHERE provider = ? AND model = ? AND provider_key = ? AND hash IN (${placeholders})`,
-      )
-      .all(this.provider.id, this.provider.model, this.providerKey, ...hashes) as Array<{
-      hash: string;
-      embedding: string;
-    }>;
-
+    // Batched deliberately. Querying every hash in one statement spreads the
+    // array into `.all()`, which overflows the call stack once the argument
+    // count gets large — measured at ~124,380 args on Node 22. A single
+    // 10M-token BEAM conversation produces well past that, and it surfaced as
+    // `RangeError: Maximum call stack size exceeded` only after 2.5 hours of
+    // extraction had already been paid for.
+    //
+    // (This build's SQLite tolerates >50k host parameters, so the placeholder
+    // count is not the binding constraint here — the spread is. Batching fixes
+    // both regardless, and keeps the query well inside any SQLITE_MAX_VARIABLE_
+    // NUMBER a different build might impose.)
+    const BATCH = 400;
+    const touch = this.db.prepare(
+      `UPDATE ${EMBEDDING_CACHE_TABLE} SET updated_at = ?
+       WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`,
+    );
     const now = Date.now();
-    for (const row of rows) {
-      result.set(row.hash, parseEmbedding(row.embedding));
-      // Touch for LRU
-      this.db
+
+    for (let i = 0; i < hashes.length; i += BATCH) {
+      const batch = hashes.slice(i, i + BATCH);
+      const placeholders = batch.map(() => "?").join(",");
+      const rows = this.db
         .prepare(
-          `UPDATE ${EMBEDDING_CACHE_TABLE} SET updated_at = ?
-           WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`,
+          `SELECT hash, embedding FROM ${EMBEDDING_CACHE_TABLE}
+           WHERE provider = ? AND model = ? AND provider_key = ? AND hash IN (${placeholders})`,
         )
-        .run(now, this.provider.id, this.provider.model, this.providerKey, row.hash);
+        .all(this.provider.id, this.provider.model, this.providerKey, ...batch) as Array<{
+        hash: string;
+        embedding: string;
+      }>;
+
+      for (const row of rows) {
+        result.set(row.hash, parseEmbedding(row.embedding));
+        // Touch for LRU
+        touch.run(now, this.provider.id, this.provider.model, this.providerKey, row.hash);
+      }
     }
 
     return result;
@@ -1603,6 +1618,22 @@ export class Minimem {
       minNotes?: number;
       /** Compute and return the plan without recording it. */
       dryRun?: boolean;
+      /**
+       * "store" (default) records a standing rule that also filters records written LATER.
+       * "matched" pins the rule to the notes it matched at record time.
+       *
+       * The difference is not cosmetic. A store-scoped rule keeps firing forever, so when the
+       * matched literal is not unique to the sensitive fact, later legitimate records get
+       * redacted too: measured on a governance benchmark as marker density climbing from a
+       * median of 11 per context in an episode's first quarter to 27-29 thereafter, costing
+       * one domain 9.4 points of utility. It also silently outgrows the blast-radius guard,
+       * which is evaluated once here and never re-checked -- a rule matching 1 note of 40 can
+       * be matching 30 of 200 later.
+       *
+       * "store" is right for "never surface this string again"; "matched" is right for
+       * "forget what these records said", which is what a deletion request usually means.
+       */
+      scope?: "store" | "matched";
     },
   ): Promise<{
     rule: RedactionRule;
@@ -1612,7 +1643,8 @@ export class Minimem {
     share: number;
     applied: boolean;
   }> {
-    const rule = normalizeRule({ ...input, at: input.at ?? new Date().toISOString() });
+    const scope = input.scope ?? "store";
+    let rule = normalizeRule({ ...input, at: input.at ?? new Date().toISOString() });
     const maxShare = input.maxShare ?? 0.1;
     const minNotes = input.minNotes ?? 3;
     const dryRun = input.dryRun ?? false;
@@ -1638,6 +1670,16 @@ export class Minimem {
           `blast-radius limit. Narrow the pattern, scope it with \`paths\`, or raise ` +
           `\`maxShare\` deliberately. Re-run with \`dryRun\` to inspect the matches.`,
       );
+    }
+
+    if (scope === "matched") {
+      // Pin the rule to what it matched now. An empty match must NOT fall through to a
+      // store-scoped rule: normalizeRule drops an empty `paths`, which would silently widen
+      // the rule to the whole store -- the exact opposite of what was asked for.
+      if (matchedPaths.length === 0) {
+        return { rule, matchedPaths, totalNotes: files.length, share, applied: false };
+      }
+      rule = normalizeRule({ ...rule, paths: matchedPaths });
     }
 
     if (!dryRun) {

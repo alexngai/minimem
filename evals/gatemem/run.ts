@@ -232,6 +232,14 @@ const REDACTION = arg("redaction", "on")! === "on";
 const REDACT_GRANULARITY = (arg("redact-granularity", "block")! === "span" ? "span" : "block") as
   | "span"
   | "block";
+// "store" (default) = standing rule, also filters records ingested after the request.
+// "matched" = pinned to the notes it matched at record time, which is how DELETION behaves.
+// Store-scoped rules cost education 9.4 U: marker density climbed from a median of 11 per
+// context in an episode's first quarter to 27-29 thereafter, and regressed utility contexts
+// carried 24 markers against 12 on survivors.
+const REDACT_SCOPE = (arg("redact-scope", "store")! === "matched" ? "matched" : "store") as
+  | "matched"
+  | "store";
 // Episodes in parallel. Keep at 1 with local embeddings: each episode opens its own
 // Minimem, and the llama.cpp Metal device is process-global — concurrent init/teardown
 // aborts natively (ggml_abort in ggml_metal_device_free). evals/longmemeval/qa.ts
@@ -620,6 +628,7 @@ async function applyDeletions(
           const plan = await mm.redact({
             match: value,
             granularity: REDACT_GRANULARITY,
+            scope: REDACT_SCOPE,
             reason: "gatemem deletion request",
             maxShare: LITERAL_MAX_SHARE,
           });
@@ -802,7 +811,7 @@ async function answerCheckpoint(
         `prompt-mode=${PROMPT_MODE} model=${ANSWER_DEP} answer-prompt-chars=${prompt.length} ` +
         `diversity=${DIVERSITY} recency=${RECENCY} supersede=${SUPERSEDE ? "on" : "off"} ` +
         `quotas=${QUOTAS ? JSON.stringify(QUOTAS) : "none"} redaction=${REDACTION ? "on" : "off"} ` +
-        `redact-granularity=${REDACT_GRANULARITY}\n`,
+        `redact-granularity=${REDACT_GRANULARITY} redact-scope=${REDACT_SCOPE}\n`,
     );
   }
   try {
