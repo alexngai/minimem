@@ -71,7 +71,7 @@ with LongMemEval-specific rules removed and an explicit contradiction-flagging
 instruction added (the v15 "prefer the latest state" rule was resolving
 contradictions the rubric wants flagged). `v15` uses the legacy `cogcore-live`
 answer prompt (the LongMemEval one). Validated held-out (conv 15–20,
-majority-of-3): tuned beats v15 by +4.4pp offline; confirmed live at +6.6pp.
+mean-of-3): tuned beats v15 by +4.4pp offline; confirmed live at +6.6pp.
 
 ## Results (100K, current system)
 

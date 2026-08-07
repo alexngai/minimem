@@ -1,4 +1,4 @@
-# Retrieval results — BEAM + LOCOMO
+# Retrieval results — BEAM + LOCOMO + LongMemEval
 
 **Corrected headline (see "Attribution" below).** Routing memory retrieval through
 **minimem's focused hybrid search** — instead of the cognitive-core
@@ -14,10 +14,26 @@ result is the retrieval *substrate*, not the graph.
 > decomposition below isolates them and corrects the record.
 
 > Judge/scale caveats: BEAM's reference judge is `gpt-4.1-mini`; this harness uses
-> `gpt-4.1`. LOCOMO uses the mem0 "J" correctness judge (`gpt-4.1`). Answer model:
-> `gpt-5.5`. All numbers are same-judge, same-data deltas between arms, not
-> leaderboard-exact absolutes. BEAM cells are majority-of-3; LOCOMO is single-sample
-> over 300 stratified questions.
+> `gpt-4.1`. LongMemEval uses the **official per-question-type rubric judge** (validated
+> to match within 0 flips → the 93.0% is legitimately official-metric). LOCOMO uses the
+> mem0 "J" **LLM-judge** (`gpt-4.1`) — a **vendor convention, not an author-official
+> metric**: original LOCOMO scores token-F1, which every memory system (mem0/Zep/cognee)
+> abandons because it collapses on correct-but-verbose answers. (Sanity check: our
+> judge-correct LOCOMO answers score only ~10% raw token-F1 — gold is a 2–4 word span,
+> our answer is a correct 40-word response with evidence — so raw F1 measures formatting,
+> not correctness. The 79.3% is directly comparable to how competitors report; it is not
+> "official-F1.") Answer model: `gpt-5.5`. All numbers are same-judge, same-data deltas
+> between arms, not leaderboard-exact absolutes. BEAM cells are **mean-of-3**; LOCOMO is
+> single-sample over 300 stratified questions.
+>
+> ⚠ **Correction (2026-08-02): these were previously described as "majority-of-3". They are
+> not.** `run.ts:287` regenerates the answer on each of the three samples, judges each one,
+> and averages: `scores.reduce((a,b) => a+b) / scores.length`. Because a BEAM score is a
+> rubric *fraction*, mean and majority differ — a stored row with `sampleScores [0,1,0]`
+> yields `score 0.3333`, where a majority vote gives 0. **No number in this file changes**;
+> every figure was produced by the mean. Only the description was wrong. One consequence
+> matters for re-judging: only the *last* of the three answers reaches `--details-out`, so
+> stored details cannot reproduce the 3-sample statistic offline.
 
 ## Peak scores
 
@@ -34,8 +50,41 @@ per-benchmark config/judge caveats below.
 Answer model gpt-5.5 throughout. **LongMemEval is a full-benchmark run** (500 questions,
 the most rigorous — validated across three judges); LOCOMO and BEAM are representative
 subsets. Absolute numbers are same-family-judge, not leaderboard-exact (the leaders use
-gpt-4.1-mini). The LongMemEval peak is the cogcore-live arm; BEAM/LOCOMO peaks are the
-minimem-graph arm (the substrate finding below is what earns the BEAM/LOCOMO numbers).
+gpt-4.1-mini). The LongMemEval peak is the **full cogcore-live pipeline** (retrieval +
+live search tools); **minimem retrieval *alone* reaches ~84% on LongMemEval** — see the
+retrieval-vs-pipeline decomposition below. BEAM/LOCOMO peaks are the minimem-graph arm
+(the substrate finding below is what earns the BEAM/LOCOMO numbers).
+
+## LongMemEval — minimem retrieval-only vs the full pipeline
+
+The 93.0% peak is the **full cogcore-live pipeline** (extraction + minimem retrieval +
+**live search tools** at answer time). To isolate what minimem's retrieval alone
+delivers, we ran **minimem-flat** (hybrid RRF retrieval over the same extracted
+observations, **no live tools**, official judge) on a 90-question, category-stratified
+subset:
+
+| category | minimem-flat (retrieval only) | full pipeline (cogcore-live) |
+|---|---:|---:|
+| single-session-preference | 100.0% | 100% |
+| single-session-user | 93.3% | 99% |
+| **single-session-assistant** | **46.7%** | **98%** |
+| knowledge-update | 93.3% | 95% |
+| temporal-reasoning | 93.3% | 92% |
+| multi-session | 80.0% | 86% |
+| **OVERALL** | **84.4%** (n=90; dist-weighted to full-500 = 84.9%) | **93.0%** (n=500) |
+
+**minimem retrieval alone reaches ~84–85% on LongMemEval**, and the entire ~9pp gap to
+the full pipeline is **one category: single-session-assistant (46.7% vs 98%)** — every
+other category is within noise. The mechanism is clean: single-session-assistant asks
+*"what did the assistant say/recommend?"*, but observation-extraction summarizes
+conversations into **user-centric** observations, so assistant-turn statements are
+under-captured and static retrieval can't surface what was never extracted. Only the
+**live-tool arm** (searching the raw haystack at answer time) recovers them — that single
+mechanism accounts for almost the whole retrieval-only → full-pipeline delta.
+
+Honest front-page attribution: **LOCOMO (79.3%) and BEAM (72.7%) are pure minimem
+retrieval; LongMemEval is ~84% minimem retrieval → 93% with the live-tool pipeline** —
+and we can name exactly what the extra ~9pp buys.
 
 ## Attribution — the clean three-arm decomposition
 
@@ -44,7 +93,7 @@ changes **two** things at once: the retrieval **substrate** (cognitive-core KB +
 obs-log dump → minimem hybrid + focused context) *and* the **graph traversal**.
 Isolated with a third arm (minimem-flat = minimem hybrid retrieval, graph off):
 
-| arm | BEAM 500K (6 conv, maj-3) | LOCOMO (10 conv, 300 q) |
+| arm | BEAM 500K (6 conv, mean-3) | LOCOMO (10 conv, 300 q) |
 |---|---:|---:|
 | cognitive-core KB (obs-log dump + KB retrieval) | 55.3 | 35.3 |
 | **minimem-flat** (hybrid RRF search, focused 16-note context, **no graph**) | **68.4** | **78.0** |
@@ -53,7 +102,7 @@ Isolated with a third arm (minimem-flat = minimem hybrid retrieval, graph off):
 | → graph delta (flat → graph) | +1.9 | +1.2 |
 
 **The substrate is the win. The graph traversal is marginal — +1.9 / +1.2, inside
-the noise (n=12 maj-3 / n=62-per-category single-sample)** — and it carries a
+the noise (n=12 mean-3 / n=62-per-category single-sample)** — and it carries a
 consistent downside (abstention −13.9 @BEAM, from over-retrieval). It is **not** a
 proven win on this evidence.
 
@@ -93,7 +142,7 @@ meaningfully in either regime.
 
 ## The "push past SOTA" bets (on top of the substrate+graph champion)
 
-Three retrieval-side levers, each a majority-of-3 ablation vs the champion (6 conv,
+Three retrieval-side levers, each a mean-of-3 ablation vs the champion (6 conv,
 1M). All failed or landed in noise — consistent with a substrate that already
 captures the retrievable signal:
 
@@ -108,7 +157,7 @@ captures the retrievable signal:
 - **Isolate one variable at a time.** The original KB-vs-graph comparison
   conflated substrate + graph; the three-arm decomposition (KB / flat / graph) is
   the honest form. Always include the flat control.
-- **Majority-of-3 on BEAM** (single-sample per-dim std ≈ ±8pp; the "69.0% tuned
+- **Mean-of-3 on BEAM** (single-sample per-dim std ≈ ±8pp; the "69.0% tuned
   @100K" was an optimistic single draw). LOCOMO's binary mem0-J over 300 questions
   is stable single-sample for the overall.
 - **Cache-collision gotcha:** splits/benchmarks reuse ids; observation/graph caches
@@ -150,7 +199,7 @@ recall — but neither is a universal win, and the answer model does not close t
 ## Reproduce
 
 ```sh
-# BEAM three-arm decomposition @500K (majority-of-3); extraction cached after arm 1
+# BEAM three-arm decomposition @500K (mean-of-3); extraction cached after arm 1
 for arm in "kb" "minimem-graph --graph-traverse off" "minimem-graph --graph-traverse on"; do
   npx tsx evals/beam/run.ts --data evals/beam/cache/beam-500K.json --conversations 6 --samples 3 \
     --retrieval ${=arm} --details-out "evals/beam/results/500k-${arm// /_}.jsonl"
@@ -162,6 +211,10 @@ npx tsx evals/beam/diff-details.tmp.ts evals/beam/results/500k-minimem-graph_--g
 npx tsx evals/locomo/run-graph.tmp.ts --conversations 10 --max-q 30 --retrieval kb --details-out evals/locomo/results/locomo-kb-details.jsonl
 npx tsx evals/locomo/run-graph.tmp.ts --conversations 10 --max-q 30 --retrieval minimem-graph --graph-traverse off --details-out evals/locomo/results/locomo-flat-details.jsonl
 npx tsx evals/locomo/run-graph.tmp.ts --conversations 10 --max-q 30 --retrieval minimem-graph --graph-traverse on --details-out evals/locomo/results/locomo-graph-details.jsonl
+
+# LongMemEval — minimem retrieval-only (official judge), category-stratified subset
+npx tsx evals/longmemeval/run-flat.tmp.ts --n 90 --retrieval minimem-graph --graph-traverse off \
+  --answer-deployment gpt-5.5 --out evals/longmemeval/results/lme-flat-n90.json
 ```
 
 ## Takeaway

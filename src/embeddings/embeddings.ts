@@ -115,6 +115,102 @@ function getSharedLocalLlama(llamaCpp: typeof import("node-llama-cpp")): Promise
   return sharedLocalLlamaPromise;
 }
 
+interface SharedLocalModel {
+  model: LlamaModel;
+  context: LlamaEmbeddingContext;
+}
+
+/**
+ * Ref-counted cache of loaded local models and their embedding contexts, keyed by
+ * resolved model path.
+ *
+ * Each Minimem instance creates its own embedding provider, but model weights are
+ * hundreds of megabytes and the ggml backend is process-global. Loading per provider
+ * therefore meant N copies of the same weights on one shared backend, and N independent
+ * `dispose()` calls racing at teardown — which aborts natively inside
+ * `ggml_metal_device_free`. Instances asking for the same model now share a single load
+ * and a single context, released only when the last holder closes. Contexts tolerate
+ * concurrent use (`embedBatch` already fans out over one).
+ */
+const localModelCache = new Map<string, { entry: Promise<SharedLocalModel>; refs: number }>();
+
+/**
+ * Set once the process is tearing down. Disposing ggml resources while static destructors
+ * are running is what produces the native abort, so at exit we leave reclamation to the OS.
+ */
+let processExiting = false;
+process.once("exit", () => {
+  processExiting = true;
+});
+
+async function acquireSharedLocalModel(
+  llamaCpp: typeof import("node-llama-cpp"),
+  modelPath: string,
+  modelCacheDir: string | undefined,
+): Promise<{ key: string; shared: SharedLocalModel }> {
+  const llama = await getSharedLocalLlama(llamaCpp);
+  const resolved = await llamaCpp.resolveModelFile(modelPath, modelCacheDir || undefined);
+
+  let slot = localModelCache.get(resolved);
+  if (!slot) {
+    const entry = (async (): Promise<SharedLocalModel> => {
+      const model = await llama.loadModel({ modelPath: resolved });
+      const context = await model.createEmbeddingContext();
+      return { model, context };
+    })();
+    slot = { entry, refs: 0 };
+    localModelCache.set(resolved, slot);
+    // A failed load must not poison the cache for later attempts.
+    entry.catch(() => {
+      if (localModelCache.get(resolved) === slot) localModelCache.delete(resolved);
+    });
+  }
+
+  slot.refs++;
+  try {
+    return { key: resolved, shared: await slot.entry };
+  } catch (err) {
+    slot.refs--;
+    throw err;
+  }
+}
+
+/**
+ * Keep a model resident once loaded, rather than disposing when the last holder closes.
+ *
+ * Repeatedly loading and disposing a model on the shared ggml backend destabilizes it:
+ * a batch job that opened one Minimem per work item survived a single item but aborted
+ * natively (`ggml_abort` via `ggml_metal_device_free`) after ~15 load/dispose cycles in one
+ * process. Retaining also makes the common cases faster — a long-lived MCP server or a
+ * batch run loads the weights once instead of once per store.
+ *
+ * The cost is that closing every Minimem no longer frees the weights (~320 MB); process
+ * exit reclaims them. Set MINIMEM_EMBED_RETAIN=0 to restore eager disposal.
+ */
+function retainLoadedModels(): boolean {
+  return process.env.MINIMEM_EMBED_RETAIN !== "0";
+}
+
+async function releaseSharedLocalModel(key: string): Promise<void> {
+  const slot = localModelCache.get(key);
+  if (!slot) return;
+  slot.refs--;
+  if (slot.refs > 0) return;
+  if (retainLoadedModels()) return; // stay resident for the next acquire
+  localModelCache.delete(key);
+  if (processExiting) return;
+  try {
+    const { model, context } = await slot.entry;
+    try {
+      await context.dispose();
+    } finally {
+      await model.dispose();
+    }
+  } catch {
+    // The load itself failed — there is nothing to dispose.
+  }
+}
+
 async function createLocalEmbeddingProvider(
   options: EmbeddingProviderOptions,
 ): Promise<EmbeddingProvider> {
@@ -123,34 +219,28 @@ async function createLocalEmbeddingProvider(
 
   const llamaCpp = await importNodeLlamaCpp();
 
-  let embeddingModel: LlamaModel | null = null;
-  let embeddingContext: LlamaEmbeddingContext | null = null;
+  // Held as a promise so concurrent first calls acquire (and later release) exactly once.
+  let holdPromise: Promise<{ key: string; shared: SharedLocalModel }> | null = null;
   let closed = false;
 
   const ensureContext = async () => {
     if (closed) throw new Error("Local embedding provider is closed");
-    const llama = await getSharedLocalLlama(llamaCpp);
-    if (!embeddingModel) {
-      const resolved = await llamaCpp.resolveModelFile(modelPath, modelCacheDir || undefined);
-      embeddingModel = await llama.loadModel({ modelPath: resolved });
-    }
-    if (!embeddingContext) {
-      embeddingContext = await embeddingModel.createEmbeddingContext();
-    }
-    return embeddingContext;
+    if (!holdPromise) holdPromise = acquireSharedLocalModel(llamaCpp, modelPath, modelCacheDir);
+    const held = await holdPromise;
+    return held.shared.context;
   };
 
   const close = async () => {
     if (closed) return;
     closed = true;
-    const context = embeddingContext;
-    const model = embeddingModel;
-    embeddingContext = null;
-    embeddingModel = null;
+    const pending = holdPromise;
+    holdPromise = null;
+    if (!pending) return;
     try {
-      await context?.dispose();
-    } finally {
-      await model?.dispose();
+      const held = await pending;
+      await releaseSharedLocalModel(held.key);
+    } catch {
+      // Acquire failed and already decremented its own reference.
     }
   };
 

@@ -43,6 +43,43 @@ interface BunDatabaseCtor {
   setCustomSQLite?: (path: string) => void;
 }
 
+/** How long a connection waits on a locked index before erroring. */
+const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+
+/**
+ * Concurrency pragmas.
+ *
+ * minimem's source of truth is the Markdown files; the SQLite file is a *derived*
+ * index that several processes may open at once — the CLI, one or more MCP servers,
+ * and concurrent agents sharing a store. Without these, the default rollback journal
+ * takes a whole-database write lock (readers block during a sync) and a contended
+ * open fails immediately with SQLITE_BUSY.
+ *
+ * - `busy_timeout`: wait-and-retry instead of throwing on a held lock (per connection).
+ * - `journal_mode = WAL`: readers run concurrently with a writer (persisted in the file).
+ * - `synchronous = NORMAL`: the standard WAL companion — crash-safe, and only risks the
+ *   last transaction on power loss, which is fine for a rebuildable index.
+ *
+ * All best-effort: WAL is unavailable on some network filesystems and read-only
+ * databases reject the journal-mode change. On failure we keep SQLite's defaults
+ * rather than failing to open.
+ */
+function applyConcurrencyPragmas(db: { exec: (sql: string) => void }): void {
+  const configured = Number(process.env.MINIMEM_BUSY_TIMEOUT_MS);
+  const busyTimeoutMs = Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_BUSY_TIMEOUT_MS;
+  try {
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+  } catch {
+    // Without it a contended index throws immediately instead of waiting.
+  }
+  try {
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA synchronous = NORMAL");
+  } catch {
+    // Network filesystem or read-only database — stay on the default rollback journal.
+  }
+}
+
 export async function openSqliteDatabase(dbPath: string): Promise<DatabaseSync> {
   if (isBun) {
     const mod = (await import(["bun", "sqlite"].join(":"))) as unknown as {
@@ -61,7 +98,9 @@ export async function openSqliteDatabase(dbPath: string): Promise<DatabaseSync> 
         // A Database was already opened, or the lib is unusable — keep default.
       }
     }
-    return new Database(dbPath) as unknown as DatabaseSync;
+    const bunDb = new Database(dbPath) as unknown as DatabaseSync;
+    applyConcurrencyPragmas(bunDb);
+    return bunDb;
   }
 
   const mod = (await import(["node", "sqlite"].join(":"))) as unknown as {
@@ -70,5 +109,7 @@ export async function openSqliteDatabase(dbPath: string): Promise<DatabaseSync> 
       options?: { allowExtension?: boolean },
     ) => DatabaseSync;
   };
-  return new mod.DatabaseSync(dbPath, { allowExtension: true });
+  const db = new mod.DatabaseSync(dbPath, { allowExtension: true });
+  applyConcurrencyPragmas(db);
+  return db;
 }

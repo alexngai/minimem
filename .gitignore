@@ -29,3 +29,13 @@ evals/longmemeval/*.pid
 
 # LOCOMO diagnostic checkpoints (transient resume state)
 evals/locomo/results/*.ckpt.json
+
+# GateMem per-episode work dirs + per-run outputs (transient; regenerate via eval-domain.tmp.sh)
+evals/gatemem/.work*/
+evals/gatemem/results/
+# Generated from the GateMem checkout, not redistributed here — see run.ts for the command
+evals/gatemem/official-prompt.json
+# One-off experiment runners; the durable harness is run.ts + eval-domain.tmp.sh + report.tmp.py
+evals/gatemem/run-*.tmp.sh
+evals/beam/run-*.tmp.sh
+evals/locomo/run-*.tmp.sh
