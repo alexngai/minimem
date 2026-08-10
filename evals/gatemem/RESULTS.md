@@ -448,6 +448,32 @@ catch this because it is evaluated **once, at record time** — a rule matching 
 can be matching 30 of 200 by the end of the episode with nothing re-checking. Scoping rules
 to `matchedPaths` at record time is the untested fix.
 
+### Scoped redaction dominates deletion (paired n=3, 2026-08-05)
+
+`--redact-scope matched` pins each rule to the notes it matched at record time, instead of
+leaving it as a standing filter over everything ingested later.
+
+| | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (deletion) | 79.20 ±0.70 | 7.33 ±0.20 | 2.54 ±0.35 | 71.53 ±0.82 | 8.37 ±0.49 |
+| span, store scope | 77.07 ±1.28 | 7.43 ±0.13 | 1.18 ±0.55 | 70.37 ±1.10 | 9.47 ±0.26 |
+| **span, matched scope** | **81.35 ±0.84** | 7.83 ±0.38 | **0.97 ±0.50** | **74.22 ±1.07** | 8.51 ±0.48 |
+
+**vs base: MGS +2.69 (t=+3.45), U +2.15 (t=+3.40), F −1.58 (t=−4.43) — all significant; e2e
++0.14 n.s.** Field-level forgetting *dominates* note-level deletion: better headline score,
+better utility, and less deletion leakage at once, with context leakage unchanged. Every
+domain improves — medical +3.3, office +0.5, education +4.8, household +2.2.
+
+**Standing-filter semantics were pure cost.** The prediction was that pinning a rule would
+*raise* F, since a pinned rule cannot catch a later restatement of the deleted fact — which is
+what `post_delete_recovery` probes. F instead fell to the lowest of any arm (0.97 vs 1.18).
+Store scope removed significantly more content from context (e2e 9.47 vs 8.51, t=−3.06) and
+got **nothing on F** for it, while costing 4.28 U. The extra removal was hitting non-sensitive
+restatements. Education alone swung 11.2 points between the two scopes.
+
+**Caveat: judge is gpt-4.1, not the reference gpt-4o, so these are deltas — not
+leaderboard-comparable absolutes.** The config also uses the tuned prompt.
+
 **`--diversity 0.3` does not replicate.** Combined with span it gave MGS 71.03, −0.50 vs base,
 against a predicted +2.6. Its standalone +2.60 cleared the noise floor by 0.2 at n=1 and
 should be treated as noise. One directional signal worth a later look: under span, diversity
