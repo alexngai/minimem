@@ -448,6 +448,39 @@ catch this because it is evaluated **once, at record time** — a rule matching 
 can be matching 30 of 200 by the end of the episode with nothing re-checking. Scoping rules
 to `matchedPaths` at record time is the untested fix.
 
+### ⚠️ CORRECTION — the dominance claim does NOT survive judge-matching (2026-08-10)
+
+Re-scored against GateMem's **reference judge gpt-4o** (`configs/runs/paper_main.yaml`); the
+section below used gpt-4.1. Predictions re-scored, not re-run. Paired n=3, 13,300 judge calls,
+0 failures.
+
+| judge-matched (gpt-4o) | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (deletion) | 78.13 ±1.40 | 12.15 ±0.11 | 2.67 ±0.53 | 66.68 ±1.60 | 8.36 ±0.49 |
+| span, matched scope | 79.77 ±1.24 | **13.01 ±0.50** | 1.97 ±0.30 | 67.94 ±0.43 | 8.51 ±0.48 |
+| Δ | +1.63 n.s. | **+0.86 (t=+2.89) SIG** | −0.69 n.s. | +1.26 **n.s.** | +0.14 n.s. |
+
+**None of the claimed advantages survive.** MGS +2.69 → **+1.26 n.s.**; U +2.15 → +1.63 n.s.;
+F −1.58 → −0.69 n.s. The *only* significant effect under the reference judge runs **against**
+the method: privacy leakage A is higher by +0.86 (t=+2.89), and lower A is better.
+
+**What still stands:** parity. Moving the unit of forgetting from the record to the fact costs
+nothing on the headline metric — directionally positive on U, F and MGS, none significant. The
+architectural claim survives; the *dominance* claim does not.
+
+**Judge effect, both arms:** A roughly doubles (base 7.3→12.2, span 7.8→13.0) and MGS drops
+~5 points (71.5→66.7, 74.2→67.9), while U and e2e barely move. This reproduces the earlier
+pilot exactly — gpt-4o is much stricter on *leak* judgments and identical on mechanical ones.
+Our headline rested on F, a leak judgment, which is precisely the effect the stricter judge
+compressed. **Any GateMem claim must be judge-matched before it is believed.**
+
+**No SOTA claim.** span-matched at 67.94 sits below the published 69.5, and consistent with
+the earlier judge-matched tuned figure of 67.8. This also still uses the *tuned* prompt, which
+is not leaderboard-comparable — see the `--prompt official` arm.
+
+Per-domain MGS under gpt-4o: medical 74.5→76.7, office 71.3→70.6, education 61.5→64.5,
+household 59.4→59.9.
+
 ### Scoped redaction dominates deletion (paired n=3, 2026-08-05)
 
 `--redact-scope matched` pins each rule to the notes it matched at record time, instead of
