@@ -1,11 +1,22 @@
 # GateMem — multi-principal shared-memory governance
 
-**Two headline numbers, and they must be reported together.**
+**Lead with the judge-matched figures.** GateMem's leaderboard was produced with `gpt-4o`;
+these are our predictions re-scored under it. Anything compared to the board must use this row.
 
-| | mean MGS (n=3) | vs SOTA (69.5) | rank of 43 |
-|---|--:|--:|--:|
-| **minimem, standard harness prompt** (leaderboard-comparable) | **62.7 ±1.18** | −6.8 | 3rd |
-| minimem, method-specific prompt (best measured) | **72.6 ±1.22** | +3.1 | 1st (within noise) |
+| | mean MGS, **gpt-4o (matched)** | vs SOTA (69.5) |
+|---|--:|--:|
+| **minimem, standard harness prompt** (leaderboard-comparable) | **55.1 ±0.29** | **−14.4** |
+| minimem, method-specific prompt (best measured) | **67.8 ±0.93** | **−1.7** |
+
+**No "beats SOTA" claim survives matched judging.** For reference, the same predictions under
+our own `gpt-4.1` judge scored 62.7 ±1.18 and 72.6 ±1.22 — mismatched in our favour by 7.6 and
+4.9 MGS respectively. Every gpt-4.1 number below is an internally-consistent same-judge figure,
+valid for inter-arm deltas and **not** for leaderboard comparison. See
+[Judge-matched results](#judge-matched-results-gpt-4o-gatemems-reference-judge).
+
+*Rank is no longer stated here.* It was "3rd of 43" and "1st (within noise)" under the
+mismatched judge; re-ranking against the board requires the matched figure, which has not been
+placed against the published entries.
 
 *(Replicated figures. The single-run 61.6 / 72.0 that this table previously carried are
 superseded by the n=3 means below and should not be cited.)*
@@ -23,9 +34,17 @@ support.
 > below sit inside that bar and are labelled accordingly.
 >
 > **Judge.** GateMem's official `score_predictions.py`, unmodified, via an Azure shim so
-> the scorer runs as published. Judge model `gpt-4.1` (the paper uses `gpt-4o`), so
-> absolutes are same-judge deltas between arms, not leaderboard-exact. `MGS =
-> U x (1-A) x (1-F)`; read `judge_scores.jsonl`, not the rule-based `scores.jsonl`.
+> the scorer runs as published. `MGS = U x (1-A) x (1-F)`; read `judge_scores.jsonl`, not the
+> rule-based `scores.jsonl`.
+>
+> Two judges are reported. **`gpt-4o` is GateMem's reference** and the only one valid against
+> the board. **`gpt-4.1`** produced every arm below and remains the basis for all inter-arm
+> deltas, which are unaffected by the choice. Do not mix them in a single comparison.
+>
+> ⚠ **`gpt-4o` is a retired model** (left ChatGPT 2026-02-13). BEAM's reference judge
+> `gpt-4.1-mini` is EOL and inaccessible. Exact reproduction of either benchmark's published
+> absolutes is no longer possible for any party, ours included — see
+> `research/open-before-submission.md` §1.1.
 >
 > **Integrity.** Every arm below was checked for `n_checkpoints` against domain size
 > (579/547/540/552) before being believed, and all report zero answer/episode failures.
@@ -47,10 +66,18 @@ support.
 > Education's single-run 50.2 under the standard prompt was the low end of its range;
 > its mean is 54.1.
 
-The comparable figure is **62.7 ± 1.2 — 3rd of 43, 6.8 below SOTA**, and is the number to
-publish. The tuned figure of 72.6 ± 1.22 sits +3.1 over SOTA (~4.4 standard errors at
-n=3), but 69.5 is a single published value with no error bar, so this is a well-measured
-number against an unmeasured one, not a significance test.
+⚠ **The two figures above are gpt-4.1-judged and are NOT leaderboard-comparable.** This
+paragraph previously read "62.7 ± 1.2 — 3rd of 43, 6.8 below SOTA … the tuned figure sits +3.1
+over SOTA". Both comparisons were against a mismatched judge and both are withdrawn.
+
+Under GateMem's own `gpt-4o`: **comparable 55.1 ±0.29 (−14.4 vs SOTA), tuned 67.8 ±0.93
+(−1.7)**. The gpt-4.1 figures remain the reference for every inter-arm delta in this file — the
+prompt effect of +10.0, the erasure 2×2, the capability curve — all of which are same-judge and
+unaffected. They are simply not numbers to place beside a published board.
+
+The caveat about 69.5 still applies to the matched comparison: it is a single published value
+with no error bar, so even −1.7 is a well-measured number against an unmeasured one rather than
+a significance test.
 
 ## Judge-matched results (gpt-4o, GateMem's reference judge)
 
@@ -221,9 +248,15 @@ Running the cell never previously tested — deletion fully **off**, behavioural
 Answer-metric gap **+5.4 (6.1 sd)**; e2e **−9.2**. e2e sd is **0.00** — structurally zero,
 not noisily low.
 
-**Deleting nothing is optimal on the leaderboard metric** — 78.1 ±0.29, the best number this
-work produced and 8.6 above SOTA — and scores **exactly zero** end-to-end, because the content is
-still in context on 99.7% of safety checkpoints.
+**Deleting nothing is optimal on the leaderboard metric** — 78.1 ±0.29 under our `gpt-4.1`
+judge, the best number this work produced — and scores **exactly zero** end-to-end, because the
+content is still in context on 99.7% of safety checkpoints.
+
+Under GateMem's own `gpt-4o` the arm scores **71.9 ±0.55 answer / 0.0 e2e**, still above SOTA
+69.5 but by **+2.4**, not the +8.6 the mismatched judge suggested. **The finding is unaffected**:
+it is a contrast between two axes, not a level, so the judge shift moves the answer figure
+without touching the structural zero. Deleting nothing remains the best-scoring configuration on
+the reported metric under either judge.
 
 `compliance_utility_score` grades the *answer*, so it cannot separate "forgot" from "still
 holds it and declines to say", and it therefore rewards retaining everything plus a refusal

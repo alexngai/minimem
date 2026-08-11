@@ -60,7 +60,8 @@ that's what buys attention early.
   BEAM, LOCOMO. One paragraph each, with what each *grades*.
 - System under test: Markdown files as source of truth, disposable SQLite index
   (sqlite-vec + FTS5), hybrid RRF retrieval, no write-time extraction.
-- **Competence evidence, not the claim**: 62.7 ±1.18 comparable on GateMem (3rd of 43),
+- **Competence evidence, not the claim**: **55.1 ±0.29 comparable on GateMem under the matched
+  `gpt-4o` judge** (62.7 ±1.18 under gpt-4.1; rank withdrawn — see RESULTS.md),
   93.0% LongMemEval (Mastra 94.87%), 72.7% BEAM-500K, 79.3% LOCOMO.
 - **State the judge mismatch here, not in limitations.** Every benchmark uses a different
   judge from its reference. Inter-arm deltas are sound; absolutes are not leaderboard-exact.
@@ -92,7 +93,7 @@ A and F slope down too — the crossing story in one panel.
 ## §4 What the benchmarks measure **[core]**
 
 **§4.1 The primary metric cannot distinguish forgetting from silence.**
-Deleting nothing is optimal (77.8, 8.3 above SOTA) and scores 0.0 e2e; content in context on
+Deleting nothing is optimal (78.1 ±0.29 gpt-4.1 / **71.9 matched**, +2.4 over SOTA) and scores 0.0 e2e; content in context on
 99.7% of safety checkpoints. Only real deletion scores e2e (9.4).
 → **Figure 3**: paired bars, MGS answer vs MGS e2e, three configs. The 77.8/0.0 pair is the
 paper's single most legible image.

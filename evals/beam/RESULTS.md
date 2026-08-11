@@ -106,6 +106,97 @@ the noise (n=12 mean-3 / n=62-per-category single-sample)** — and it carries a
 consistent downside (abstention −13.9 @BEAM, from over-retrieval). It is **not** a
 proven win on this evidence.
 
+## BEAM-10M — the scale curve's top point (n=4 paired, 2026-08-04)
+
+**Four conversations, both arms, paired.** `--samples 1` per cell, so within-cell noise is
+uncontrolled (measured at 4.7pp on one repeat) — but the comparison is *paired*, and pairing
+cancels per-conversation difficulty, which is the dominant variance component here.
+
+| conv | kb | flat | delta |
+|---|--:|--:|--:|
+| 1 | 29.0 | 56.9 | +27.9 |
+| 2 | 32.5 | 59.7 | +27.2 |
+| 3 | 36.5 | 56.9 | +20.4 |
+| 4 | 21.7 | 59.5 | +37.8 |
+| **mean** | **29.9 ±6.3** | **58.2 ±1.6** | **+28.3 ±7.2** |
+
+Paired t = 7.91, df = 3, se = 3.58 → **p < 0.01**. Every conversation favours the substrate.
+
+**The two arms differ in stability, not just level.** flat has sd **1.6** across conversations
+(56.9–59.7); kb has sd **6.3** (21.7–36.5) — four times the spread. The delta's variance is
+almost entirely *baseline* variance: kb rank order and delta rank order are perfectly inversely
+correlated (Spearman −1), because flat is near-constant and so delta ≈ 58.2 − kb.
+
+That is a sharper statement of the mechanism than the mean delta alone. Focused retrieval is
+insensitive to conversation difficulty by construction; a fixed-budget log dump degrades most
+on the conversations that stress it hardest, so **the substrate wins by the largest margin
+exactly where the baseline struggles most** (conv 4: kb 21.7 → delta +37.8).
+
+> ⚠ **Supersedes an earlier +31.2.** A previous revision recorded +31.2 from pairing conv 1's
+> flat run against a kb run from a *different session*. That crossed runs, and repeat
+> measurement of conv 1's kb arm gave 24.3 then 29.0 — 4.7pp apart on identical config. The
+> within-run pair for conv 1 is **+27.9**. Direction and magnitude survive; the precision did
+> not. Do not cite +31.2.
+
+**Scope.** 4 of 10 conversations. The full sweep was cut after measurement showed cold-cache
+conversations taking 659m under 3-lane contention (~39h remaining); four paired deltas were
+judged more informative for this claim than ten unpaired absolutes. Conversations 5 and 6 have
+warm extraction caches if the sample needs extending — indexing cost only.
+
+Per dimension, averaged over the same four conversations:
+
+| dimension | kb (n=4) | flat (n=4) | Δ |
+|---|--:|--:|--:|
+| abstention | 100.0 | 100.0 | +0.0 |
+| contradiction_resolution | 50.0 | 68.8 | +18.8 |
+| event_ordering | 18.1 | 40.2 | +22.1 |
+| information_extraction | 25.0 | 75.0 | +50.0 |
+| instruction_following | 18.8 | 100.0 | +81.2 |
+| knowledge_update | 43.8 | 62.5 | +18.8 |
+| multi_session_reasoning | 0.0 | 15.6 | +15.6 |
+| preference_following | 37.5 | 81.2 | +43.8 |
+| summarization | 0.0 | 20.4 | +20.4 |
+| temporal_reasoning | 6.2 | 18.8 | +12.5 |
+| **OVERALL** | **29.9** | **58.3** | **+28.3** |
+
+**No dimension regresses at n=4.** A single-conversation reading of this table reported
+`contradiction_resolution` down 25.0 and `event_ordering` down 8.3; both were
+single-conversation noise and reverse sign under averaging (+18.8 and +22.1). Recorded here
+because they were written into this file as "two honest negatives" and were not real — the
+n=1 caveat that accompanied them was doing more work than it appeared to.
+
+`multi_session_reasoning` remains the weakest dimension in both arms (0.0 vs 15.6). Neither
+approach handles cross-session assembly well at 10M, and that is the dimension most central to
+long-horizon memory claims. Still worth investigating on its own.
+
+**The substrate delta widens monotonically across four scales:**
+
+| scale | substrate delta |
+|---|--:|
+| 100K | parity |
+| 500K | +14.7 |
+| 1M | +23.2 |
+| **10M** | **+28.3 ±7.2** (n=4 paired) |
+
+This is the mechanism in the section below, at the scale where it should bite hardest: the
+KB arm's observation-log dump truncates progressively while focused retrieval stays
+size-invariant. 10M is also the tier competitors actually contest.
+
+**Both arms index the same cached facts** (27,358 for conv 1) and use the same answer model,
+judge and questions. The only variable is retrieval — which is what makes the kb arm's low
+dimensions a retrieval result rather than a broken pipeline. An earlier reading of those zeroes
+as a bug signature was wrong; the flat arm on identical inputs is what disproved it.
+
+**Not a comparison to mem0.** `run.ts` cites mem0 at 48.6% @10M. minimem-flat's 58.3% sits
+above it, but that is a different system on a different judge over their full conversation set
+versus our four. Do not report it as a head-to-head.
+
+**Cost, measured.** Per conversation at 10M: extraction ~45 min (API-bound,
+`--extract-concurrency 8`), indexing **~2h40m solo** (local-embedding CPU, arm-independent),
+answering ~5 min. Indexing is ~85% of wall-clock and does **not** parallelise across shards on
+4 performance cores: under 3-lane contention the same phase ranged **161–659 min**. Quote the
+solo figure for cost-per-conversation and the contended range for scheduling.
+
 ## Why the substrate wins, and why it scales
 
 The cognitive-core KB arm injects a **40k-char observation-log dump + flat top-K**.

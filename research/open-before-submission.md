@@ -13,10 +13,13 @@ Systems-led (§3 first) was chosen before the prior-art result. §3's claims too
 damage; §4's survives best and now carries the reframed thesis. Either order is defensible; the
 current one is now the harder case to argue.
 
-### 0.2 Whether to quote leaderboard-relative absolutes at all
-Judge mismatch is unresolved and unscheduled (§1.1 below). The alternative is to drop absolutes
-and let inter-arm deltas carry the paper. Every surviving finding is delta-shaped, so this costs
-a rank claim already abandoned and removes the only blocking item with no owner.
+### 0.2 Whether to quote leaderboard-relative absolutes at all · **changed by the matched judge**
+Judge matching is now done for GateMem and impossible for BEAM (§1.1). That resolves the
+blocking status but sharpens the decision: under the reference judge **no "beats SOTA" claim
+survives** (tuned 67.8 vs SOTA 69.5; comparable 55.1). GateMem absolutes are now quotable and
+*worse*; BEAM absolutes are permanently directional. Every surviving finding is delta-shaped, so
+dropping cross-paper absolutes still costs little — but it is no longer a way to avoid an
+unresolved threat, it is a presentational choice about which honest number to lead with.
 
 ### 0.3 Whether to report the tuned GateMem figure
 Lean: comparable-only (62.7 ±1.18) in the body, tuned (72.6 ±1.22) in an appendix, with the
@@ -26,56 +29,70 @@ Lean: comparable-only (62.7 ±1.18) in the body, tuned (72.6 ±1.22) in an appen
 
 ## Tier 1 — Blocking. No number ships without these.
 
-### 1.1 Judge matching · **investigated 2026-08-02; user taking gpt-4o access**
+### 1.1 Judge matching · **RESOLVED — GateMem done, BEAM permanently impossible**
 
-**The exposure is narrower and better-bounded than previously recorded.**
+**GateMem: done.** Predictions re-scored under `gpt-4o`, GateMem's own reference judge
+(`paper_main.yaml`, `paper_matrix.yaml`). Full analysis in `evals/gatemem/RESULTS.md`.
 
-*What the GateMem paper actually specifies* (read from full text): "All baselines are evaluated
-under the same checkpoint order, backbone configuration, and judge-based protocol" and "Primary
-results are computed from GPT-4o judge labels." Judge runs at temperature 0.0, 4096-token
-budget. **gpt-4o is the sole judge for all 43 methods**, so our `gpt-4.1` is the single
-uncontrolled variable in that comparison. Note GPT-4o-**mini** appears throughout their paper
-as a *backbone*, not a judge — do not confuse the two.
-
-*Why this matters less than it looks — their Table 9.* They validated the judge against human
-adjudication on a stratified sample of 579 labeled checkpoint-output pairs:
-
-| metric | judge | human | \|Δ\| |
+| config | gpt-4.1 | **gpt-4o (matched)** | Δ |
 |---|--:|--:|--:|
-| U | 53.33 | 53.33 | 0.00 |
-| A | 59.38 | 58.33 | 1.04 |
-| F | 23.86 | 23.86 | 0.00 |
-| MGS | 16.50 | 16.92 | **0.42** |
+| tuned | 72.6 ±1.22 | **67.8 ±0.93** | −4.9 |
+| comparable (standard prompt) | 62.7 ±1.18 | **55.1 ±0.29** | −7.6 |
+| deletion-off + guard | 78.1 ±0.29 | **71.9 ±0.55** | −6.2 |
 
-Field-level: action correctness 100% (κ=1.000), utility 99.0% (κ=0.976), access leakage 99.0%
-(κ=0.978), deletion leakage 97.7% (κ=0.937). The judging task is heavily constrained — the
-judge receives hidden grading fields including expected action, judge specification and leak
-targets, so it is structured label extraction rather than open-ended assessment.
+**Every leaderboard comparison was mismatched in our favour by 5–8 MGS. No "beats SOTA" claim
+survives.** Against SOTA 69.5: tuned −1.7 (was +3.1), comparable −14.4 (was −6.8).
 
-**MGS moves 0.42pp between gpt-4o and humans. Our gap to SOTA is 6.8pp.** Judge choice cannot
-account for a gap sixteen times larger than the judge's own disagreement with ground truth.
+Two findings came out of the hygiene rather than out of looking for them, and both belong in
+the paper:
 
-*Model availability, probed directly.* Azure (deploymentless inference) serves `gpt-4.1`,
-`gpt-5`, `gpt-5-mini`, `gpt-5.5`, `gpt-5.6-sol`. The entire 4o/4.1-mini/nano family returns
-`SKU 'GlobalStandard' is not supported`. AWS Bedrock's OpenAI line starts at GPT-5.4 (5.4, 5.5,
-5.6 Sol/Terra/Luna, Codex, gpt-oss) and carries no 4o-era model; it does offer a full Claude
-lineup, useful for cross-family sensitivity. `gpt-4o` left ChatGPT on 2026-02-13 with API
-access retained at announcement, so the OpenAI API is the only parity route.
+1. **The judge effect is not uniform.** U and over-refusal are judge-*invariant*; `A` and `F`
+   roughly double. **The axes GateMem exists to measure are exactly the ones whose scores
+   depend on who judges.** Same species as the answer-vs-e2e gap.
+2. **gpt-4o's extra flags are mostly ungrounded.** 29 gpt-4o-only flags on the tuned arm
+   (15:1 asymmetry vs gpt-4.1), of which **86% have no leak target in the answer text** —
+   refusals like *"I can't confirm or discuss the clinical reason"* scored as leaks. gpt-4o
+   infers leakage from the act of declining. Stricter *and* noisier: ~4–6 real catches against
+   25–51 unsupported ones. Report both judges; tune the prompt toward neither.
 
-**Status: user is arranging gpt-4o access.** Two things remain worth doing regardless, because
-they do not depend on gpt-4o and do not decay when it retires:
+**BEAM: impossible, and permanently.** `gpt-4.1-mini` is EOL and inaccessible — confirmed
+2026-08-09, consistent with the earlier Azure probe (`SKU 'GlobalStandard' is not supported`
+for the whole 4o/4.1-mini/nano family) and with the retirement wave that took `gpt-4o` out of
+ChatGPT on 2026-02-13.
 
-1. **Replicate their Table 9 for our judge.** Protocol is fully specified in their appendix:
-   stratified sample, two annotators using the same hidden grading fields, adjudication on
-   conflict, and leakage counted only when the assistant confirms or reconstructs (user guesses
-   alone do not count). Validating against ground truth beats matching another model.
-2. **Record the reproducibility point.** GateMem's reference judge is a retiring model, so exact
-   reproduction of their published numbers has a shelf life. That is a defect in the benchmark,
-   not in our setup, and it is the strongest argument for same-judge deltas. Worth one sentence.
+This is no longer our limitation. **Neither benchmark's reference judge is obtainable by
+anyone** — including their authors, and including a reviewer attempting reproduction. Frame it
+as a property of the benchmarks:
 
-*BEAM is separately constrained*: a faithful re-judge needs a full re-run, because each of the
-three samples regenerates the answer and only the last reaches `--details-out` (see the
-correction note in `evals/beam/RESULTS.md`).
+> The reference judges for both benchmarks are retired models. Exact reproduction of their
+> published absolutes is no longer possible for any party. We report same-judge deltas between
+> our own arms, which are unaffected, and treat all cross-paper absolutes as directional.
+
+That is the paper's own thesis applied to itself: §4.1 argues a metric can be structurally
+unable to measure what it claims; a benchmark whose judge has evaporated is the same failure at
+the protocol layer.
+
+**What still holds:** every inter-arm delta — the +28.3 substrate delta, the erasure 2×2, the
+capability curve, the C1 budget control, the answer-vs-e2e pair. All same-judge.
+
+**What is now permanently directional:** "~5pp short on BEAM", and the 58.3-vs-64.1 Hindsight
+comparison (already three-protocol confounded — their Gemini answerer *and* Gemini judge).
+
+**Still worth doing, and now the only durable form of judge validation:** replicate GateMem's
+Table 9 for our judge. They validated `gpt-4o` against human adjudication (MGS |Δ| 0.42,
+field-level κ 0.937–1.000) on a stratified sample of 579 checkpoint-output pairs. Validating
+against *ground truth* does not decay when a model retires. Protocol is fully specified in
+their appendix.
+
+⚠ **Consequence not yet propagated.** Numbers elsewhere in the repo and in the drafts are still
+gpt-4.1-judged. Anything quoted against the leaderboard must move to the matched figures, and
+the S3 headline in particular (78.1 → **71.9** matched) appears in `thesis.md`,
+`contributions.md`, `draft-s4.md` and `PAPER-PLANNING.md`.
+
+Also still to propagate: **S1's rank-1 survives but narrows** (A 7.0 → 11.1 ±0.08 vs
+RAG-Policy 12.2; margin 5.2 → **1.1**), and the capability curve survives inverted and
+monotonic (U 86.2 → 77.8 → 76.1). Both are stated in `evals/gatemem/RESULTS.md` under "What
+survives matched judging" and neither has reached the drafts.
 
 ### 1.2 The GateMem Table 3 collision · **presentational, and serious**
 Our capability row (U 85.4 / A 19.8 / F 10.5) sits close to GateMem's GPT-5-mini Long-Context
@@ -83,9 +100,12 @@ Medical row (85.7 / 19.8 / 20.3). A reviewer who notices and is not told will wo
 re-ran anything. Requires an explicit in-text declaration that the sweep is an independent
 retrieval-controlled run, not a footnote.
 
-### 1.3 S3 replication to n=3 · *in flight*
-77.8 answer / 0.0 e2e is the paper's most quotable number and is n=1. `nodelguard-r2`/`-r3`
-queued behind C1.
+### 1.3 S3 replication to n=3 · **DONE**
+Replicated: **78.1 ±0.29** (77.8 / 78.1 / 78.3), e2e **0.0** in all three reps, every domain
+checkpoint-verified. Under the matched `gpt-4o` judge: deletion-off **71.9 answer / 0.0 e2e**,
+delete+guard **67.8 / 9.2**. **The contrast survives matched judging intact** — it is a
+contrast between axes, not a level, so the judge shift moves both arms together and leaves the
+finding untouched.
 
 ### 1.4 Snippet-only citations must be fetched before they enter a bibliography
 The three reports each carry an explicit unverified list. Load-bearing ones: **XSTest**
