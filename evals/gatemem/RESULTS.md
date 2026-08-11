@@ -143,7 +143,9 @@ measure are the ones its scores are least stable on.
   governance improves (A 24.1 → 11.1 → 11.3; F 14.4 → 1.9 → 1.5).
 
 Re-scores are in `/tmp/gm4o-*`; the gpt-4.1 originals are preserved under `judged/`.
-Reproduce with `zsh evals/gatemem/run-judge4o.tmp.sh`.
+Reproduce with `zsh evals/gatemem/rescore-4o.tmp.sh` (untracked local runner; `run-*.tmp.sh`
+is gitignored by convention, this one is not and could be committed if the re-score should be
+reproducible from a clean clone).
 
 
 ## Results
