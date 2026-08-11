@@ -1224,3 +1224,104 @@ describe("Minimem knowledgeSearch filters (SQL pushdown)", () => {
     assert.deepEqual(paths(filtered), paths(direct), "no-filter knowledgeSearch === search");
   });
 });
+
+/**
+ * Regression: `loadEmbeddingCache` must return every cached hash it is asked
+ * for, across batch boundaries.
+ *
+ * Both copies of that method (`minimem.ts`, `core/indexer.ts`) used to build one
+ * `IN (...)` clause over every hash and spread the array into `.all()`. The
+ * spread overflows the call stack past ~124,380 arguments (measured, Node 22).
+ * It surfaced as `RangeError: Maximum call stack size exceeded` 2.5 hours into
+ * ingesting a 10M-token BEAM conversation.
+ *
+ * SCOPE, stated honestly: this test does NOT reproduce that overflow. Doing so
+ * needs >124k chunks, which is too slow for this suite. What it does cover is
+ * the batching that fixes it — that results are complete across batches, which
+ * a naive batching bug (returning only the first batch) would break. An earlier
+ * version of this test asserted only "does not throw" and passed with the fix
+ * reverted, i.e. it tested nothing. The call-count assertion below is what
+ * gives it teeth: dropped batches mean cache misses, and cache misses mean
+ * re-embedding, which is observable.
+ */
+describe("embedding cache at scale", () => {
+  let tempDir: string;
+  let mm: Minimem;
+  let originalFetch: typeof globalThis.fetch;
+
+  // Comfortably past the 999-parameter cap and the batch size (400).
+  const FILE_COUNT = 1200;
+
+  before(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "minimem-cache-scale-"));
+    await fs.mkdir(path.join(tempDir, "memory"), { recursive: true });
+    await fs.writeFile(path.join(tempDir, "MEMORY.md"), "# Memory index\n");
+
+    await Promise.all(
+      Array.from({ length: FILE_COUNT }, (_, i) =>
+        fs.writeFile(
+          path.join(tempDir, "memory", `note-${i}.md`),
+          `# Note ${i}\n\nDistinct content for note ${i} about project alpha and bug ${i}.\n`,
+        ),
+      ),
+    );
+
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = createMockFetch() as unknown as typeof fetch;
+    process.env.OPENAI_API_KEY = "test-api-key-for-cache-scale";
+
+    mm = await Minimem.create({
+      memoryDir: tempDir,
+      embedding: { provider: "openai", model: "text-embedding-3-small" },
+      watch: { enabled: false },
+    });
+  });
+
+  after(async () => {
+    mm?.close();
+    globalThis.fetch = originalFetch;
+    delete process.env.OPENAI_API_KEY;
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("indexes a store spanning multiple cache batches", async () => {
+    await mm.sync();
+
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(path.join(tempDir, ".minimem", "index.db"), { readOnly: true });
+    try {
+      const chunks = db.prepare(`SELECT COUNT(*) as count FROM chunks`).get() as { count: number };
+      const cached = db
+        .prepare(`SELECT COUNT(*) as count FROM embedding_cache`)
+        .get() as { count: number };
+      assert.ok(
+        chunks.count > 999,
+        `expected >999 chunks to exercise the parameter cap, got ${chunks.count}`,
+      );
+      assert.ok(
+        cached.count > 999,
+        `expected >999 cached embeddings, got ${cached.count}`,
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("serves every hash from cache on re-sync, across batch boundaries", async () => {
+    const embedCalls = () =>
+      (globalThis.fetch as unknown as { mock: { calls: { arguments: unknown[] }[] } }).mock.calls
+        .filter((c) => String(c.arguments[0]).includes("/embeddings")).length;
+
+    const before = embedCalls();
+    await mm.sync({ force: true });
+    const added = embedCalls() - before;
+
+    // Every chunk is already cached and the store spans several batches
+    // (1200 hashes at BATCH=400). If batching dropped anything past the first
+    // batch, those chunks would miss the cache and be re-embedded here.
+    assert.equal(added, 0, `expected no re-embedding on a fully cached re-sync, got ${added} call(s)`);
+
+    const results = await mm.search("alpha", { maxResults: 5 });
+    assert.ok(results.length > 0, "search still works after a cached re-sync");
+  });
+});

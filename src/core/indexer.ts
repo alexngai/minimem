@@ -554,27 +554,34 @@ export class MemoryIndexer {
     const result = new Map<string, number[]>();
     if (!this.config.cache.enabled || hashes.length === 0) return result;
 
-    const placeholders = hashes.map(() => "?").join(",");
-    const rows = this.db
-      .prepare(
-        `SELECT hash, embedding FROM ${EMBEDDING_CACHE_TABLE}
-         WHERE provider = ? AND model = ? AND provider_key = ? AND hash IN (${placeholders})`
-      )
-      .all(this.provider.id, this.provider.model, this.providerKey, ...hashes) as Array<{
-      hash: string;
-      embedding: string;
-    }>;
-
+    // Batched deliberately — see the twin of this method in `src/minimem.ts`.
+    // Spreading every hash into `.all()` overflows the call stack past
+    // ~124,380 arguments (measured, Node 22), which a large store exceeds.
+    const BATCH = 400;
+    const touch = this.db.prepare(
+      `UPDATE ${EMBEDDING_CACHE_TABLE} SET updated_at = ?
+       WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`
+    );
     const now = Date.now();
-    for (const row of rows) {
-      result.set(row.hash, parseEmbedding(row.embedding));
-      // Touch for LRU
-      this.db
+
+    for (let i = 0; i < hashes.length; i += BATCH) {
+      const batch = hashes.slice(i, i + BATCH);
+      const placeholders = batch.map(() => "?").join(",");
+      const rows = this.db
         .prepare(
-          `UPDATE ${EMBEDDING_CACHE_TABLE} SET updated_at = ?
-           WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`
+          `SELECT hash, embedding FROM ${EMBEDDING_CACHE_TABLE}
+           WHERE provider = ? AND model = ? AND provider_key = ? AND hash IN (${placeholders})`
         )
-        .run(now, this.provider.id, this.provider.model, this.providerKey, row.hash);
+        .all(this.provider.id, this.provider.model, this.providerKey, ...batch) as Array<{
+        hash: string;
+        embedding: string;
+      }>;
+
+      for (const row of rows) {
+        result.set(row.hash, parseEmbedding(row.embedding));
+        // Touch for LRU
+        touch.run(now, this.provider.id, this.provider.model, this.providerKey, row.hash);
+      }
     }
 
     return result;
