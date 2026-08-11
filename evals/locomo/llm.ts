@@ -56,6 +56,9 @@ export class LlmClient {
   /** Cumulative usage across all calls for this client instance. */
   totals = { promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 0 };
 
+  /** Monotonic call id shared across clients, for LLM_TRACE correlation. */
+  private static callSeq = 0;
+
   constructor(opts?: LlmClientOptions) {
     const base = opts?.base ?? process.env.AZURE_API_BASE;
     const apiKey = opts?.apiKey ?? process.env.AZURE_API_KEY;
@@ -79,6 +82,18 @@ export class LlmClient {
       max_completion_tokens: this.maxCompletionTokens,
     });
 
+    // Opt-in call tracing (LLM_TRACE=1). Ingest makes many sequential calls and
+    // emits nothing until it finishes, so a stalled run is indistinguishable
+    // from a slow one from the outside — a 10M-token BEAM ingest sat for 86
+    // minutes with no way to tell which it was. Off by default; no behaviour
+    // change beyond stderr output.
+    const trace = process.env.LLM_TRACE ? ++LlmClient.callSeq : 0;
+    if (trace) {
+      process.stderr.write(
+        `[llm#${trace}] -> ${this.deployment} ${(body.length / 1024).toFixed(1)}KB\n`,
+      );
+    }
+
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       const started = Date.now();
@@ -95,6 +110,11 @@ export class LlmClient {
         if (res.status === 429 || res.status >= 500) {
           const retryAfter = Number(res.headers.get("retry-after")) || 0;
           const backoff = retryAfter * 1000 || Math.min(30000, 1000 * 2 ** attempt);
+          if (trace) {
+            process.stderr.write(
+              `[llm#${trace}] !! HTTP ${res.status} after ${Date.now() - started}ms, attempt ${attempt + 1}/${this.maxRetries + 1}, backoff ${backoff}ms\n`,
+            );
+          }
           await sleep(backoff);
           lastErr = new Error(`HTTP ${res.status}`);
           continue;
@@ -131,11 +151,22 @@ export class LlmClient {
         this.totals.totalTokens += usage.totalTokens;
         this.totals.calls += 1;
 
+        if (trace) {
+          process.stderr.write(
+            `[llm#${trace}] <- ${latencyMs}ms  in=${usage.promptTokens} out=${usage.completionTokens}\n`,
+          );
+        }
         return { text: json.choices[0]?.message?.content ?? "", usage };
       } catch (err) {
-        lastErr = err instanceof Error && err.name === "AbortError"
+        const aborted = err instanceof Error && err.name === "AbortError";
+        lastErr = aborted
           ? new Error(`request timeout after ${this.requestTimeoutMs}ms`)
           : err;
+        if (trace) {
+          process.stderr.write(
+            `[llm#${trace}] !! ${aborted ? `TIMEOUT ${this.requestTimeoutMs}ms` : String(lastErr).slice(0, 120)} after ${Date.now() - started}ms, attempt ${attempt + 1}/${this.maxRetries + 1}\n`,
+          );
+        }
         await sleep(Math.min(30000, 1000 * 2 ** attempt));
       } finally {
         clearTimeout(timer);

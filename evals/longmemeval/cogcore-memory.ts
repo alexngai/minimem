@@ -2745,6 +2745,18 @@ export class CogcoreLiveLongMemEvalAdapter {
         `${derivedCount} derived + ${sessionCount} ${this.experienceGranularity} experiences for ${instance.id}`,
     );
     await state.kb.defragment();
+
+    // NOTE (2026-08-05): do NOT skip this for the minimem-graph arm.
+    // A static read of `answerViaMinimemGraph` suggests the graph arm never touches the
+    // KnowledgeBank — it returns at the `retrieval === "minimem-graph"` branch before
+    // `lastObservationLogContext` or `toolExecutor` are reached, and retrieves only from
+    // `this.minimemStore`. That reading is WRONG, and skipping this call was measured to
+    // cost the flat arm 7.0 points on BEAM-10M (paired over 4 conversations: -3.3, -9.0,
+    // -7.1, -8.6; sd 2.59, se 1.29, 4/4 negative).
+    //
+    // `indexAndInject` has a side effect beyond building the index: it injects minimem as
+    // the bank's search provider. The dependency is therefore not visible as a read of the
+    // bank in the graph path. Establish the exact coupling before attempting this again.
     await indexAndInject(state, this.embeddings, this.topK, this.keywordHook(), this.mmr);
     if (state.mm) {
       this.toolExecutor = new MemoryToolExecutor({ minimem: state.mm, memoryDir: state.memoryDir, name: instance.id });
