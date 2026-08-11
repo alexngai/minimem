@@ -1,11 +1,22 @@
 # GateMem — multi-principal shared-memory governance
 
-**Two headline numbers, and they must be reported together.**
+**Lead with the judge-matched figures.** GateMem's leaderboard was produced with `gpt-4o`;
+these are our predictions re-scored under it. Anything compared to the board must use this row.
 
-| | mean MGS (n=3) | vs SOTA (69.5) | rank of 43 |
-|---|--:|--:|--:|
-| **minimem, standard harness prompt** (leaderboard-comparable) | **62.7 ±1.18** | −6.8 | 3rd |
-| minimem, method-specific prompt (best measured) | **72.6 ±1.22** | +3.1 | 1st (within noise) |
+| | mean MGS, **gpt-4o (matched)** | vs SOTA (69.5) |
+|---|--:|--:|
+| **minimem, standard harness prompt** (leaderboard-comparable) | **55.1 ±0.29** | **−14.4** |
+| minimem, method-specific prompt (best measured) | **67.8 ±0.93** | **−1.7** |
+
+**No "beats SOTA" claim survives matched judging.** For reference, the same predictions under
+our own `gpt-4.1` judge scored 62.7 ±1.18 and 72.6 ±1.22 — mismatched in our favour by 7.6 and
+4.9 MGS respectively. Every gpt-4.1 number below is an internally-consistent same-judge figure,
+valid for inter-arm deltas and **not** for leaderboard comparison. See
+[Judge-matched results](#judge-matched-results-gpt-4o-gatemems-reference-judge).
+
+*Rank is no longer stated here.* It was "3rd of 43" and "1st (within noise)" under the
+mismatched judge; re-ranking against the board requires the matched figure, which has not been
+placed against the published entries.
 
 *(Replicated figures. The single-run 61.6 / 72.0 that this table previously carried are
 superseded by the n=3 means below and should not be cited.)*
@@ -23,9 +34,17 @@ support.
 > below sit inside that bar and are labelled accordingly.
 >
 > **Judge.** GateMem's official `score_predictions.py`, unmodified, via an Azure shim so
-> the scorer runs as published. Judge model `gpt-4.1` (the paper uses `gpt-4o`), so
-> absolutes are same-judge deltas between arms, not leaderboard-exact. `MGS =
-> U x (1-A) x (1-F)`; read `judge_scores.jsonl`, not the rule-based `scores.jsonl`.
+> the scorer runs as published. `MGS = U x (1-A) x (1-F)`; read `judge_scores.jsonl`, not the
+> rule-based `scores.jsonl`.
+>
+> Two judges are reported. **`gpt-4o` is GateMem's reference** and the only one valid against
+> the board. **`gpt-4.1`** produced every arm below and remains the basis for all inter-arm
+> deltas, which are unaffected by the choice. Do not mix them in a single comparison.
+>
+> ⚠ **`gpt-4o` is a retired model** (left ChatGPT 2026-02-13). BEAM's reference judge
+> `gpt-4.1-mini` is EOL and inaccessible. Exact reproduction of either benchmark's published
+> absolutes is no longer possible for any party, ours included — see
+> `research/open-before-submission.md` §1.1.
 >
 > **Integrity.** Every arm below was checked for `n_checkpoints` against domain size
 > (579/547/540/552) before being believed, and all report zero answer/episode failures.
@@ -47,10 +66,18 @@ support.
 > Education's single-run 50.2 under the standard prompt was the low end of its range;
 > its mean is 54.1.
 
-The comparable figure is **62.7 ± 1.2 — 3rd of 43, 6.8 below SOTA**, and is the number to
-publish. The tuned figure of 72.6 ± 1.22 sits +3.1 over SOTA (~4.4 standard errors at
-n=3), but 69.5 is a single published value with no error bar, so this is a well-measured
-number against an unmeasured one, not a significance test.
+⚠ **The two figures above are gpt-4.1-judged and are NOT leaderboard-comparable.** This
+paragraph previously read "62.7 ± 1.2 — 3rd of 43, 6.8 below SOTA … the tuned figure sits +3.1
+over SOTA". Both comparisons were against a mismatched judge and both are withdrawn.
+
+Under GateMem's own `gpt-4o`: **comparable 55.1 ±0.29 (−14.4 vs SOTA), tuned 67.8 ±0.93
+(−1.7)**. The gpt-4.1 figures remain the reference for every inter-arm delta in this file — the
+prompt effect of +10.0, the erasure 2×2, the capability curve — all of which are same-judge and
+unaffected. They are simply not numbers to place beside a published board.
+
+The caveat about 69.5 still applies to the matched comparison: it is a single published value
+with no error bar, so even −1.7 is a well-measured number against an unmeasured one rather than
+a significance test.
 
 ## Judge-matched results (gpt-4o, GateMem's reference judge)
 
@@ -76,6 +103,36 @@ leak occurred is a contested judgment. **So the axes GateMem exists to measure a
 ones whose scores depend on who judges.** This is the same species of observation as the
 answer-vs-e2e gap above, and it emerged from the hygiene rather than from looking for it.
 
+### Judge disagreement: gpt-4o's extra flags are mostly unsupported by the text
+
+The A shift is driven by a small, one-sided set of checkpoints. On 727 privacy checkpoints
+(tuned arm): 644 both-clean, 52 both-leak, **29 flagged only by gpt-4o**, 2 only by gpt-4.1 —
+a 15:1 asymmetry. Testing whether each extra flag is grounded in the answer text:
+
+| arm | gpt-4o-only flags | leak target **in** the answer | **not** in the answer |
+|---|--:|--:|--:|
+| tuned | 29 | 4 (14%) | **25 (86%)** |
+| comparable | 57 | 6 (11%) | **51 (89%)** |
+| *both judges agreed* | *52 / 70* | *73% / 53% present* | |
+
+Answers scored as leaks include *"I can't confirm or discuss the clinical reason"* and *"I
+have no accessible memory record confirming that direct mobile number"* — refusals containing
+none of the sensitive content. **gpt-4o infers leakage from the act of declining to discuss a
+topic.** When the judges agree, the target is actually present 53–73% of the time; when only
+gpt-4o flags, it is present 11–14%.
+
+**Consequence.** Report both judges rather than choosing. The 11–14% that *are* grounded are
+genuine misses by gpt-4.1, so gpt-4o is stricter *and* noisier — roughly 4–6 real catches per
+arm against 25–51 unsupported ones. And **do not tune the answer prompt toward either judge**:
+optimising against these flags means degrading correct refusals, which is the same
+metric-gaming this work criticises elsewhere.
+
+**This is a measurement-validity property of the benchmark**, verifiable from its released
+data: the governance metrics depend on a judge whose additional flags are ~86–89% unsupported
+by the answer text, while the utility metric is judge-invariant. The axes GateMem exists to
+measure are the ones its scores are least stable on.
+
+
 ### What survives matched judging
 
 - **Access control, rank 1 of 43.** A goes 7.0 → **11.1 ±0.08** against RAG-Policy's 12.2 —
@@ -86,7 +143,9 @@ answer-vs-e2e gap above, and it emerged from the hygiene rather than from lookin
   governance improves (A 24.1 → 11.1 → 11.3; F 14.4 → 1.9 → 1.5).
 
 Re-scores are in `/tmp/gm4o-*`; the gpt-4.1 originals are preserved under `judged/`.
-Reproduce with `zsh evals/gatemem/run-judge4o.tmp.sh`.
+Reproduce with `zsh evals/gatemem/rescore-4o.tmp.sh` (untracked local runner; `run-*.tmp.sh`
+is gitignored by convention, this one is not and could be committed if the re-score should be
+reproducible from a clean clone).
 
 
 ## Results
@@ -191,9 +250,15 @@ Running the cell never previously tested — deletion fully **off**, behavioural
 Answer-metric gap **+5.4 (6.1 sd)**; e2e **−9.2**. e2e sd is **0.00** — structurally zero,
 not noisily low.
 
-**Deleting nothing is optimal on the leaderboard metric** — 78.1 ±0.29, the best number this
-work produced and 8.6 above SOTA — and scores **exactly zero** end-to-end, because the content is
-still in context on 99.7% of safety checkpoints.
+**Deleting nothing is optimal on the leaderboard metric** — 78.1 ±0.29 under our `gpt-4.1`
+judge, the best number this work produced — and scores **exactly zero** end-to-end, because the
+content is still in context on 99.7% of safety checkpoints.
+
+Under GateMem's own `gpt-4o` the arm scores **71.9 ±0.55 answer / 0.0 e2e**, still above SOTA
+69.5 but by **+2.4**, not the +8.6 the mismatched judge suggested. **The finding is unaffected**:
+it is a contrast between two axes, not a level, so the judge shift moves the answer figure
+without touching the structural zero. Deleting nothing remains the best-scoring configuration on
+the reported metric under either judge.
 
 `compliance_utility_score` grades the *answer*, so it cannot separate "forgot" from "still
 holds it and declines to say", and it therefore rewards retaining everything plus a refusal
@@ -225,6 +290,40 @@ decimal. **This is coincidental**, and the evidence is:
 
 Stated here rather than left for a reader to notice: this arm is an independent
 retrieval-controlled sweep, not a reproduction of a published row.
+
+
+## The metric rewards refusing over correctly redacting
+
+`answer_redacted` — partial answer, specifics withheld — is expected on **906 checkpoints**
+(302 of 727 privacy checkpoints per episode set). We produce it correctly **9.5% of the time**
+(86/906), saying `refuse` instead on **588**. Action confusion, all four domains, n=3:
+
+| expected | → answer | → redacted | → refuse | → no_memory | correct |
+|---|--:|--:|--:|--:|--:|
+| answer | 1901 | 64 | 144 | 75 | 87.0% |
+| **answer_redacted** | 82 | **86** | **588** | 150 | **9.5%** |
+| refuse | 68 | 40 | 1013 | 154 | 79.5% |
+| no_memory | 33 | 0 | 72 | 2184 | 95.4% |
+
+**MGS does not notice.** `action_accuracy` is reported but is not a factor — `U×(1−A)×(1−F)`
+reproduces the published MGS exactly (medical: 75.3 = 75.3). And the incentive runs the wrong
+way:
+
+| what we did on redaction-expected checkpoints | judged clean |
+|---|--:|
+| refused instead | **193/195 (99%)** |
+| correctly redacted | 23/26 (88%) |
+
+A partial disclosure can be flagged as a leak; a refusal essentially never is. **So a system
+maximising MGS should never redact** — it should refuse, destroying precisely the utility
+`answer_redacted` exists to preserve, with no scoring consequence.
+
+This undermines the benchmark's own design rationale: `answer_redacted` is the reason access
+control must be generation-time rather than a retrieval filter, since you must possess a
+record to redact it. The metric then rewards not doing it.
+
+*Caveat: n=26 on the correctly-redacted side, so 88% carries wide error bars; the direction
+and the mechanism are the claim, not the exact rate.*
 
 
 ## Capability trades utility for governance (n=3 per cell)
@@ -345,6 +444,145 @@ Recorded because several were caught late and the same traps will recur.
   (four-domain mean sd ~1.2). **Still n=1**: the deletion-off arm (replication in flight) and
   three of the four erasure 2x2 cells. Note the noise model was revised: the old ~3-point
   floor came from single-domain runs and over-states noise on four-domain means.
+
+## Retrieval-lever ablation (2026-08-04)
+
+Ablating the four `retrieval` knobs added in 56c28da / 5263019 / 3e555c1. All arms n=1, one
+judge (gpt-4.1), so **deltas only** — these are not leaderboard-comparable. Four-domain means:
+
+| arm | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (control) | 79.38 | 7.55 | 2.48 | 71.53 | 7.88 |
+| `--deletion redact` (block) | 70.88 | 7.40 | 2.50 | 64.00 | 10.10 |
+| `--deletion redact` (span) | 78.33 | 7.55 | **1.52** | 71.20 | **9.18** |
+| `--diversity 0.3` | 81.65 | 7.25 | 2.23 | **74.12** | 8.85 |
+| `--recency 0.2` | 77.95 | 7.95 | 2.52 | 69.97 | 9.25 |
+
+**The control reproduced the 71.3 best (71.53), confirming the new knobs are inert by default.**
+
+### Replicated: base vs span at paired n=3 (2026-08-05)
+
+| | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (n=3) | 79.20 ±0.70 | 7.33 ±0.20 | 2.54 ±0.35 | 71.53 ±0.82 | 8.37 ±0.49 |
+| span (n=3) | 77.07 ±1.28 | 7.43 ±0.13 | **1.18 ±0.55** | 70.37 ±1.10 | **9.47 ±0.26** |
+| span − base | −2.13 (marginal) | +0.09 n.s. | **−1.36 (t=−3.60)** | −1.16 **n.s.** | **+1.11 (t=+3.46)** |
+
+**Field-level redaction at span granularity improves both governance metrics significantly —
+forgetting leakage −1.36 and context leakage +1.11 — at statistically indistinguishable
+headline MGS (−1.16, n.s.).** That is the defensible claim: you can move the unit of
+forgetting from the record to the fact and pay nothing on the score the leaderboard ranks,
+while measurably leaking less.
+
+**The entire cost is one domain.** medical +1.3 MGS, office +0.2, household +0.3, education
+**−6.4** (U −9.4). Education's regression is diagnosed, not mysterious: redaction rules are a
+*standing* filter that keeps firing on records ingested after the request, so marker density
+climbs from a median of 11 in an episode's first quarter to 27–29 thereafter, and regressed
+utility contexts carry 24 markers against 12 on survivors. The blast-radius guard does not
+catch this because it is evaluated **once, at record time** — a rule matching 1 note of 40
+can be matching 30 of 200 by the end of the episode with nothing re-checking. Scoping rules
+to `matchedPaths` at record time is the untested fix.
+
+### ⚠️ CORRECTION — the dominance claim does NOT survive judge-matching (2026-08-10)
+
+Re-scored against GateMem's **reference judge gpt-4o** (`configs/runs/paper_main.yaml`); the
+section below used gpt-4.1. Predictions re-scored, not re-run. Paired n=3, 13,300 judge calls,
+0 failures.
+
+| judge-matched (gpt-4o) | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (deletion) | 78.13 ±1.40 | 12.15 ±0.11 | 2.67 ±0.53 | 66.68 ±1.60 | 8.36 ±0.49 |
+| span, matched scope | 79.77 ±1.24 | **13.01 ±0.50** | 1.97 ±0.30 | 67.94 ±0.43 | 8.51 ±0.48 |
+| Δ | +1.63 n.s. | **+0.86 (t=+2.89) SIG** | −0.69 n.s. | +1.26 **n.s.** | +0.14 n.s. |
+
+**None of the claimed advantages survive.** MGS +2.69 → **+1.26 n.s.**; U +2.15 → +1.63 n.s.;
+F −1.58 → −0.69 n.s. The *only* significant effect under the reference judge runs **against**
+the method: privacy leakage A is higher by +0.86 (t=+2.89), and lower A is better.
+
+**What still stands:** parity. Moving the unit of forgetting from the record to the fact costs
+nothing on the headline metric — directionally positive on U, F and MGS, none significant. The
+architectural claim survives; the *dominance* claim does not.
+
+**Judge effect, both arms:** A roughly doubles (base 7.3→12.2, span 7.8→13.0) and MGS drops
+~5 points (71.5→66.7, 74.2→67.9), while U and e2e barely move. This reproduces the earlier
+pilot exactly — gpt-4o is much stricter on *leak* judgments and identical on mechanical ones.
+Our headline rested on F, a leak judgment, which is precisely the effect the stricter judge
+compressed. **Any GateMem claim must be judge-matched before it is believed.**
+
+**No SOTA claim.** span-matched at 67.94 sits below the published 69.5, and consistent with
+the earlier judge-matched tuned figure of 67.8. This also still uses the *tuned* prompt, which
+is not leaderboard-comparable — see the `--prompt official` arm.
+
+Per-domain MGS under gpt-4o: medical 74.5→76.7, office 71.3→70.6, education 61.5→64.5,
+household 59.4→59.9.
+
+### Scoped redaction dominates deletion (paired n=3, 2026-08-05)
+
+`--redact-scope matched` pins each rule to the notes it matched at record time, instead of
+leaving it as a standing filter over everything ingested later.
+
+| | U | A | F | MGS | e2e |
+|---|---:|---:|---:|---:|---:|
+| base (deletion) | 79.20 ±0.70 | 7.33 ±0.20 | 2.54 ±0.35 | 71.53 ±0.82 | 8.37 ±0.49 |
+| span, store scope | 77.07 ±1.28 | 7.43 ±0.13 | 1.18 ±0.55 | 70.37 ±1.10 | 9.47 ±0.26 |
+| **span, matched scope** | **81.35 ±0.84** | 7.83 ±0.38 | **0.97 ±0.50** | **74.22 ±1.07** | 8.51 ±0.48 |
+
+**vs base: MGS +2.69 (t=+3.45), U +2.15 (t=+3.40), F −1.58 (t=−4.43) — all significant; e2e
++0.14 n.s.** Field-level forgetting *dominates* note-level deletion: better headline score,
+better utility, and less deletion leakage at once, with context leakage unchanged. Every
+domain improves — medical +3.3, office +0.5, education +4.8, household +2.2.
+
+**Standing-filter semantics were pure cost.** The prediction was that pinning a rule would
+*raise* F, since a pinned rule cannot catch a later restatement of the deleted fact — which is
+what `post_delete_recovery` probes. F instead fell to the lowest of any arm (0.97 vs 1.18).
+Store scope removed significantly more content from context (e2e 9.47 vs 8.51, t=−3.06) and
+got **nothing on F** for it, while costing 4.28 U. The extra removal was hitting non-sensitive
+restatements. Education alone swung 11.2 points between the two scopes.
+
+**Caveat: judge is gpt-4.1, not the reference gpt-4o, so these are deltas — not
+leaderboard-comparable absolutes.** The config also uses the tuned prompt.
+
+**`--diversity 0.3` does not replicate.** Combined with span it gave MGS 71.03, −0.50 vs base,
+against a predicted +2.6. Its standalone +2.60 cleared the noise floor by 0.2 at n=1 and
+should be treated as noise. One directional signal worth a later look: under span, diversity
+recovered education U by +5.5 (66.1 vs 60.6), consistent with diverse retrieval reducing
+redundant redacted records and hence marker density. n=1.
+
+- **Field-level redaction at span granularity matches note-level deletion** (MGS −0.33, far
+  inside the ±2.4 noise floor) while removing more sensitive content from context (e2e +1.30)
+  and leaking less on forgetting (F −0.95). The architectural claim it supports is modest but
+  real: you can stop destroying whole records and pay nothing on the headline. **The mean
+  hides a 3-up-1-down split** — medical +3.6, office +1.0, household +1.3, education **−7.2**
+  (education's own noise floor is ±6.6, so that regression is right at the edge of real).
+- **Granularity was worth 7.20 MGS** (span vs block), the largest single effect measured here.
+  GateMem turn bodies are one line each (186/186, median 196 chars), so block granularity —
+  which removes the enclosing line — deleted each record's entire content while keeping its
+  note, which is *worse* than deletion: the emptied note still holds a top-k slot deletion
+  would have freed. The library default stays `block` (span leaves values derivable from
+  their own sentence); single-line record stores should set `span`.
+- **`--diversity 0.3`: +2.60 MGS**, clearing the 2.4 floor by 0.2 at n=1, e2e also up so it is
+  not a retention artifact. Promising, not established.
+- **`--recency 0.2`: null** (−1.55).
+- **Not run**: `--supersede` and `--quotas` are inexpressible in this harness — every note is
+  written without a `supersedes` field and with type `observation`, so both arms would have
+  been guaranteed nulls.
+
+### Two harness defects this ablation exposed
+
+1. **The first redact arm scored +5.30 MGS and was an artifact.** `run.ts` rendered the prompt
+   from the harness's own copy of the turn text; minimem was consulted only for *which*
+   indices to include, so read-time redaction never reached the prompt. Caught by e2e reading
+   exactly **0.00 on all four domains** and prompt blocks ~1KB *larger* than base. Generalizes
+   beyond the eval: **read-time redaction protects only what flows through the store** — any
+   caller holding its own copy of the text must filter it too.
+2. `report.tmp.py` was not printing `compliance_utility_e2e_score` at all, which is the only
+   metric that can see this class of failure.
+
+Both predictions were pre-registered before their runs. Predicting "e2e sharply up" is what
+made 0.00 legible as a red flag rather than a footnote under a +5.3 headline. Both
+predictions were also partly **wrong** — U fell under block (not rose), and F fell under span
+(not rose) — and in each case the miss localised the mechanism faster than a correct guess
+would have.
 
 ## Reproduce
 

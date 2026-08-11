@@ -244,23 +244,45 @@ async function createLocalEmbeddingProvider(
     }
   };
 
+  /**
+   * Embed one text, truncating to what the model can actually take.
+   *
+   * `getEmbeddingFor` tokenizes and throws "Input is longer than the context
+   * size" past the context window. That throw is not merely an error: on the
+   * Metal backend it leaves the llama.cpp context inconsistent and the next
+   * operation trips `GGML_ASSERT([rsets->data count] == 0)`, which aborts the
+   * process natively — no catch block can save it. A 10M-token BEAM ingest died
+   * this way after the extraction cache had already been paid for.
+   *
+   * So the length is bounded *before* the call rather than handled after it.
+   * `getEmbeddingFor` accepts `Token[]`, so truncation is exact: tokenize, slice,
+   * embed the prefix. Truncating an over-long chunk degrades that one embedding;
+   * letting it through kills the run.
+   */
+  const embedOne = async (
+    ctx: Awaited<ReturnType<typeof ensureContext>>,
+    text: string,
+  ): Promise<number[]> => {
+    const model = ctx.model;
+    // Leave headroom for any special tokens the tokenizer adds.
+    const limit = Math.max(64, model.trainContextSize - 8);
+    let input: string | ReturnType<typeof model.tokenize> = text;
+    const tokens = model.tokenize(text);
+    if (tokens.length > limit) input = tokens.slice(0, limit);
+    const embedding = await ctx.getEmbeddingFor(input);
+    return Array.from(embedding.vector) as number[];
+  };
+
   return {
     id: "local",
     model: modelPath,
     embedQuery: async (text) => {
       const ctx = await ensureContext();
-      const embedding = await ctx.getEmbeddingFor(text);
-      return Array.from(embedding.vector) as number[];
+      return embedOne(ctx, text);
     },
     embedBatch: async (texts) => {
       const ctx = await ensureContext();
-      const embeddings = await Promise.all(
-        texts.map(async (text) => {
-          const embedding = await ctx.getEmbeddingFor(text);
-          return Array.from(embedding.vector) as number[];
-        }),
-      );
-      return embeddings;
+      return Promise.all(texts.map((text) => embedOne(ctx, text)));
     },
     close,
   };

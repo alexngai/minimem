@@ -171,6 +171,85 @@ assessment predates knowing the leaderboard runs to 10M, and should be revisited
 *Also surfaced, unread, relevant to the discussion section*: "Beyond Memory Leaderboards:
 Evaluating Scientific Memory as Budgeted Context Restoration" (arXiv 2607.16848).
 
+## 4c. The 10M competitive picture, and why our own structural features failed (2026-08-04)
+
+### Provisional standing — and why it is not a ranking
+
+| system | BEAM-10M | protocol |
+|---|--:|---|
+| Hindsight | 64.1% | AMB harness, vendor-reported |
+| **minimem-flat** | **58.3%** | ours, n=4 conv |
+| mem0 | 48.6% | cited in `evals/beam/run.ts` |
+| "next-best published" | 40.6% | Hindsight's own claim |
+| *our kb baseline* | *29.9%* | ours |
+
+**Three protocols, not one.** This is not a judge mismatch, it is a whole-pipeline mismatch:
+
+| | answerer | judge | conversations |
+|---|---|---|--:|
+| AMB harness | `gemini-3.1-pro-preview` | `gemini-2.5-flash-lite` | 35 |
+| BEAM paper reference | — | `gpt-4.1-mini` | 35 |
+| **ours** | `gpt-5.5` | `gpt-4.1` | **4** |
+
+The answer model differs too, so 64.1 vs 58.3 confounds judge, answerer, sample size **and
+possibly the metric**: AMB reports "raw mean nugget score, pass@score≥0.5, pass@score≥0.8, and
+perfect-score counts", and which of those 64.1 refers to is unstated. Our figure is a
+mean-of-dimension-means over per-item floored rubric scores. These may not be the same
+quantity. **Do not publish this table as a ranking.**
+
+### The important question: cognitive-core already provides most of what Hindsight does
+
+Hindsight's architecture is four networks (world facts, agent experiences, entity summaries,
+evolving beliefs) with retain/recall/reflect, four parallel retrieval strategies (semantic,
+BM25, graph traversal, temporal) and cross-encoder reranking. Its pitch is that "observations
+synthesize higher-order knowledge so retrieval returns insights, not raw history."
+
+**We already have the synthesis half.** Both BEAM arms consume the *same* cognitive-core
+extracted observations — 27,358 facts for conv 1. The kb arm and the flat arm differ only in
+retrieval. So minimem-flat's store already contains "insights, not raw history"; what it lacks
+is Hindsight's structure-aware *retrieval*.
+
+**And we tested that half. It failed:**
+
+| feature | measured Δ | scale tested |
+|---|--:|---|
+| graph traversal (`autoEntityLinks` + `graphExpand`) | +1.9 / +1.2 | 500K / LOCOMO |
+| synthesized summary nodes | **−3.9** | 1M, 6 conv, mean-3 |
+| temporal + timeline routing | −1.5 | 1M, 6 conv, mean-3 |
+| query decomposition | +0.7 | 1M, 6 conv, mean-3 |
+| LLM reranker | +0.9 | 500K |
+
+Every Hindsight-shaped feature we implemented landed in noise or hurt. Graph traversal also
+carried an abstention penalty (−13.9 @BEAM) from over-retrieval.
+
+### Two reasons that null may not generalise to 10M
+
+**1. Everything was tested at ≤1M — outside the regime where structure should pay.** This is
+exactly the scope C1-P states in advance: compression and structure earn their cost only where
+context is *binding*. At 1M with top-k 16 over focused retrieval, it is not. Hindsight's margin
+appears at 10M, and **our own weakest dimensions at 10M are precisely the ones structure
+targets**: multi_session_reasoning 15.6, temporal_reasoning 18.8, summarization 20.4,
+event_ordering 40.2 — against instruction_following 100.0 and information_extraction 75.0. We
+are strong where an excerpt suffices and weak where assembly is required.
+
+**2. The ablations may be under-powered.** They were 6 conversations, mean-of-3, at 1M. We now
+know per-conversation variance at 10M is large (kb sd 6.3, flat sd 1.6). A −3.9 or +1.9 effect
+measured across 6 conversations may not be distinguishable from zero at that spread. "Landed in
+noise" and "too few conversations to detect" are not the same claim, and the write-up currently
+asserts the former.
+
+### The falsifiable follow-up
+
+Re-run the structural ablations **at 10M**, paired, on the conversations whose extraction
+caches are already warm (1–6). If graph traversal / summary nodes / temporal routing pay there
+and not at 1M, C1-P is confirmed on a second axis and the "retrieval is solved for this
+pipeline" conclusion is scope-limited rather than general. If they still fail at 10M, the
+substrate story is stronger than currently claimed and Hindsight's margin must come from
+something else — most plausibly evolving beliefs, the one component we have no analogue for.
+
+Either outcome is publishable. The current state — a null measured only outside the regime
+where the effect is predicted — is the one that is not.
+
 ## 5. Search log and bounds
 
 Queries: `agent memory systems Mem0 Letta Zep A-Mem retrieval method hybrid search BM25 dense

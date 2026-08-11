@@ -19,6 +19,16 @@ import {
   vectorToBlob,
 } from "./internal.js";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./search/hybrid.js";
+import { selectResults } from "./search/select.js";
+import {
+  applyRedactions,
+  isFullyRedacted,
+  normalizeRule,
+  parseRedactionManifest,
+  serializeRedactionRule,
+  type RedactionRule,
+  type RedactionRuleInput,
+} from "./search/redact.js";
 import { searchKeyword, searchVector, buildKnowledgeFilterSql } from "./search/search.js";
 import { ensureMemoryIndexSchema } from "./db/schema.js";
 import { parseFrontmatter, type MemoryFrontmatter, type KnowledgeLink } from "./session.js";
@@ -151,6 +161,29 @@ export type MinimemConfig = {
     /** Cap co-entity edges added per note. Default 16. */
     maxLinksPerNote?: number;
   };
+  /**
+   * Post-fusion result selection (additive; every option defaults to previous behaviour).
+   *
+   * Hybrid fusion ranks by relevance alone, so the top-k can be k views of one passage
+   * while other facts the query asked for never surface. These knobs trade a little
+   * relevance for coverage, currency and layer balance, and exist to be ablated.
+   */
+  retrieval?: {
+    /** Redundancy penalty in [0,1]. 0 (default) = pure relevance order. */
+    diversity?: number;
+    /** Drop candidates superseded by another candidate in the pool (default false). */
+    supersede?: boolean;
+    /** Blend normalised recency into the score, [0,1]. 0 (default) = off. */
+    recency?: number;
+    /** Per-knowledge-type floors, e.g. `{ observation: 20, "domain-summary": 6 }`. */
+    quotas?: Record<string, number>;
+    /**
+     * Apply the store's redaction manifest to every content-returning path (default true).
+     * Costs one `stat` per call when no manifest exists. Exists to be switched off for
+     * ablation; switching it off in production re-exposes redacted facts.
+     */
+    redaction?: boolean;
+  };
   /** File watching configuration */
   watch?: {
     /** Enable file watching (default: true) */
@@ -210,6 +243,15 @@ export class Minimem {
     rrfK: number;
   };
   private readonly queryConfig: { maxResults: number; minScore: number };
+  private readonly retrievalConfig: {
+    diversity: number;
+    supersede: boolean;
+    recency: number;
+    quotas?: Record<string, number>;
+    redaction: boolean;
+  };
+  /** Redaction rules, reloaded when the manifest's mtime changes. */
+  private redactionCache: { mtimeMs: number; rules: RedactionRule[] } | null = null;
   private readonly graphConfig: {
     autoEntityLinks: boolean;
     maxEntityFanout: number;
@@ -282,6 +324,13 @@ export class Minimem {
     this.queryConfig = {
       maxResults: config.query?.maxResults ?? 10,
       minScore: config.query?.minScore ?? 0.3,
+    };
+    this.retrievalConfig = {
+      diversity: config.retrieval?.diversity ?? 0,
+      supersede: config.retrieval?.supersede ?? false,
+      recency: config.retrieval?.recency ?? 0,
+      ...(config.retrieval?.quotas ? { quotas: config.retrieval.quotas } : {}),
+      redaction: config.retrieval?.redaction ?? true,
     };
     this.graphConfig = {
       autoEntityLinks: config.graph?.autoEntityLinks ?? false,
@@ -683,16 +732,124 @@ export class Minimem {
       rrfK: this.hybrid.rrfK,
     });
 
-    return merged
-      .filter((entry) => entry.score >= minScore)
-      .slice(0, maxResults)
-      .map((r) => ({
+    const eligible = merged.filter((entry) => entry.score >= minScore);
+
+    // Fast path: with no selection options set, this is the previous behaviour exactly —
+    // score-ordered truncation, and no per-candidate metadata lookup.
+    const sel = this.retrievalConfig;
+    const selectionOn =
+      sel.diversity > 0 || sel.recency > 0 || sel.supersede || (sel.quotas && Object.keys(sel.quotas).length > 0);
+    const withMeta = selectionOn
+      ? eligible.map((r) => ({ ...r, ...this.selectionMetadata(r.id) }))
+      : eligible.map((r) => ({ ...r }));
+    const chosen = selectionOn
+      ? selectResults(withMeta, {
+          limit: maxResults,
+          diversity: sel.diversity,
+          recency: sel.recency,
+          supersede: sel.supersede,
+          ...(sel.quotas ? { quotas: sel.quotas } : {}),
+        })
+      : withMeta.slice(0, maxResults);
+
+    // Redaction is applied to what is *returned*, and a result that redacts down to nothing
+    // is dropped rather than returned empty. Dropping would silently shrink the result set,
+    // so backfill from the candidates selection left behind.
+    //
+    // Note the deliberate limit: rules do not affect *ranking*, so a query for a redacted
+    // fact still ranks its note highly. That is an existence side channel, not a content
+    // leak; closing it would mean redacting before scoring, at a cost the default path
+    // should not pay.
+    const rules = this.retrievalConfig.redaction ? this.loadRedactionRules() : [];
+    if (rules.length === 0) {
+      return chosen.map((r) => ({
         path: r.path,
         startLine: r.startLine,
         endLine: r.endLine,
         score: r.score,
         snippet: r.snippet,
       }));
+    }
+
+    const chosenIds = new Set(chosen.map((r) => r.id));
+    const ordered = [...chosen, ...withMeta.filter((r) => !chosenIds.has(r.id))];
+    const out: MinimemSearchResult[] = [];
+    for (const r of ordered) {
+      if (out.length >= maxResults) break;
+      const { text } = applyRedactions(r.snippet, rules, { path: r.path });
+      if (isFullyRedacted(text)) continue;
+      out.push({
+        path: r.path,
+        startLine: r.startLine,
+        endLine: r.endLine,
+        score: r.score,
+        snippet: text,
+      });
+    }
+    return out;
+  }
+
+  /** Absolute path of the store's redaction manifest. */
+  private redactionManifestPath(): string {
+    return path.join(this.memoryDir, ".redactions.jsonl");
+  }
+
+  /**
+   * Load redaction rules, re-reading only when the manifest changes. Rules live in a file
+   * rather than the index because memory files are the source of truth: an index-only
+   * redaction is undone by the next sync, which turns a privacy guarantee into a leak that
+   * reappears on a schedule.
+   */
+  private loadRedactionRules(): RedactionRule[] {
+    const file = this.redactionManifestPath();
+    let mtimeMs: number;
+    try {
+      mtimeMs = fsSync.statSync(file).mtimeMs;
+    } catch {
+      this.redactionCache = null;
+      return [];
+    }
+    if (this.redactionCache && this.redactionCache.mtimeMs === mtimeMs) {
+      return this.redactionCache.rules;
+    }
+    try {
+      const rules = parseRedactionManifest(fsSync.readFileSync(file, "utf-8"));
+      this.redactionCache = { mtimeMs, rules };
+      return rules;
+    } catch {
+      return this.redactionCache?.rules ?? [];
+    }
+  }
+
+  /**
+   * Metadata a selection pass needs but fusion does not carry. Looked up only when a
+   * selection option is active, so the default retrieval path is unchanged.
+   */
+  private selectionMetadata(id: string): {
+    knowledgeType?: string | null;
+    knowledgeId?: string | null;
+    supersedes?: string | null;
+    createdAt?: number | null;
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT knowledge_type, knowledge_id, supersedes, created_at_ms FROM chunks WHERE id = ?`,
+      )
+      .get(id) as
+      | {
+          knowledge_type: string | null;
+          knowledge_id: string | null;
+          supersedes: string | null;
+          created_at_ms: number | null;
+        }
+      | undefined;
+    if (!row) return {};
+    return {
+      knowledgeType: row.knowledge_type,
+      knowledgeId: row.knowledge_id,
+      supersedes: row.supersedes,
+      createdAt: row.created_at_ms,
+    };
   }
 
   async sync(opts?: { reason?: string; force?: boolean }): Promise<void> {
@@ -901,6 +1058,17 @@ export class Minimem {
     const entities = frontmatter?.entities ?? null;
     const confidence = frontmatter?.confidence ?? null;
     const links = frontmatter?.links ?? null;
+    // `supersedes` has been in the frontmatter convention and parsed by session.ts since the
+    // knowledge format landed, but was never persisted -- so retrieval had no way to tell a
+    // superseded note from the note that replaced it. `created` is the note's stated date,
+    // which is what recency should rank on rather than file mtime.
+    const supersedes = frontmatter?.supersedes ?? null;
+    const createdMs = (() => {
+      const raw = frontmatter?.created;
+      if (!raw) return null;
+      const t = Date.parse(String(raw));
+      return Number.isFinite(t) ? t : null;
+    })();
 
     // Get embeddings
     const embeddings = await this.embedChunks(chunks);
@@ -946,8 +1114,8 @@ export class Minimem {
 
       this.db
         .prepare(
-          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, type, knowledge_type, knowledge_id, domains, entities, confidence)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, type, knowledge_type, knowledge_id, domains, entities, confidence, supersedes, created_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           chunkId,
@@ -966,6 +1134,8 @@ export class Minimem {
           domains ? JSON.stringify(domains) : null,
           entities ? JSON.stringify(entities) : null,
           confidence,
+          supersedes,
+          createdMs,
         );
 
       // Insert into vector table if available
@@ -1239,27 +1409,42 @@ export class Minimem {
     const result = new Map<string, number[]>();
     if (!this.cache.enabled || hashes.length === 0) return result;
 
-    const placeholders = hashes.map(() => "?").join(",");
-    const rows = this.db
-      .prepare(
-        `SELECT hash, embedding FROM ${EMBEDDING_CACHE_TABLE}
-         WHERE provider = ? AND model = ? AND provider_key = ? AND hash IN (${placeholders})`,
-      )
-      .all(this.provider.id, this.provider.model, this.providerKey, ...hashes) as Array<{
-      hash: string;
-      embedding: string;
-    }>;
-
+    // Batched deliberately. Querying every hash in one statement spreads the
+    // array into `.all()`, which overflows the call stack once the argument
+    // count gets large — measured at ~124,380 args on Node 22. A single
+    // 10M-token BEAM conversation produces well past that, and it surfaced as
+    // `RangeError: Maximum call stack size exceeded` only after 2.5 hours of
+    // extraction had already been paid for.
+    //
+    // (This build's SQLite tolerates >50k host parameters, so the placeholder
+    // count is not the binding constraint here — the spread is. Batching fixes
+    // both regardless, and keeps the query well inside any SQLITE_MAX_VARIABLE_
+    // NUMBER a different build might impose.)
+    const BATCH = 400;
+    const touch = this.db.prepare(
+      `UPDATE ${EMBEDDING_CACHE_TABLE} SET updated_at = ?
+       WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`,
+    );
     const now = Date.now();
-    for (const row of rows) {
-      result.set(row.hash, parseEmbedding(row.embedding));
-      // Touch for LRU
-      this.db
+
+    for (let i = 0; i < hashes.length; i += BATCH) {
+      const batch = hashes.slice(i, i + BATCH);
+      const placeholders = batch.map(() => "?").join(",");
+      const rows = this.db
         .prepare(
-          `UPDATE ${EMBEDDING_CACHE_TABLE} SET updated_at = ?
-           WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`,
+          `SELECT hash, embedding FROM ${EMBEDDING_CACHE_TABLE}
+           WHERE provider = ? AND model = ? AND provider_key = ? AND hash IN (${placeholders})`,
         )
-        .run(now, this.provider.id, this.provider.model, this.providerKey, row.hash);
+        .all(this.provider.id, this.provider.model, this.providerKey, ...batch) as Array<{
+        hash: string;
+        embedding: string;
+      }>;
+
+      for (const row of rows) {
+        result.set(row.hash, parseEmbedding(row.embedding));
+        // Touch for LRU
+        touch.run(now, this.provider.id, this.provider.model, this.providerKey, row.hash);
+      }
     }
 
     return result;
@@ -1354,6 +1539,18 @@ export class Minimem {
   }
 
   async readFile(relativePath: string): Promise<string | null> {
+    const raw = await this.readFileRaw(relativePath);
+    if (raw === null) return null;
+    const rules = this.retrievalConfig.redaction ? this.loadRedactionRules() : [];
+    if (rules.length === 0) return raw;
+    return applyRedactions(raw, rules, { path: relativePath }).text;
+  }
+
+  /**
+   * Unredacted read. Private on purpose: indexing reads files directly via `fs`, so the only
+   * internal caller is `readLines`, which must slice against original line numbers.
+   */
+  private async readFileRaw(relativePath: string): Promise<string | null> {
     const absPath = path.join(this.memoryDir, relativePath);
     try {
       return await fs.readFile(absPath, "utf-8");
@@ -1369,7 +1566,10 @@ export class Minimem {
     relativePath: string,
     opts?: { from?: number; lines?: number },
   ): Promise<{ content: string; startLine: number; endLine: number } | null> {
-    const content = await this.readFile(relativePath);
+    // Slice the raw file: a search result's startLine/endLine index the file as indexed, and
+    // block redaction removes lines. Redacting first would shift every offset and return the
+    // wrong region. Redaction is applied to the slice below instead.
+    const content = await this.readFileRaw(relativePath);
     if (content === null) return null;
 
     const allLines = content.split("\n");
@@ -1380,11 +1580,121 @@ export class Minimem {
     const endIdx = Math.min(startIdx + lines, allLines.length);
     const selectedLines = allLines.slice(startIdx, endIdx);
 
+    const rules = this.retrievalConfig.redaction ? this.loadRedactionRules() : [];
+    const sliced = selectedLines.join("\n");
     return {
-      content: selectedLines.join("\n"),
+      content:
+        rules.length === 0
+          ? sliced
+          : applyRedactions(sliced, rules, { path: relativePath }).text,
       startLine: from,
       endLine: startIdx + selectedLines.length,
     };
+  }
+
+  /**
+   * Redact a fact across the store: record a rule that every content-returning path then
+   * applies. Deliberately does not rewrite memory files — see the note on `mode` below.
+   *
+   * The blast-radius guard is not incidental. The precursor to this API purged any literal
+   * appearing in under a *third* of notes; it destroyed ~16 points of utility per domain at
+   * zero benefit, and tightening that one threshold to 10% was the largest single scoring
+   * improvement measured. A redaction matching most of the store is nearly always a
+   * too-generic pattern rather than a genuine mass deletion, so it fails loudly.
+   */
+  async redact(
+    input: RedactionRuleInput & {
+      /** Refuse if the rule matches more than this share of notes. Default 0.10. */
+      maxShare?: number;
+      /**
+       * Never refuse at or below this many matched notes, whatever the share. Default 3.
+       *
+       * A share threshold alone is meaningless on a small store — redacting one secret from
+       * one note in a three-note store is 33% and entirely legitimate. The 10% figure was
+       * derived from episodes holding hundreds of notes. What the guard is actually for is a
+       * too-generic pattern sweeping a large store, which needs both a high share *and* a
+       * meaningful absolute count.
+       */
+      minNotes?: number;
+      /** Compute and return the plan without recording it. */
+      dryRun?: boolean;
+      /**
+       * "store" (default) records a standing rule that also filters records written LATER.
+       * "matched" pins the rule to the notes it matched at record time.
+       *
+       * The difference is not cosmetic. A store-scoped rule keeps firing forever, so when the
+       * matched literal is not unique to the sensitive fact, later legitimate records get
+       * redacted too: measured on a governance benchmark as marker density climbing from a
+       * median of 11 per context in an episode's first quarter to 27-29 thereafter, costing
+       * one domain 9.4 points of utility. It also silently outgrows the blast-radius guard,
+       * which is evaluated once here and never re-checked -- a rule matching 1 note of 40 can
+       * be matching 30 of 200 later.
+       *
+       * "store" is right for "never surface this string again"; "matched" is right for
+       * "forget what these records said", which is what a deletion request usually means.
+       */
+      scope?: "store" | "matched";
+    },
+  ): Promise<{
+    rule: RedactionRule;
+    /** Memory-relative paths the rule matches. */
+    matchedPaths: string[];
+    totalNotes: number;
+    share: number;
+    applied: boolean;
+  }> {
+    const scope = input.scope ?? "store";
+    let rule = normalizeRule({ ...input, at: input.at ?? new Date().toISOString() });
+    const maxShare = input.maxShare ?? 0.1;
+    const minNotes = input.minNotes ?? 3;
+    const dryRun = input.dryRun ?? false;
+
+    const files = await listMemoryFiles(this.memoryDir);
+    const matchedPaths: string[] = [];
+    for (const abs of files) {
+      const rel = path.relative(this.memoryDir, abs);
+      let content: string;
+      try {
+        content = await fs.readFile(abs, "utf-8");
+      } catch {
+        continue;
+      }
+      if (applyRedactions(content, [rule], { path: rel }).hits > 0) matchedPaths.push(rel);
+    }
+    const share = files.length === 0 ? 0 : matchedPaths.length / files.length;
+
+    if (!dryRun && share > maxShare && matchedPaths.length > minNotes) {
+      throw new Error(
+        `Redaction refused: "${rule.match}" matches ${matchedPaths.length}/${files.length} ` +
+          `notes (${(share * 100).toFixed(1)}%), above the ${(maxShare * 100).toFixed(1)}% ` +
+          `blast-radius limit. Narrow the pattern, scope it with \`paths\`, or raise ` +
+          `\`maxShare\` deliberately. Re-run with \`dryRun\` to inspect the matches.`,
+      );
+    }
+
+    if (scope === "matched") {
+      // Pin the rule to what it matched now. An empty match must NOT fall through to a
+      // store-scoped rule: normalizeRule drops an empty `paths`, which would silently widen
+      // the rule to the whole store -- the exact opposite of what was asked for.
+      if (matchedPaths.length === 0) {
+        return { rule, matchedPaths, totalNotes: files.length, share, applied: false };
+      }
+      rule = normalizeRule({ ...rule, paths: matchedPaths });
+    }
+
+    if (!dryRun) {
+      const file = this.redactionManifestPath();
+      await ensureDir(path.dirname(file));
+      await fs.appendFile(file, `${serializeRedactionRule(rule)}\n`, "utf-8");
+      this.redactionCache = null;
+    }
+
+    return { rule, matchedPaths, totalNotes: files.length, share, applied: !dryRun };
+  }
+
+  /** Rules currently in force. */
+  listRedactions(): RedactionRule[] {
+    return this.loadRedactionRules();
   }
 
   /**

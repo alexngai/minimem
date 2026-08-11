@@ -30,6 +30,11 @@ const ANSWER_DEP = arg("answer-deployment", "gpt-5.5")!;
 const ANSWER_MODEL = arg("answer-model"); // separate deployment for the final answer only (isolates answer-model from extraction)
 const JUDGE_DEP = arg("judge-deployment", "gpt-4.1")!;
 const CONC = Number(arg("concurrency", "4"));
+// Ingest-time extraction fan-out. Was hardcoded at 3, which is what capped a
+// 10M-token conversation at ~2.5h of extraction. Raise it to trade quota for
+// wall-clock — but watch latency: calls average ~50s against a ~60s gateway
+// cutoff, so anything that pushes latency up converts directly into timeouts.
+const EXTRACT_CONC = Number(arg("extract-concurrency", "3"));
 const OUT = arg("out");
 const DETAILS_OUT = arg("details-out");
 const ANSWER_PROMPT = arg("answer-prompt", "tuned")!; // tuned (BEAM-tuned, default) | v15 (legacy adapter prompt)
@@ -41,6 +46,42 @@ const QUERY_DECOMP = arg("query-decomp", "off")!; // off | on (split each questi
 const GRAPH_SUMMARIES = arg("graph-summaries", "off")!; // off | on (synthesize hierarchical summaries as retrievable nodes)
 const RERANK = arg("rerank", "off")!; // off | llm (LLM reranker over a larger candidate pool -> topK)
 const EMBED_MODEL = arg("embed-model"); // override minimem-graph store's local embedding (GGUF hf: path)
+// Post-fusion selection, passed straight through to minimem. Only meaningful with
+// --retrieval minimem-graph; see the guard below.
+const DIVERSITY = Number(arg("diversity", "0"));
+const RECENCY = Number(arg("recency", "0"));
+const SUPERSEDE = arg("supersede", "off")! === "on";
+const QUOTAS = (() => {
+  const raw = arg("quotas");
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`--quotas is not valid JSON: ${raw}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`--quotas must be a JSON object of type->count, got: ${raw}`);
+  }
+  return parsed as Record<string, number>;
+})();
+const SELECTION = DIVERSITY > 0 || RECENCY > 0 || SUPERSEDE || QUOTAS ? {
+  diversity: DIVERSITY,
+  recency: RECENCY,
+  supersede: SUPERSEDE,
+  ...(QUOTAS ? { quotas: QUOTAS } : {}),
+} : undefined;
+// The "kb" substrate is cognitive-core's own flat retrieval and never touches minimem, so
+// these knobs would do nothing at all there. Refuse rather than run: an arm whose config
+// silently did not apply looks exactly like an arm where the config had no effect, and this
+// eval has already lost two full runs to that confusion.
+if (SELECTION && RETRIEVAL !== "minimem-graph") {
+  throw new Error(
+    `selection flags (--diversity/--recency/--supersede/--quotas) require ` +
+      `--retrieval minimem-graph; got --retrieval ${RETRIEVAL}, where retrieval does not ` +
+      `go through minimem and the flags would be silently inert.`,
+  );
+}
 const SAMPLES = Number(arg("samples", "1")); // answers per question; score = mean (majority-of-N noise control)
 const DIMS = (arg("dims") ?? "").split(",").map((s) => s.trim()).filter(Boolean); // limit to these categories (empty = all)
 
@@ -204,7 +245,8 @@ function newAdapter(llm: LlmClient): CogcoreLiveLongMemEvalAdapter {
   return new CogcoreLiveLongMemEvalAdapter(llm, "cogcore-live", {
     topK: 16,
     embeddings: "local",
-    extractConcurrency: 3,
+    extractConcurrency: EXTRACT_CONC,
+    ...(SELECTION ? { minimemRetrieval: SELECTION } : {}),
     chunkTurns: 40,
     maxFactsPerChunk: 60,
     experienceGranularity: "chunk",
@@ -262,6 +304,15 @@ async function main(): Promise<void> {
   const sliceEnd = CONVS > 0 ? CONV_START + CONVS : instances.length;
   instances = instances.slice(CONV_START, sliceEnd);
   process.stderr.write(`[beam] ${instances.length} conversations, answer=${ANSWER_DEP}, judge=${JUDGE_DEP}\n`);
+  // One-shot config banner, mirroring the GateMem harness. A flag that silently no-ops is
+  // indistinguishable in the results from a flag that had no effect; the banner records what
+  // actually reached the run so an arm can be audited after the fact rather than trusted.
+  process.stderr.write(
+    `[beam] CONFIG retrieval=${RETRIEVAL} traverse=${GRAPH_TRAVERSE} decomp=${QUERY_DECOMP} ` +
+      `summaries=${GRAPH_SUMMARIES} rerank=${RERANK} answer-prompt=${ANSWER_PROMPT} ` +
+      `consolidation=${CONSOLIDATION} query-adaptive=${QUERY_ADAPTIVE} samples=${SAMPLES} ` +
+      `selection=${SELECTION ? JSON.stringify(SELECTION) : "off"}\n`,
+  );
 
   type Row = { conversationId: string; dimension: string; questionId: string; score: number };
   const rows: Row[] = [];

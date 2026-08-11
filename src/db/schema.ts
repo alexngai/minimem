@@ -8,8 +8,9 @@ import type { DatabaseSync } from "node:sqlite";
  * - 2: Added source column to files and chunks tables
  * - 3: Added type column to chunks table for observation type metadata
  * - 4: Added knowledge columns to chunks + knowledge_links table
+ * - 5: Added supersedes + created_at_ms to chunks for selection-aware retrieval
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export function ensureMemoryIndexSchema(params: {
   db: DatabaseSync;
@@ -103,6 +104,12 @@ export function ensureMemoryIndexSchema(params: {
   ensureColumn(params.db, "chunks", "domains", "TEXT");
   ensureColumn(params.db, "chunks", "entities", "TEXT");
   ensureColumn(params.db, "chunks", "confidence", "REAL");
+  // `supersedes` was documented in the frontmatter convention and parsed by session.ts, but
+  // never persisted — so retrieval could not tell a superseded note from a current one, and
+  // "what is the CURRENT value" queries could be answered from either. `created_at_ms` is
+  // the note's stated date (not file mtime), for recency-aware selection.
+  ensureColumn(params.db, "chunks", "supersedes", "TEXT");
+  ensureColumn(params.db, "chunks", "created_at_ms", "INTEGER");
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);`);
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);`);
   params.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(type);`);

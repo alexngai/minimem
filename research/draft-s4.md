@@ -77,52 +77,71 @@ headline number drawn from this benchmark should be reported with its end-to-end
 > sd ~1.2), but the magnitude is unreplicated. This hedge is removed or the number corrected
 > before submission.*
 
-## 4.2 Recall-only grading turns a trade into a law
+## 4.2 Compression buys cost, not quality
 
-A second grading choice converts a two-sided trade into an apparent law. Any memory system must
-choose a representation: store conversation turns verbatim, or extract derived statements from
-them. On GateMem, extraction collapsed, scoring 24.4 against verbatim's 59.1 with deletion held
-off. Read alone, that result says write-time compression is a bad idea.
+*Rewritten 2026-08-02 against the budget-controlled result. The previous version of this
+section argued that compression trades recall for synthesis and that recall-only grading turns
+that trade into a law. **The control refuted it.** Under the systems framing this material
+becomes §5 Representation.*
 
-It is not. We tested the two representations under control on LongMemEval_S \citep{longmemeval},
-holding the retrieval adapter, prompt, answer model and judge fixed and varying only the
-contents of the observation cache: derived statements in one arm, one note per turn holding raw
-text in the other, at 154 against 493 notes per instance for a 3.2:1 compression ratio. Live
-search tools were disabled in both arms, since the default setting would let answer-time search
-compensate for whatever the representation failed to supply.
+Any memory system must choose a representation: store conversation turns verbatim, or extract
+derived statements at write time. On GateMem, extraction collapses, scoring 24.4 against
+verbatim's 59.1 with deletion held off. Read alone, that says write-time compression is simply
+a bad idea, which is both too strong and for the wrong reason.
 
-**Table 5.** Representation against question type, n=200, single run.
+We tested the two representations under control on LongMemEval_S \citep{longmemeval}, holding
+the retrieval adapter, prompt, answer model and judge fixed and varying only the contents of
+the observation cache: derived statements in one arm, one note per turn holding raw text in the
+other, at 154 against 493 notes per instance. Live search tools were disabled in both arms,
+since the default setting would let answer-time search compensate for whatever the
+representation failed to supply.
 
-| | extracted | verbatim | |
-|---|--:|--:|---|
-| recall (n=98) | 85.7% | **98.0%** | verbatim **+12.2** |
-| synthesis (n=102) | **85.3%** | 79.4% | extraction **+5.9** |
-| overall | 85.5% | 88.5% | |
+Equal top-k is the wrong control. An extracted note cites roughly 2.0 source turns, so
+extraction at k=16 already reaches about 32 turns of coverage while verbatim reaches 16. We
+therefore ran a third arm at **coverage-matched k=32**, which is also generous to verbatim on
+tokens: an extracted note averages 268.8 characters against verbatim's 1001.3, so verbatim at
+k=32 carries roughly seven times the context.
 
-Neither representation dominates. Two categories carry the effect and both are mechanistically
-legible. `single-session-assistant` questions ask what the *assistant* said; extraction
-paraphrases those turns into third-person statements and the original wording is gone, giving
-61.8% against verbatim's 100.0%. `multi-session` questions require assembling evidence across
-sessions, and verbatim floods retrieval at a fixed top-k so the relevant turns fall below the
-cut, giving 76.5% against 55.9%. Two further categories are level to within a point, which
-rules out a global shift.
+**Table 5.** Representation and retrieval budget, n=200, single run per arm.
 
-This explains the GateMem result rather than contradicting it. GateMem grades exact recall of
-amounts, dates and identifiers, so it measures one side of a two-sided trade and reports it as
-a verdict on representation. We had drawn that conclusion ourselves before running the control,
-and would have published half a trade as a general finding.
+| category | extract k16 | verbatim k16 | **verbatim k32** |
+|---|--:|--:|--:|
+| multi-session | 76.5% | 55.9% | 70.6% |
+| knowledge-update | 94.1% | 97.1% | 97.1% |
+| temporal-reasoning | 85.3% | 85.3% | 88.2% |
+| **synthesis** | **85.3%** | 79.4% | **85.3%** |
+| **recall** | 85.7% | 98.0% | **99.0%** |
+| overall | 85.5% | 88.5% | **92.0%** |
 
-The general form is worth stating plainly. A benchmark that grades only one side of a design
-trade will report that trade as a law, and systems tuned against it converge on one side for
-reasons that do not survive contact with a benchmark grading the other.
+At matched coverage extraction's synthesis advantage disappears exactly, 85.3 against 85.3,
+while recall goes to verbatim by 13.3 and overall by 6.5. The 5.9-point synthesis gap measured
+at equal top-k was a **retrieval-budget artifact**, not a property of the representation.
 
-> ⏳ *One objection remains open. The verbatim arm carries 3.2x more notes at the same top-k, so
-> part of its synthesis loss could be retrieval budget rather than representation. Measured at
-> the prompt the asymmetry runs the other way, since an extracted note averages 268.8 characters
-> against verbatim's 1001.3, so equal top-k already hands verbatim roughly 3.7x more context.
-> The real asymmetry is coverage: an extracted note cites about 2.0 source turns. A
-> coverage-matched arm (verbatim at k=32) is running. The two category effects do not depend on
-> it; the aggregate exchange rate does, and is not quoted until it lands.*
+So compression does not trade quality for quality. At matched budget it is dominated. What it
+buys is **cost**: near-parity synthesis at roughly one seventh of the context tokens. The trade
+is quality against cost, and where context is cheap there is nothing to buy.
+
+That is what GateMem's collapse actually shows. Its episodes are 7 to 8K tokens, so nothing is
+context-bound; compression there costs quality and saves nothing. The result is real but it
+does not generalise, and it generalises for a different reason than we first argued.
+
+**A prediction follows, and we record it before testing it.** If compression's value is a
+function of whether context binds, extraction should pay at scales where it does, and the
+ordering above should narrow or invert at BEAM's 1M and 10M tiers. Testing this requires a
+verbatim cache built for BEAM and a stated retrieval-budget rule fixed in advance; the arm does
+not exist yet. We report the prediction rather than the result.
+
+**Threats.** n=200, single run per arm. The synthesis tie is a sum of opposing category
+effects rather than uniform parity: `multi-session` still favours extraction at matched
+coverage, 70.6 against 76.5. Cost-matched comparison, as distinct from coverage-matched, is
+untested, and it is the setting where extraction should look best.
+
+**On how this claim was reached.** It has been framed three times: first as compression being a
+bad trade, then as a two-sided exchange at a measurable rate, and now as quality against cost.
+The budget objection was raised early and wrongly dismissed by measuring *tokens*, where
+verbatim already held 3.7 times more, when the binding axis was *coverage*. Only the control
+settled it. We report this because the intermediate framing was published-quality wrong in a
+way that argument alone did not catch.
 
 ## 4.3 A shipped policy is unsatisfiable against its own labels
 

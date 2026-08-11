@@ -34,13 +34,19 @@ legible — the KB's log dump truncates (~69% of observations dropped at 1M) whi
 retrieval is invariant to store size. A three-arm decomposition isolates this from the graph
 layer, which contributes only +1.9/+1.2, inside noise.
 
-**2. No write-time extraction. → A representation trade you keep the option on.**
+**2. No write-time extraction. → Quality now, cost when you want it.**
 Under control (same adapter, retrieval, prompt, answer model, judge; only the observation cache
-differs) verbatim storage wins recall by **12.2** and loses synthesis by **5.9**. Neither
-representation dominates. That is the argument for *not extracting at write time*: the winning
-representation is task-dependent, and extraction is irreversible. Keep the turns and derive
-late. This also explains GateMem's extraction collapse (24.4 vs 59.1) as one side of a
-two-sided trade rather than a verdict.
+and top-k vary), at **coverage-matched** budget verbatim **dominates**: synthesis ties exactly
+(85.3 vs 85.3), recall goes to verbatim by 13.3 and overall by 6.5. An earlier reading of these
+arms as a −12.2/+5.9 *trade* was a retrieval-budget artifact and is refuted (R8).
+
+What compression actually buys is **cost**: near-parity synthesis at roughly one seventh of the
+context tokens. That is the argument for not extracting at write time, and it is stronger than
+the trade version. Extraction is irreversible and buys nothing on quality, so keep the turns
+and derive later if and when context cost binds. It also explains GateMem's collapse (24.4 vs
+59.1): at 7–8K-token episodes nothing is context-bound, so compression costs quality and saves
+nothing. Prediction C1-P, recorded before testing: extraction should pay at BEAM's 1M and 10M
+tiers, where context does bind. That arm is not built.
 
 **3. No retrieval-time access decision. → Governance at generation.**
 Retrieve broadly and let the model judge disclosure: **A = 7.0 ±0.41, rank 1 of 43**, ahead of
@@ -59,9 +65,12 @@ metric, while real deletion is the only configuration scoring non-zero end-to-en
 
 ## What this costs, stated up front
 
-Under comparable configurations the system is **not** state of the art: 3rd of 43 on GateMem
-(62.7 ±1.18 vs 69.5), ~5pp short on BEAM, −1.9 on LongMemEval. A prior systematic push to close
-those gaps found every lever inside the noise band. The substrate result is measured against a
+Under comparable configurations the system is **not** state of the art, and judge-matching made
+that worse rather than better. Re-scored under GateMem's own `gpt-4o`: **55.1 ±0.29 comparable
+and 67.8 ±0.93 tuned, against SOTA 69.5** — where our `gpt-4.1` judge had read 62.7 and 72.6.
+Every leaderboard comparison was mismatched in our favour by 5–8 MGS and **no "beats SOTA" claim
+survives**. Also ~5pp short on BEAM and −1.9 on LongMemEval, and a prior systematic push to
+close those gaps found every lever inside the noise band. The substrate result is measured against a
 single baseline. Deferring commitment costs tokens: on GateMem we use ~2.4× more than
 long-context (3.05M vs 1.28M), because those episodes are only 7–8K tokens and retrieval has
 nothing to save.

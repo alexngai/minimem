@@ -76,6 +76,8 @@ export function mergeHybridResults(params: {
   /** RRF rank constant (default: 60). Only used when fusion === "rrf". */
   rrfK?: number;
 }): Array<{
+  /** Chunk id, carried through so a post-fusion selection pass can join on metadata. */
+  id: string;
   path: string;
   startLine: number;
   endLine: number;
@@ -158,6 +160,7 @@ export function mergeHybridResults(params: {
     const maxRaw = fused.reduce((m, f) => (f.raw > m ? f.raw : m), 0);
     return fused
       .map(({ entry, raw }) => ({
+        id: entry.id,
         path: entry.path,
         startLine: entry.startLine,
         endLine: entry.endLine,
@@ -186,6 +189,7 @@ export function mergeHybridResults(params: {
   const merged = Array.from(byId.values()).map((entry) => {
     const score = vw * entry.vectorScore + tw * entry.textScore;
     return {
+      id: entry.id,
       path: entry.path,
       startLine: entry.startLine,
       endLine: entry.endLine,

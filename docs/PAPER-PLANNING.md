@@ -56,6 +56,35 @@ where extraction should win.
 then wrongly dismissed by measuring *tokens* (verbatim had 3.7x more) when the binding axis
 was *coverage*. The control settled it; the reasoning about what it would show did not.
 
+### C1-P — Pre-registered prediction from C1 *(recorded 2026-08-02, BEFORE any 10M result)*
+
+C1's rewritten claim implies a testable prediction, recorded here in advance so it counts as
+one. R4 is already in the refuted table as a prediction that failed; this is recorded on the
+same terms and may fail the same way.
+
+**Prediction.** Compression's value is a function of whether context is *binding*. At
+GateMem (7–8K-token episodes) and LongMemEval nothing is context-bound, so compression costs
+quality and saves nothing — observed (24.4 vs 59.1, and C1's matched-budget domination). At
+BEAM's 1M and 10M tiers context **is** binding, so extraction should pay there: the
+extracted-vs-verbatim ordering should narrow or invert as scale increases.
+
+**Falsification.** If a verbatim arm still matches or beats extraction at 10M, compression is
+not buying what this predicts, and C1's "quality-vs-cost" framing needs narrowing to the claim
+that compression is simply dominated wherever it has been measured.
+
+**What would test it, and what would not.** ⚠ **The queued 10M runs do NOT test this.** BEAM's
+existing arms (kb / minimem-flat / minimem-graph) all run over *extracted* observations; they
+vary the retrieval substrate, not the representation. Testing C1-P requires a **verbatim
+observation cache built for BEAM**, mirroring
+`evals/longmemeval/make-verbatim-cache.tmp.ts`, then a paired arm at 1M and 10M.
+
+Design caveat to settle before running it: at 10M a verbatim cache holds vastly more notes, so
+a fixed top-k floods retrieval and a coverage-matched k may be impractically large. That
+tension **is** the prediction — but it means the arm needs a stated budget rule, decided
+before the numbers are seen, or the result will be unreadable.
+
+**Status: prediction recorded, experiment not built, not scheduled.**
+
 ### C2 — The retrieval substrate, not the architecture on top of it, carries the result
 **Evidence.** Three-arm decomposition on BEAM/LOCOMO: substrate +13.1/+42.7, graph layer
 +1.9/+1.2 (inside noise). On GateMem, no baseline uses hybrid fusion at all — the paper
@@ -64,8 +93,25 @@ semantic rather than fusing.
 **Strength.** Replicated across benchmarks; the correction of our own earlier
 mis-attribution strengthens rather than weakens it.
 **Threat.** "Hybrid retrieval beats vector-only" is well established (see prior art
-below). The novel part is only that *deployed memory systems don't do it*, which is an
-observation about the field, not a technique.
+below).
+
+⚠ **The fallback framing is now REFUTED (2026-08-04).** This claim previously argued that
+the novel part was *"deployed memory systems don't do it, which is an observation about the
+field."* That observation has expired: **Mem0** offers BM25 with dense retrieval on newer
+versions, **Hindsight** runs four parallel retrieval strategies including BM25, and
+**SuperLocalMemory** implements four-channel RRF. Do not write that sentence.
+
+The GateMem-specific observation above (its paper config pins `retrieval_backend: embedding`;
+ReMeM switches rather than fuses) is narrower and still verifiable from their config — keep
+that, drop the generalisation.
+
+**What survives instead** is the *scale* result, not the technique or the field observation:
+the substrate delta widens monotonically (parity@100K → +14.7@500K → +23.2@1M →
+**+28.3 ±7.2 @10M**, the last n=4 conversations paired, t=7.91, p<0.01). See S0 in
+`contributions.md` and `prior-art-S0.md`. Note also that
+**the architecture itself is pre-empted** by vstash (2604.15484), which published the same
+sqlite-vec + FTS5 + RRF single-file stack in April 2026 — so neither the technique nor the
+implementation is claimable, only what it does at scale.
 
 ### C3 — Forgetting fails by reconstruction, not by failure to delete *(subsumed by C3b)*
 **Original evidence.** Education F ranged only 12.2–21.7 across the *entire* deletion
